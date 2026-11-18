@@ -1,0 +1,3121 @@
+[简体中文](README.md) | **English**
+
+# Wacmin
+
+**Breaking the architectural barrier between macOS and Windows, enabling bidirectional application interoperability.**
+
+Wacmin is a bidirectional interoperability suite between macOS and Windows: four directions formed by crossing two hosts with two actions.
+
+![Status](https://img.shields.io/badge/status-4%20of%204%20delivered-brightgreen?style=flat-square)
+[![GitHub license](https://img.shields.io/github/license/ntars/Wacmin?style=flat-square)](./LICENSE)
+[![GitHub Star](https://img.shields.io/github/stars/ntars/Wacmin?style=flat-square)](https://github.com/ntars/Wacmin/stargazers)
+[![GitHub Fork](https://img.shields.io/github/forks/ntars/Wacmin?style=flat-square)](https://github.com/ntars/Wacmin/network/members)
+![GitHub Repo size](https://img.shields.io/github/repo-size/ntars/Wacmin?style=flat-square&color=3cb371)
+[![GitHub Repo Languages](https://img.shields.io/github/languages/top/ntars/Wacmin?style=flat-square)](https://github.com/ntars/Wacmin/search?l=javascript)
+
+[![Host](https://img.shields.io/badge/host-macOS%20%7C%20Windows-000000.svg?style=flat-square&logo=apple&logoColor=white)](#)
+[![Directions](https://img.shields.io/badge/directions-4-2ea44f.svg?style=flat-square)](#)
+[![Contract](https://img.shields.io/badge/contract-shared%20layer-8957e5.svg?style=flat-square)](#)
+[![Dependencies](https://img.shields.io/badge/dependencies-0%20third--party-8957e5.svg?style=flat-square)](#6-technology-stack-and-dependency-inventory)
+
+---
+
+## 1. Project Name and Positioning
+
+**Name**: Wacmin. Formed from the initials of **W**indows **a**nd **Mac** **in**terop.
+
+**One-sentence positioning**: It decomposes "application interoperability between macOS and Windows" into four directions. Each direction stands independently, yet all four share a single external contract layer.
+
+**Three boundaries of the positioning**:
+
+1. **It is an interoperability suite, not a virtual machine.** It does not provide a complete Windows or macOS runtime environment; it solves exactly two classes of concrete actions: "produce an installer" and "run a program".
+2. **The four directions are mutually independent.** Dependencies, tests and releases of any one direction do not affect the other three. There is no monolithic bundle that must be installed wholesale.
+3. **Contract first.** Exit codes, error-code segments and report structure are defined at a single point in `contracts/`, and all four directions must comply. This is the sole reason they can be called "one project" rather than "a collection of four projects".
+
+**Relationship to tools such as PCL**: The `mac2win` direction of this project (formerly named arm2exe) only addresses "building a Windows package on a Mac". It does not involve game-launcher business logic. The two are different product categories.
+
+### 1.1 How This Documentation Is Organised
+
+This repository adopts a **single-document model**: all explanatory material is consolidated in `README.md` (Chinese) and `README_EN.md` (English) at the repository root, while licensing and compliance statements are consolidated in `LICENSE` and `NOTICE` at the root. No subdirectory retains any standalone document.
+
+There are three reasons:
+
+1. **The five subprojects share one contract and one set of external tools.** Splitting the dependency inventory into five copies guarantees that the same 7-Zip entry is written five times with five possibly divergent version numbers.
+2. **Readers need cross-direction comparison.** The capability boundaries of the four directions are only intelligible in contrast. Once dispersed across five documents, readers must either switch back and forth or read one and mistakenly assume the others behave the same.
+3. **Legal texts should not be dispersed.** The three MIT texts have identical content with different attribution formats; maintained separately, there is a persistent risk that one copy is left unamended.
+
+This file is therefore organised into twenty chapters, each subdivided by direction. **Every conclusion in any section is grounded in code and measurement**, never in second-hand numbers quoted from an older sub-document.
+
+---
+
+## 2. Project Overview
+
+### 2.1 Background
+
+Interoperability between macOS and Windows has long relied on three classes of solutions: virtual machines (Parallels, VMware), compatibility layers (Wine, CrossOver), and cloud desktops. Each carries a cost: a virtual machine requires a complete system image, a compatibility layer has incomplete coverage, and a cloud desktop depends on network and subscription.
+
+In independent-development scenarios, the real requirement is often far narrower: **just build a Windows installer on this Mac and send it to users**, or **just run an exe someone sent me to see how it behaves**. Installing an entire virtual machine for such needs is a poor cost-benefit trade.
+
+Concretely, the background of each direction differs.
+
+**Mac2Win**: Producing Windows x86 packages on Apple Silicon has long been assumed to require either a Windows machine or a full cross-compilation toolchain. In reality, Electron ≤ 43, NW.js and Node.js all publish `win32-ia32` or `win-x86` prebuilt binaries upstream. Downloading them and packing them into NSIS requires no compiler at all.
+
+**ExeOnMac**: Running Windows software on Apple Silicon Macs has three conventional answers. A virtual machine offers the best isolation but requires a whole Windows installation, with disk usage measured in tens of gigabytes. A commercial compatibility layer works out of the box but is closed-source and paid, with artefacts confined to a vendor-managed shared directory. Manual Wine configuration is the most flexible but demands that users understand `WINEPREFIX`, `WINEDLLOVERRIDES` and `wineboot`. More importantly: **none of these three turns the Windows application into that icon in the Dock**. What users get is still a launcher or a container-management interface.
+
+**Win2Mac**: The reverse direction is nearly vacant. Producing a macOS `.app` on Windows is assembly rather than compilation: lay out the `Contents/` directory structure, write a valid `Info.plist`, and pack a zip that preserves Unix permission bits. The difficulty lies entirely in details: how zip central-directory external attributes store the mode, bundle identifier uniqueness, and inferring permissions by role on Windows.
+
+**AppOnWin**: Darling officially supports Linux only; on Windows it requires WSL2, and GUI support is labelled "basic and experimental" upstream. This is the only one of the four directions that may fail to hold, and it is therefore placed last with a pre-defined fallback path.
+
+### 2.2 Problems to Solve
+
+1. **Incomplete direction coverage.** Most existing tools are unidirectional: either running Windows programs on a Mac (the Wine family) or building Windows packages on a Mac (the cross-compilation family). The reverse direction—building macOS packages on Windows and running macOS programs on Windows—is nearly vacant.
+2. **Inconsistent behaviour.** If four directions each design their own exit codes and error formats, the scripting layer must implement four sets of branching logic and cannot drive them uniformly.
+3. **Incomparable determinism.** Some directions rest on mature foundations (NSIS packaging, Wine execution) while others rest on a foundation still in the experimental stage (Darling). Discussing "support" without distinguishing them misleads users.
+4. **Artefacts that cannot be identified or uninstalled.** Windows installers write files into a shared prefix by default, so multiple applications interfere with each other; after installation users cannot find where the program went; after deletion registry entries and DLLs remain in the prefix and accumulate.
+5. **Verifiers that lie.** Most packaging tools report only "build succeeded" without verifying the artefact; a few verify, but degrade missing dependencies into warnings rather than explicit failure—so the user receives a report marked "verification passed" while not a single file among four thousand in the payload was compared.
+
+### 2.3 Core Approach
+
+**Host × action = 2 × 2, exactly filling the matrix with no missing cell.**
+
+| Order | Codename | Host | Action | Directory | CLI | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Mac2Win** | macOS | Produce Windows installer | [`mac2win/`](./mac2win) | `mac2win` | Complete |
+| 2 | **ExeOnMac** | macOS | Run Windows programs | [`exeonmac/`](./exeonmac) | `wepack` | Complete |
+| 3 | **Win2Mac** | Windows | Produce macOS app bundle | [`win2mac/`](./win2mac) | `win2mac` | Complete |
+| 4 | **AppOnWin** | Windows | Run macOS programs | [`apponwin/`](./apponwin) | `apponwin` | Assessment-capable |
+
+**Development order is sorted by determinism**: finish what can succeed first, leave what is most likely to fail for last. The reasoning is in section 5.1.
+
+The four directions are structurally isomorphic: each subproject follows the same seven-layer skeleton, with only the "input artefact" and "output artefact" swapped.
+
+| Layer | Responsibility | mac2win | exeonmac | apponwin | win2mac |
+|---|---|---|---|---|---|
+| `bin/` | Single command entry, supports `--json` and `--report` | ✓ | ✓ | ✓ | ✓ |
+| `config` | Configuration normalisation | ✓ | ✓ | CLI flags | CLI flags |
+| `errors` | Error codes + exit codes | ✓ | ✓ | ✓ | ✓ |
+| `detect` | Identify the input artefact | Framework detection | Installer detection | Package format detection | Framework detection |
+| `build` | Phased orchestration, stop on failure | 8 phases | 8 phases | 8 phases (incl. assessment) | 8 phases |
+| `verify` | Artefact verification | 11 checks | 10 checks | Structural checks | Structural checks |
+| `report` | Unified report | ✓ | ✓ | ✓ | ✓ |
+
+### 2.4 Applicable Scenarios
+
+- Independent developers working on macOS who need to ship installers to Windows users;
+- Quickly validating how a Windows program behaves on a Mac without starting a virtual machine;
+- Producing macOS app bundles on Windows (assembly-based, no compilation);
+- Making Windows software appear in Launchpad and Spotlight like a native application;
+- Migrating an already-configured Windows application between machines;
+- Needing a uniform scripting interface to drive several of the above directions;
+- Studying Wine prefix isolation and reuse mechanics.
+
+### 2.5 Non-Goals
+
+- No complete virtual machine: no system images, no hardware emulation.
+- No game launcher: no game version management or mod handling.
+- No performance promises: compatibility-layer performance is determined by the layer beneath; this project only wires things together.
+- No promise that AppOnWin will hold: Darling's feasibility on Windows is unverified; see section 5.1.2.
+- No self-developed PE loader, no FEX integration, no API semantic mapping layer.
+- No macFUSE, kext or system extension installation.
+- No modification of original installers and no modification of installed file contents; only path redirection and wrapping.
+- No uploading of any user data over the network.
+
+---
+## 3. Core Features
+
+### 3.1 Mac2Win: Producing Windows Installers on macOS
+
+| Capability | Description | Status |
+|---|---|---|
+| Framework detection | Automatically identifies Electron / NW.js / Tauri / plain Node / static site | Complete |
+| Runtime acquisition | Downloads the Windows x86 prebuilt runtime for the corresponding framework | Complete |
+| Dependency collection | Walks the require graph from the entry point, intercepts native modules | Complete |
+| Staging and shims | Lays out directories per framework, injects desktop-shell compatibility shims | Complete |
+| NSIS packaging | Generates the install script and compiles it into an `.exe` | Complete |
+| Artefact verification | Eleven checks: PE format, architecture, GUI subsystem, required files, payload runtime architecture, per-file hash comparison | Complete |
+| Graphical interface | Local console: enter paths, adjust parameters, watch progress and reports | Complete |
+
+**Four concrete routes** (one orchestration, four artefact shapes):
+
+| Route | Approach | Artefact shape | Measured status |
+|---|---|---|---|
+| A · Prebuilt binary repackaging | Download the framework's official x86 prebuilt package, insert the user's project, rename, wrap with NSIS | Native window | End-to-end verified: Electron 43, NW.js 0.90 |
+| B · Node runtime + custom launcher | Use the official Node `win-x86` build to host application logic; write a zero-dependency launcher that spawns the host process, serves static files and opens the browser | Browser UI | End-to-end verified: the Ondra (Tauri) project |
+| C · cargo-xwin Rust shell | `cargo xwin build --target i686-pc-windows-msvc` compiles a genuine Tauri shell on macOS | Native window | Code ready; not run end-to-end on this machine due to sandbox limits |
+| D · Roads not taken | Running makensis under Wine, Zig cross-compilation, Docker Windows containers, a self-developed PE linker, swapping in the system WebView2 | — | Reasons recorded per entry |
+
+**Eight-phase orchestration**: `preflight` → `project-build` → `runtime` → `collect` → `stage` → `manifest` → `package` → `verify`. Any failing phase halts the run and all subsequent phases are marked `skipped`.
+
+### 3.2 ExeOnMac: Running Windows Programs on macOS
+
+| Capability | Description | Status |
+|---|---|---|
+| Installer detection | Distinguishes NSIS / Inno Setup / InstallShield / MSI / Burn / Squirrel | Complete |
+| Static extraction | Restores the file tree and main-exe candidates without installing | Complete |
+| Wine runtime | Bundled or reused Wine, with Rosetta 2 translating x86_64 | Complete |
+| Prefix and silent install | Creates the Wine prefix, applies each installer's silent parameters | Complete |
+| `.app` packaging | Generates Info.plist, icon, Swift launcher | Complete |
+| Layered packaging | Three stages: base, layers, recipes | Complete |
+| Recipe library | Per-program compatibility recipes (`~/.wexe/recipes`) | Complete |
+
+The current implementation stage is **phase 5** (queryable via `wepack version`). All tests pass, with **0 skipped**. Test samples are always generated on the spot: MSI is assembled as a CFB container in pure Python, NSIS is compiled with `makensis`, and Inno is compiled with ISCC under wine and then unpacked back with `innoextract`. Wine is not distributed with this project; `wepack runtime install` fetches it from upstream.
+
+#### 3.2.1 Installer Detection
+
+The decision order is fixed, and **hard structural evidence precedes string evidence**. The order cannot be swapped: Burn is itself an MSI, and NSIS strings can appear inside other installers' resources.
+
+| Type | Evidence | Measured confidence |
+|---|---|---|
+| MSI | CFB header `D0CF11E0A1B11AE1` + root storage CLSID `000C1084-0000-0000-C000-000000000046` | 0.99 |
+| WiX Burn | Same, plus stream names containing `WixBundle*` | 0.90 |
+| NSIS | `DEADBEEF` at overlay `+4`, `NullsoftInst` at `+8`; `.ndata` section | 0.99 |
+| Inno Setup | Payload contains `Inno Setup Setup Data (x.y.z)`; `.itext` section | 0.99 |
+| InstallShield | `ISSetupStream` / `_setup.dll` strings | 0.35–0.90 |
+| Squirrel | `Squirrel` string plus a sibling `.nupkg` | 0.50–0.90 |
+
+Every decision emits an evidence chain (the `evidence` array) explaining why the type was chosen, so a misjudgement can be investigated.
+
+**Why MSI detection uses the CLSID rather than stream names**: MSI stream names inside a CFB container are privately encoded. `_StringPool` is actually stored as mojibake such as `䡀㼿䕷䑬㹪䒲䠯`, so lookup by name necessarily fails. The root storage CLSID is a structural field, not subject to that encoding, and is therefore the most reliable marker.
+
+#### 3.2.2 Static Extraction
+
+| Type | Path | Note |
+|---|---|---|
+| NSIS | 7-Zip extracts directly | LZMA / bzip2 / deflate fully supported in one pass |
+| Inno Setup | innoextract (the only viable path) | 7-Zip can only slice out the PE section; now reported honestly instead of as a false success |
+| MSI | msiextract preferred, three-step fallback | See below |
+
+The MSI fallback has three steps: 7-Zip extracts the embedded `cab` files, each `cab` is expanded, then MSI `File` and `Directory` tables are used to restore `fil<hex>` hash names into real file names and directories. Skipping the first two steps would leave the user staring at hundreds of hash-named files, which amounts to no extraction at all.
+
+#### 3.2.3 Entry Point Location
+
+Which exe among the extracted files is the one the user wants to double-click? The scorer weights location, subsystem, size, filename match, sibling DLL count and icon resources, and every adjustment is written into `reasons`. Key weights:
+
+| Signal | Score |
+|---|---|
+| Under Program Files | +25 |
+| At the extraction root | +25 |
+| GUI subsystem | +20 (console −30) |
+| Filename matches product name | +35 (approximate +20) |
+| ≥ 3 sibling DLLs | +12 |
+| Sibling `.pak` / `.asar` / `.resources` / `.dat` present | +8 |
+| Contains icon resources | +10 |
+| In an installer temp directory (`$TEMP` / `$PLUGINSDIR` / `AppData/Local/Temp` / top-level `temp/`) | −60 |
+| Filename contains `unins` / `setup` / `update` / `node` / `python` | −45 |
+
+Two kinds of signal **exclude outright** rather than deduct: an exe matching a runtime component name (`msedge` / `webview2` / `edgecore` etc.) or a runtime path marker (`/windows/`, `/common files/`) never reaches the candidate list. Deduction is not enough — an Electron app's bundled `msedge.exe` has the size and GUI traits to outrank the real entry point.
+
+Of these two layers, only `/dotnet/` admits a product-name exemption. The other markers say "this is the system's or the installer's own area", which has nothing to do with the product name — a product called Windows still should not make `system32/x.exe` the entry point. `/dotnet/` is different: it is a **legitimate install location**. The .NET runtime itself installs as `dotnet/dotnet.exe`, and `RUNTIME_COMPONENTS_EXEMPTABLE` already accepts that "when the product is .NET, `dotnet.exe` is the main program". Before the fix the path layer excluded unconditionally: `dotnet/MyDotnetApp.exe` with product name `MyDotnetApp` returned nothing — an ordinary app unrelated to .NET, vanishing entirely just because it was installed under a `dotnet/` subdirectory. The exemption uses the same predicate as the component-name layer: does the filename match the product name.
+
+`$INSTDIR` is **not** on that list: it is the install target directory the user chose, so `$INSTDIR/App.exe` is precisely the program being installed.
+
+Blacklists yield when the product name matches. The product name comes from the installer's own version resource — the author wrote it, so it outranks any heuristic. When the product is called Node.js, `node.exe` does not take the −45 for `node`; when it is called Chromium, `chromium.exe` is not excluded by the runtime component rule. The failure that motivated this was measured, not hypothetical: `node.exe` earned +20 and then took an unconditional −45, letting `uninstall.exe` overtake it on GUI +20 alone. The user double-clicked and got an uninstaller.
+
+Measured: in an NSIS sample `ondra.exe` scored 75 while `node/bin/node.exe` was penalised to −35, giving the correct ordering. In an MSI, `pwsh.exe` and `createdump.exe` were correctly separated.
+
+Product-name tokenization must also split on `.`. It originally split only on `-` and `_`, so `Microsoft .NET Runtime` yielded a dotted `.net`, while the normalized form of the exe name is `dotnet` — `.net` is neither a substring nor a superstring of it, so the two could never match. The consequence is not "slightly off ordering" but **an entirely empty directory result**: `dotnet.exe` earns no +20 similarity points, then loses 45 to the `dotnet` blacklist entry, so its total goes negative and `rank_candidates` filters it out. A directory containing the .NET runtime was therefore judged to have no executable at all, and install reported "entry not found". An empty result is harder to spot than a wrong one — at least a wrong program can be double-clicked and tried. `dotnet` was also added to the exemption set: the exclusion layer already accepted that `dotnet.exe` is the main program when the product is .NET (`RUNTIME_COMPONENTS_EXEMPTABLE`), while the penalty layer kept deducting 45 — two rules contradicting each other.
+
+The blacklist matches by **substring** and breaks on the first hit, so entry order carries meaning: if `a` is a substring of `b` and `a` comes first, `b` can never be reached — every name containing `b` also contains `a`. The list originally held 28 entries, of which 6 (`uninst` / `uninstall` / `updater` / `dxsetup` / `vc_redist` / `installer`) were entirely swallowed by shorter entries ahead of them and never fired once, annotated with a comment claiming "each has its own target, do not delete as redundant". That comment was wrong: it confused "different targets in theory" with "actually reachable in code". The list is now 22 entries with unchanged coverage (`unins` still catches `uninstall.exe`, `install` still catches `installer.exe` / `InstallShield_*.exe`, `setup` still catches `dxsetup.exe`, `redist` still catches `vc_redist.x64.exe`), and a test enumerates every `(a, b)` pair so nobody can later add a short prefix and turn the entries behind it into decoration. The runtime component table and its exemption table obey the same constraint and are guarded the same way.
+
+Scanning has two independent limits: `max_files` caps how many candidates are collected, `max_probes` caps how many files are opened for probing. The latter guards a different failure — extensionless files each need a 2-byte MZ header read, and files that fail the probe never become candidates, so they do not consume `max_files`. Measured: 6000 extensionless non-PE files under `max_files=50` still took 7.8 seconds, essentially the same as `max_files=4000`, so the limit did nothing; a separate `max_probes` brought the same case down to 93 ms. Sibling directory features (DLL count, resource suffixes) are cached per directory and enumerated once per scan — the original code re-enumerated the same directory for every exe, costing 3.5 seconds for 800 exes in one directory.
+
+Ties are broken by **directory depth**, not by path character length. The two are not equivalent: character length folds filename length into apparent depth. Measured, with both candidates at 50 points: `d/e.exe` (depth 1, 7 characters) outranked `root-program-with-long-name.exe` (depth 0, 31 characters) — yet "at the extraction root" is a +25 signal that a short filename should not override. The sort key is `(-score, path depth, character length, path)`, with the last term existing only to keep output stable.
+
+After installation, the fallback layer that looks for the main executable back inside the prefix must re-check that the filename relates to the product name. In the scorer the product name is worth only +35 points, while a whole-directory scan adds "under Program Files" +25, "GUI" +20, and "has an icon" +10 — 55 points combined, enough for a leftover program from a failed install to rank first. Measured on this machine's real base layer, searching `Program Files/` for `Notepad`, `TotallyDifferentApp`, and `Zzzz` returned the same `Windows NT/Accessories/wordpad.exe` all three times: the product name had no effect on the fallback result, and installing Notepad yielded WordPad. This kind of error raises nothing and crashes nothing — it just quietly picks the wrong program. The gate reuses the scorer's normalization (`_normalize` strips separators and digits, `_squash` strips separators only) and accepts only **equality / prefix / suffix**, not arbitrary substrings — otherwise the two-character product name `Pa` would match the middle of `wordpad`. An empty product name passes through: with no basis to filter on, the old behaviour is kept.
+
+Prefix and suffix matches additionally require a **length difference of at least 2**. When the two differ by a single character, "prefix" and "a similarly spelled different word" cannot be told apart: `mode` is a prefix of `modem`, yet `Modem.exe` is plainly not the program for a product named `mode`. This miss really did slip through — the claim-the-subdirectory check described in the next paragraph had already been fenced by word boundaries, but the fallback layer let it back in, and the end-to-end result was still wrong. Equality is always accepted, regardless of length.
+
+The layer that claims a subdirectory by product name (path ①) must also compare by **word**, not by character. The original predicate was `k in name.lower() or name.lower() in k`; string substrings have no word boundaries, so a short word bites into the middle of a longer one: `Modem` matched by the product name `mode`, `Downloads` by `load`, `appdata` by `App`. The first two only claim the wrong directory; the third is worse — once subdirectories of `AppData/Local` are claimed by `app`, `best_candidate` immediately returns some exe inside one of them. Names are now split into word sequences (`7-Zip 24.08` → `['7','zip','24','08']`) and a **contiguous run of words** is required. Both directions are kept: product names are often longer than directory names, so `Visual Studio Code` installs into a directory called `Code/`, and dropping the reverse direction would break path ① entirely — yet that is the only path Electron-style installers can take.
+
+#### 3.2.4 Prefix Creation and Silent Installation
+
+Layers are cloned into the bundle in order with APFS clonefile, `dosdevices/c:` (a relative link) and `dosdevices/z:` (pointing at `/`) are created, placeholder registry files are filled in, and finally `system32` non-emptiness and link validity are verified.
+
+Silent installation applies the parameter table per installer type and reaches the original installer via drive `Z:` (the installer is never copied into the prefix). The whole process is written to `install.log`. Timeout-forced cleanup is supported, as are installers that never exit after finishing (see highlight twelve in section 4.2).
+
+#### 3.2.5 Runtime and Environment Self-Check
+
+`wepack runtime` manages the Wine runtime from three sources, in descending priority:
+
+| Source | Command | Network | Note |
+|---|---|---|---|
+| Local archive | `--archive x.tar.xz` | No | Most controllable, recommended for offline environments |
+| CrossOver / Whisky | `--from-vendor` | No | Copies only the Wine runtime directory, leaves the original app untouched |
+| GitHub | Default | Yes | Gcenx `macOS_Wine_builds` devel build, about 225 MB |
+
+`wepack doctor` checks Rosetta 2, the Wine runtime (including architecture), the Python version, `sips`, `iconutil`, 7-Zip, optional tools and directory writability item by item, and prints copy-pasteable remediation commands for anything missing.
+
+### 3.3 Win2Mac: Producing macOS App Bundles on Windows
+
+| Capability | Description | Status |
+|---|---|---|
+| Directory assembly | Generates the `.app` structure (`Contents/MacOS`, `Contents/Resources`) | Complete |
+| Info.plist generation | Template-driven, fields configurable, authoritative validation via `plutil` | Complete |
+| Permission preservation | A custom zip writer preserves Unix mode, so `0755` survives extraction | Complete |
+| zip packaging | Produces a transferable zip | Complete |
+| File association | `--associate` repeatable, generates `CFBundleDocumentTypes` | Complete |
+| Artefact verification | Structure, plist fields, executable permission bits, Mach-O type | Complete |
+| Contract integration | Wired into the shared contract layer | Complete |
+| bundle id uniqueness | Non-ASCII application names are normalised with a hash suffix to avoid collisions | Complete |
+
+All tests pass, and a real `.app` directory plus zip can be produced.
+
+**Why this direction has the highest determinism**: it involves no compilation, only assembly. It is fully isomorphic to Mac2Win (same 8 phases, same error-code segments, same report structure), so the implementation could be transplanted directly.
+
+**What it does not do**: it does not compile Mach-O, does not code-sign, does not notarise, and cannot produce a dmg. The file pointed to by `--executable` must be supplied by the user; if it is not a Mach-O, the command warns explicitly rather than silently proceeding. `hdiutil` / `codesign` / `notarytool` are macOS-exclusive tools, which is a hard platform boundary.
+
+### 3.4 AppOnWin: Running macOS Programs on Windows
+
+| Capability | Description | Status |
+|---|---|---|
+| Structure parsing | Reads the `.app` directory, `Info.plist`, Mach-O header | Complete |
+| Framework determination | Infers the technology stack from binaries and framework dependencies | Complete |
+| Portability assessment | Three-level verdict `likely` / `unlikely` / `unknown` | Complete |
+| Feasibility spike | Three states: `pass` / `fail` / `blocked` | Complete (this machine reports `blocked`) |
+| Command-line program execution | Load and execute | To be verified |
+| GUI program execution | AppKit window | To be verified (the decisive gate) |
+
+All tests pass. `assess` and `parse` are pure read operations that **run on any platform**; only `spike` requires a real Windows + WSL2 + Darling environment.
+
+**Spike gates and verdict semantics**: all three gates must pass before proceeding. Gate 2 (loading a minimal AppKit window) is decisive—failing it demotes AppOnWin to a "compatibility assessment tool" (reporting whether something can run, without running it), removing it from the mainline. When the environment is unavailable the result is `blocked` rather than `pass`; **`blocked` is not `pass`**, and the data structure keeps them distinct.
+
+**Measured sample**: `Calculator.app` assessed to 2 binaries, 21 framework dependencies and 3 frameworks explicitly unsupported by Darling. Frameworks absent from the list are always `unknown`; availability is never assumed.
+
+### 3.5 Shared Contract Layer
+
+The single point of definition for consistent external behaviour across the four directions.
+
+| File | Content | Who reads it |
+| --- | --- | --- |
+| `contracts/exit-codes.json` | Unified exit codes | All four CLIs, `console/` |
+| `contracts/error-prefixes.json` | Error-code prefixes and segment allocation | Each direction's `errors` module |
+| `contracts/run-report.schema.json` | `--json` / `--report` output structure | All four CLIs, `console/` |
+| `contracts/validate.mjs` | Contract self-check + report validation | CI and local checks |
+
+`console/` recognises only the format defined here; any direction changing a field name must change it here first.
+
+### 3.6 console: Unified Entry Point for the Four Directions
+
+| Capability | Description | Status |
+|---|---|---|
+| Status listing | `list` shows the availability of all four directions | Complete |
+| Subcommand forwarding | `run <direction> <subcommand> [args]` | Complete |
+| Aggregate self-check | `doctor` runs all four directions' `doctor` in parallel | Complete |
+| Contract checking | `contract` really invokes each direction and validates report compliance | Complete |
+| Web dashboard | Local service + SSE progress push + history persistence | Complete |
+
+All tests pass. The responsibility boundary covers exactly three things: locate a direction's CLI and spawn it as a subprocess, read back its `--report` JSON and render it, and check whether the four directions genuinely honour the contract. Seventeen of those tests guard that this module's contract checker and `contracts/validate.mjs` must reach the same verdict on the same report — two independent implementations will diverge, it is only a matter of time.
+
+**No build logic is implemented here.** Rewriting the packaging flow in this layer would create a second source of truth, and the two would inevitably diverge over time.
+
+### 3.7 ai: Handing the Four Directions to AI Callers
+
+Four integration forms, all sharing the same dispatch layer (`console/src/directions.mjs`). No build logic is reimplemented.
+
+| Form | Entry point | Audience | Status |
+|---|---|---|---|
+| MCP server | `ai/bin/wacmin-mcp.mjs` | Clients supporting MCP, e.g. Claude Desktop, WorkBuddy, Cline | Complete |
+| Unified CLI | `ai/bin/wacmin.mjs` | Scripts and agent tool calls | Complete |
+| Skill | `ai/skills/wacmin/SKILL.md` | Lets an agent decide *when* this repository applies | Complete |
+| Expert package | `ai/experts/wacmin-expert.md` | When judgement criteria are needed rather than steps | Complete |
+
+**MCP tool list** (six tools, grouped by intent rather than mapping one tool per subcommand):
+
+| Tool | Purpose | Read-only |
+|---|---|---|
+| `wacmin_list_directions` | What each of the four directions supports, produces, and which host it needs | Yes |
+| `wacmin_doctor` | Environment self-check with install commands for missing tools | Yes |
+| `wacmin_build` | Produce artefacts (the only operation that writes to disk and may run for minutes) | No |
+| `wacmin_verify` | Validate an existing artefact without rebuilding | Yes |
+| `wacmin_assess` | Static compatibility assessment; executes no programs | Yes |
+| `wacmin_run` | Escape hatch: exact subcommand and arguments, passed straight through | No |
+
+All tests pass. The transport layer follows MCP 2025-06-18 stdio strictly: newline-delimited JSON-RPC, `stdout` carrying protocol messages only, all logging on `stderr`.
+
+**Messages are strictly serialized.** A `tools/call` may be `build` or `package`, which write artifacts; two running in parallel contend for the same output directory, overwrite each other's intermediate files, and yield a half-finished product while both calls report success. Cancellation notifications are the sole exception — they must be able to interrupt an in-flight task immediately, and queueing them would make them pointless.
+
+**Why not the official SDK**: this repository has zero third-party dependencies throughout. The stdio part of MCP is small (newline framing plus a handful of method names); `protocol.mjs` and `server.mjs` together are under 700 lines — readable, testable, dependency-free. Pulling in the SDK would turn "clone and run" into "npm i first".
+
+**Why six tools instead of twenty-plus**: the four directions expose over twenty subcommands in total. Flattening all of them into tools leaves an agent unable to choose — the differences between tool names are not visible to it, so it can only guess. Grouping by intent gives every tool a clear moment of use, and unmodelled options go through `wacmin_run`.
+
+---
+## 4. Key Highlights
+
+This chapter is organised by direction. Every entry follows the same structure: **highlight name / value / implementation / differentiation / evidence**. All evidence is measured; nothing is optimistic without basis.
+
+### 4.0 Cross-Cutting Highlights
+
+#### Highlight 1: A complete 2×2 matrix with no missing cell
+
+- **Name**: Directional completeness.
+- **Value**: Solves the "unidirectional only" problem. Existing tools support either running Windows programs on a Mac or building Windows packages, never the reverse.
+- **Implementation**: Host (macOS / Windows) × action (produce installer / run program) = 4 directions, each implemented.
+- **Differentiation**: The four directions live in one repository and share one contract layer, rather than being scattered across four unrelated projects.
+- **Evidence**: The directories `mac2win/`, `exeonmac/`, `win2mac/` and `apponwin/` all exist and are wired into the contract; `node console/bin/wacmin-console.mjs contract` passes the probes for all four.
+
+#### Highlight 2: Contract first, so the four directions behave identically
+
+- **Name**: Single-point contract definition.
+- **Value**: Solves "four sets of exit codes means four sets of branching in the scripting layer".
+- **Implementation**: Exit codes, error-code segments and report structure are defined once in `contracts/`; `validate.mjs` performs contract self-checks and report validation.
+- **Differentiation**: Most multi-direction tools design their error formats independently, making uniform driving from above impossible.
+- **Evidence**: Three iron rules (exit codes are append-only, error-code segments never cross boundaries, stdout carries only JSON when `--json` is set) are hard-coded in `contracts/` and each direction's errors module, and the `console` contract check genuinely invokes each direction to verify them.
+
+#### Highlight 3: Development ordered by determinism, risk deferred to last
+
+- **Name**: Determinism-first development ordering.
+- **Value**: Solves "build the hardest thing first, then watch everything collapse when it fails".
+- **Implementation**: Mac2Win (converged) → ExeOnMac (mature foundation, just a lot of work) → Win2Mac (pure assembly, highest determinism) → AppOnWin (experimental foundation).
+- **Differentiation**: Most projects order by "feature importance", which front-loads unstable foundations and drags everything down when they fail.
+- **Evidence**: Even if AppOnWin fails entirely, the first three still stand—the project has three legs.
+
+#### Highlight 4: AppOnWin can be demoted; it is not all-or-nothing
+
+- **Name**: Pre-defined fallback path.
+- **Value**: Solves "what to do when an experimental direction fails".
+- **Implementation**: Three spike gates, of which **gate 2 (loading a minimal AppKit window) is decisive**. Failing it demotes AppOnWin to a "compatibility assessment tool", removing it from the mainline.
+- **Differentiation**: Most projects have only "do it" or "don't do it" for experimental features.
+- **Evidence**: The fallback rule is stated in section 5.1.2; the three-state spike result (`pass` / `fail` / `blocked`) is distinct in the data structure, and `blocked` is never treated as `pass`.
+
+### 4.1 Mac2Win
+
+#### Highlight 5: Two hours forty-one minutes → fifty-six seconds; 110× from one fix
+
+- **Value**: The Ondra project initially took **6241 seconds (1 h 44 min)** per build and produced **51,534 files**. This was not an environment problem but a design defect.
+- **Implementation**: `copyTree` accepts `skipDirs` and skips `node_modules` at any depth when copying dependency packages—dependencies are already collected centrally and flattened at the **same level**, so the nested copy is redundant.
+- **Differentiation**: The common approach adds `dereference: true` to `fs.cp` to expand symlinks, but under pnpm layout every package symlinks its dependencies into its own `node_modules`, so expansion turns a symlink farm into real files.
+- **Evidence**:
+
+| Metric | Before | After |
+| --- | --- | --- |
+| Payload file count | 51,534 | **6,722** |
+| Build duration | 6241 s | **56.5 s** |
+| Dependency package files | 3777 (50k after expansion) | 3306 |
+
+Measured: **80 of 83** dependency packages carried their own `node_modules`. That is the source of the bloat.
+
+#### Highlight 6: Symlink cycles deduplicated by `(dev, inode)`
+
+- **Value**: `fs.cp({dereference:true})` expands infinitely on a tree containing symlink cycles. The Ondra project had 316 symlinks including an `A → B → A` cycle; `fs.cp` ran for six minutes and was still growing at 374 MB with no sign of stopping.
+- **Implementation**: Deduplicate by `(dev, inode)` so that one physical directory is copied exactly once and subsequent encounters are skipped. This solves bloat and infinite recursion at the same time.
+- **Differentiation**: Imposing a recursion-depth limit truncates legitimate deep directories; comparing path strings misses the case where different symlinks resolve to the same inode.
+- **Evidence**: The same project went from six minutes of no progress to 56.5 seconds, producing 6,722 files.
+
+#### Highlight 7: Artefact verification is a hard gate, and it does not lie
+
+- **Name**: Three-state artefact verification.
+- **Value**: Solves "build succeeded but the artefact is unusable", and the more insidious "the verifier reported success but nothing was actually verified".
+- **Implementation**: Eleven checks are decomposed into two orthogonal dimensions, `ok` and `complete`. `ok` answers "were problems found"; `complete` answers "was everything verified". When verification is incomplete the exit code is 5 with an explicit "incomplete" report; the word "passed" is never printed.
+- **Differentiation**: Most packaging tools report only "build succeeded" without verifying the artefact; a few verify but degrade missing dependencies into warnings instead of explicit failure—the user receives a report that lied.
+- **Evidence**: Per-file SHA-256 comparison of 4060 files completes in the order of two seconds. When 7-Zip is missing the CLI prints "verification incomplete: N items were not verified" with an itemised list, and exits with code 5.
+
+#### Highlight 8: arm64 macOS can indeed produce Windows x86 native GUI programs
+
+- **Value**: The Tauri Rust shell was judged "impossible to compile on a Mac" for lack of an `i686-pc-windows-msvc` toolchain. That judgement was wrong.
+- **Implementation**: `i686-pc-windows-msvc` is a Rust tier-2 target and can be compiled on non-Windows hosts. What is missing is not the compiler but **MSVC CRT headers and import libraries**, obtainable from Microsoft's official CDN—exactly what `cargo-xwin` does.
+- **Differentiation**: Most approaches stop here and take the "browser UI + Node runtime" fallback. This project implements both: the fallback route is the default, and `buildRustShell: true` selects the native shell.
+- **Evidence** (2026-11, M-series Mac / arm64):
+
+```
+rustc 1.100.0 · cargo-xwin 0.23.1
+cargo xwin build --target i686-pc-windows-msvc --release
+→ rsprobe.exe  92 KB  PE32 / i386 / windows-gui  entrypoint 69304  verify ok
+```
+
+**One trap worth knowing**: `cargo xwin cache xwin` downloads only `x86_64` and `aarch64` CRT/SDK components, not x86. A direct build then fails with `could not open 'user32.lib'`, while a `DONE` marker in the cache prevents re-running from fetching the missing pieces. The fix is to set `XWIN_ARCH=x86`—mac2win sets this internally.
+
+#### Highlight 9: Electron's x86 ceiling determined by measurement, not guesswork
+
+- **Value**: Electron stopped publishing `win32-ia32` from v44 onwards. Without a preflight gate the user waits twenty minutes and then gets a 404.
+- **Implementation**: During preflight, probe upstream for whether a build for that architecture still exists (`curl -r 0-500` to read the HTTP status) and gate on known boundaries.
+- **Differentiation**: Most tools document a version boundary in prose and only fail at the download stage. This project turns it into a hard preflight predicate.
+- **Evidence**:
+
+| Version | `electron-vX-win32-ia32.zip` | Conclusion |
+| --- | --- | --- |
+| v43.0.0 | 206 | Available |
+| v44.0.0 | 404 | Removed |
+| v45.0.0 | 404 | Removed |
+
+#### Highlight 10: Dependency collection must be two-phase, or the artefact crashes on launch
+
+- **Value**: Collecting packages from the import graph alone misses transitive dependencies. The measured failure was `Cannot find package 'cosmokit'`—the artefact packaged fine, verified fine, and crashed on launch.
+- **Implementation**: Two-phase collection: first scan the import graph for direct dependencies, then expand the closure via each package's `package.json` `dependencies`; afterwards **rebuild a flattened `node_modules`** from the collection, because under pnpm's symlink layout the real location of a dependency is one level up.
+- **Differentiation**: The common approaches are copying the entire `node_modules` (bloated, and drags in devDependencies) or copying only direct dependencies (missing transitive ones at runtime).
+- **Evidence**: The Ondra dependency chain hit five consecutive traps (`cosmokit` missing, symlinks pointing into `.pnpm`, alias installation, workspace package paths, the host locating its kernel by relative path). Each was fixed, after which the host log reported "host ready http://127.0.0.1:9061".
+
+### 4.2 ExeOnMac
+
+#### Highlight 11: Layer reuse via clonefile—a 382 MB skeleton consumes only metadata space
+
+- **Value**: Every application bundle needs a complete Windows skeleton (`drive_c/windows`, `system32`, initial registry state), measured at 382 MB across 1858 files. Copying it for real would add 3.8 GB for ten applications.
+- **Implementation**: `cp -c` invokes APFS `clonefile(2)` for a copy-on-write copy. Layer contents are copied once at prefix initialisation, and all subsequent writes land on the private copy.
+- **Differentiation**: The common shared-prefix approach (one `WINEPREFIX` for all applications) needs no copying at all but lets applications contaminate one another. This project wants isolation without paying the disk cost of isolation, and clonefile sits exactly at that intersection. Hard links are not used either—they would defeat "writing to Private never pollutes the shared layer", since writing to any copy mutates the shared inode.
+- **Evidence**: After copying a 64 MB file, volume free space decreases by **less than 1 MB** (metadata level). Measurement is by free-space delta, not `du` (reason in section 5.5.1).
+
+#### Highlight 12: Installation completion is judged by file growth, not exit code
+
+- **Value**: Many NSIS and Electron/Squirrel installers do not exit after installing; they launch the freshly installed application, leaving the parent process hanging. Waiting for exit means waiting until timeout. Measured: a 34 MB Electron installer needed only 132 seconds to install but never exited, so waiting produced a return only after the 1200-second timeout.
+- **Implementation**: Sample the prefix's file count and total bytes every 5 seconds; six consecutive unchanged samples mark installation complete, triggering an active wind-down and setting `settled_by_progress`.
+- **Differentiation**: Most wrapping tools call `subprocess.run(timeout=N)` directly; with such installers the only recourse is to lower the timeout manually, and a timeout is then judged as failure.
+- **Evidence**: The same installer went from 1215 seconds to 132 seconds, and was correctly judged successful.
+
+#### Highlight 13: MSI table parsing bypasses private encoding to restore real filenames
+
+- **Value**: Filenames inside MSI cabinets are `fil<32-hex>` hashes. Extracting them directly makes it impossible to identify the main program or restore the directory structure.
+- **Implementation**: Parse MSI `_StringPool`, `_Tables`, `_Columns`, `File`, `Directory`, `Component` and `Shortcut` tables directly. Because stream names inside the CFB container are privately encoded and cannot be looked up by name, content features are used instead: the stream whose length equals the sum of all string-pool entry lengths is `_StringData`.
+- **Differentiation**: Depending on `msitools` would be simpler, but it is not available by default on macOS and would add an external dependency. Self-parsing delivers MSI support with zero dependencies.
+- **Evidence**: The 104 MB PowerShell 7.4.6 MSI yielded 913 real filenames and the main program was correctly identified as `pwsh.exe`.
+
+#### Highlight 14: Runtime components excluded explicitly, not penalised
+
+- **Value**: Installing an Electron application also installs WebView2, which contains an `msedge.exe` that matches every "main program" signal: GUI subsystem, size, icon resources. It was once selected as the entry point, so double-clicking the `.app` opened a blank Edge-kernel window.
+- **Implementation**: Maintain a runtime-component list (`msedgewebview2`, `edgecore`, `msedge`, `dotnet`, …) and path markers (`/edgecore/`, `/webview2/`, `/dotnet/`); a match removes the candidate from consideration entirely rather than letting it compete.
+- **Differentiation**: Penalising such files within the scoring model is the common approach, but penalising is not enough—when the genuine entry point scores low due to deep nesting or small size, a merely penalised `msedge.exe` can still rank first. **Exclusion is deterministic; penalisation is probabilistic.**
+- **Evidence**: The entry point for the same installer was corrected from `Program Files (x86)/Microsoft/EdgeCore/.../msedge.exe` to `AppData/Local/空谷 Ondra/ondra.exe`.
+
+#### Highlight 15: Installer filenames must be sanitised, never used directly as the product name
+
+- **Value**: Taking `Ondra-1.1.7-alpha-windows-x64-setup.exe` directly as the product name yields `drive_c/Wacmin/Ondra-1.1.7-alpha-windows-x64-setup`. The path is unreadable and close to NSIS's 260-character path limit.
+- **Implementation**: Split on separators, strip noise words such as architecture, version and stage markers (`setup`, `windows`, `x64`, `alpha`), then combine by rule: merge the first two segments when the first is very short and the second is not purely numeric (`MS Office`), otherwise take the first segment only (`npp` rather than `npp 8`).
+- **Differentiation**: Most tools take the filename directly or take the version resource directly; the former produces unreadable paths, the latter has no fallback when the version resource is absent.
+- **Evidence**: `Ondra-1.1.7-alpha-windows-x64-setup` → `Ondra`; `npp.8.6.9.Installer.x64` → `npp`; `MS-Office-setup` → `MS Office`.
+
+### 4.3 Win2Mac
+
+#### Highlight 16: A custom zip writer so Unix permission bits survive Windows
+
+- **Value**: Building a `.app` on Windows, the real obstacle is not the plist but the **executable permission bit**. Windows has no concept of Unix mode; a zip produced by conventional tools extracts on macOS with the main executable at `0644`, and double-clicking does nothing.
+- **Implementation**: A custom zip writer stores `external_attr = (mode << 16) | dosAttrs` in the central directory and sets `create_system` to `3` (Unix)—only when marked Unix will the extractor read the mode from the high 16 bits.
+- **Differentiation**: Most cross-platform zip libraries write zero or only DOS attributes for external attributes; GNU zip writes Unix bits but requires a Unix host. A custom writer depends on no host and makes the rules explicit.
+- **Evidence**: Three rules are guarded by tests: directory names must end with `/` and carry `S_IFDIR`, symlinks carry `S_IFLNK`, and `Contents/MacOS/*` is defaulted to `0755` by role. After extraction, `ls -l` and `plutil -lint` both pass.
+
+#### Highlight 17: Chinese application names no longer collide on bundle id
+
+- **Value**: The bundle id is the sole basis on which LaunchServices distinguishes applications. Yet the character class `[^a-z0-9-.]` swallows an entire Chinese segment: `app.记事本` → `app` and `app.我的应用` → `app` collide into the same id. Once collided, the Dock shows one icon, default-open-with overwrites each other, and `lsregister -u` removing one also deregisters the other.
+- **Implementation**: When non-ASCII characters are present, append the first 8 hex digits of SHA-256 after the readable fragment; pure-ASCII input is returned unchanged so existing artefacts keep their ids (otherwise an upgrade would turn one application into two for existing users).
+- **Differentiation**: The common approaches are "strip all non-ASCII" or "always error out". The former produces inevitably colliding ids; the latter makes it impossible for Chinese users to package at all. The original comment claimed "better to error than to emit an inevitably colliding id", but that never took effect—a purely Chinese domain normalises to `app`, which looks legitimate while silently producing a colliding id.
+- **Evidence**:
+
+| Input | Before | After |
+|---|---|---|
+| `app.记事本` | `com.wexe.win.app` | `com.wexe.win.app-7ea4b95c` |
+| `app.我的应用` | `com.wexe.win.app` | `com.wexe.win.app-59362fed` |
+| `app.空谷-ondra` | `com.wexe.win.app.ondra` | `com.wexe.win.app.ondra-c0c33160` |
+| `tencent.wechat` | `com.wexe.win.tencent.wechat` | unchanged |
+
+Measured across 11 common Chinese application names: before the fix only **one** distinct id was produced; after, all 11 differ. Three details matter equally: the `seed` (application name) must be mixed into the hash (two Chinese applications from the same vendor share a reverse domain); "partially lost" must also be caught (`cn.星玖.测试` → `cn` still has one segment, looks non-empty, and has lost all discriminating power); and the case where the domain is clean but the seed is Chinese must be caught too.
+
+### 4.4 console
+
+#### Highlight 18: Killing by process group is the only clean kill
+
+- **Value**: Killing only the parent leaves orphans. `python3 -m wepack` spawns wine, 7z and swiftc; after the python process dies those children keep holding the prefix and ports, causing conflicts on the next run.
+- **Implementation**: Children start in their own process group; on timeout `process.kill(-pid)` signals the whole group, `SIGTERM` → wait 2 s → `SIGKILL`.
+- **Differentiation**: Node's `child.kill()` targets only the direct child. Cross-language process trees (Node → Python → Wine → Windows program) require process groups.
+- **Evidence**: `WACMIN_TIMEOUT_MS` defaults to 30 minutes (60 seconds for `doctor`); after a timeout both port and prefix are immediately reusable.
+
+#### Highlight 19: Parallel doctor, 555 ms down to 486 ms
+
+- **Value**: `console doctor` used to invoke the four directions' `doctor` serially, with exeonmac alone accounting for 415 ms; users perceived it as frozen.
+- **Implementation**: Run the four `doctor` calls concurrently, then backfill results by fixed index so output order stays stable.
+- **Differentiation**: Concurrency easily introduces the new problem of random output ordering; this project backfills by index rather than by `Promise.all` completion order.
+- **Evidence**: 555 ms serial → 486 ms parallel.
+
+#### Highlight 20: Three bugs in the contract checker itself
+
+This entry is not "what we got right" but "the checker itself can lie"—recorded because it is the class of defect most easily overlooked in projects of this kind.
+
+- **Value**: The `contract` command verifies that the four directions genuinely honour the contract. When the checker itself is buggy, all four directions show green while the contract has long been violated.
+- **Implementation**: The whitelist is no longer hand-written; it is read live from `run-report.schema.json`.
+- **Differentiation and lesson**: All three bugs share one root cause—**the same information stored in two places**.
+- **Evidence**:
+
+| Defect | Symptom | Root cause |
+|---|---|---|
+| Prefix regex written as `[A-Z]{2,4}` | Did not accept the digit 2 in `M2W` / `W2M` | Hand-written regex instead of reading the contract |
+| Whitelist missing `checks` | Compliant reports judged as containing unknown fields | Hand-written whitelist out of sync with the schema |
+| Whitelist extra `config` / `nextSteps` | Non-compliant reports judged compliant | Same |
+
+### 4.5 ai
+
+#### Highlight 21: One extra newline on `stdout` and the MCP client drops the stream
+
+- **Highlight name**: Separating the entry point from the capability, and fixing a dormant defect along the way.
+- **Value**: Solves "one capability must serve both humans and AI". Both humans and agents need to dispatch the four directions; the cleanliness requirements on `stdout` differ completely between the two.
+- **Implementation**: Dispatch logic moved out of `bin/wacmin-console.mjs` into `console/src/directions.mjs`, leaving only argv parsing and printing in the entry file, plus an `isDirectRun()` guard (comparing via `realpathSync`—string equality would miss symlinks and `./` prefixes).
+- **Differentiation**: This was not cleanup written for MCP; it exposed a **pre-existing real defect**. `console/src/server.mjs` previously imported `../bin/wacmin-console.mjs` to obtain the direction list for `/api/status`—so every HTTP request wrote 21 lines of Chinese usage text to `stdout` and set `process.exitCode` to 2. `console` never reads its own `stdout`, so the defect stayed invisible; the MCP specification requires `stdout` to carry protocol messages only, making the same pattern fatal.
+- **Evidence**: Measured `stdout bytes: 0` after the fix, versus 21 lines per request and `exitCode after import: 2` before. Removing the guard makes the new test fail immediately (9 pass / 1 fail), confirming the test genuinely guards this.
+
+#### Highlight 22: Six tools, not twenty-six
+
+- **Highlight name**: Group by intent, not one tool per subcommand.
+- **Value**: Solves "give an agent a pile of tools and it no longer knows which to use". The four directions expose over twenty subcommands; flattening them all into tools leaves the differences between tool names invisible to the agent, which can only guess—and a wrong guess costs a real build.
+- **Implementation**: Six tools grouped by intent (list, self-check, build, verify, assess, passthrough), with unmodelled options going through the `wacmin_run` escape hatch.
+- **Differentiation**: Most MCP servers use a mechanical one-tool-per-subcommand mapping; the tool count inflates with the CLI while the agent's selection quality degrades.
+- **Evidence**: `wacmin_build`'s schema lists only `direction` as required—whether the origin field is `project` or `installer` depends on the direction, and JSON Schema's `required` cannot express "A or B, at least one". Hard-coding `required: ['direction','project']` would reject every legitimate `exeonmac` call.
+
+#### Highlight 23: A failed build is not a protocol error
+
+- **Highlight name**: Two error layers kept separate, business failures preserved verbatim.
+- **Value**: Solves "the agent knows something failed but not why". Wrapping a build failure as JSON-RPC `-32603` leaves the agent with "internal error", no `M2W_1002`, and no way to tell the user "what is missing is not your project but 7-Zip".
+- **Implementation**: Protocol-layer errors use the top-level `error` field (`-32700` / `-32600` / `-32601` / `-32602` / `-32603`); a command that genuinely ran and failed returns `result.isError = true` with a readable reason and the tail of `stderr` in `content`.
+- **Differentiation**: Many implementations take the shortcut of translating every non-zero exit code into a protocol error, discarding the most valuable information.
+- **Evidence**: Measured, the failure path returns `isError: true`, `exitCode: 2`, `error.code: M2W_1002` with a `hint`, while the success path omits `isError`; `wacmin` returns 5 when `wacmin run exeonmac doctor` returns 5, so exit codes pass through strictly.
+
+---
+## 5. Design Details and Subtleties
+
+This chapter records every non-obvious detail. Each entry corresponds to a real trap encountered or a deliberate trade-off, grouped by theme.
+
+### 5.1 Development Ordering and Risk Control
+
+#### 5.1.1 Why the ordering is what it is
+
+```
+Mac2Win  →  ExeOnMac  →  Win2Mac  →  AppOnWin
+ complete     complete     complete    assessment-capable
+```
+
+| Direction | Determinism | Reasoning |
+|---|---|---|
+| Mac2Win | High | NSIS + prebuilt runtimes, already converged |
+| ExeOnMac | Medium-high | Wine + Rosetta 2; the foundation is mature, leaving packaging, layers and recipes as engineering volume |
+| Win2Mac | High | Pure assembly (zip + plist), isomorphic to Mac2Win, largely transplantable |
+| AppOnWin | Low | The Darling foundation requires WSL2 on Windows, and GUI support is labelled experimental |
+
+**Why Win2Mac comes after ExeOnMac**: its determinism is in fact the highest, but everything it reuses (eight-phase orchestration, error-code segments, report structure) comes from Mac2Win, so third position lets it transplant directly. The genuinely hard item is ExeOnMac, and deferring it would create a backlog.
+
+**Placing AppOnWin last is not neglect**: by the time it is reached, the first three are done, so even total failure leaves Wacmin standing on three legs. Doing it first would drag the whole schedule down if it failed.
+
+#### 5.1.2 AppOnWin's three spike gates
+
+**The spike may jump the queue at any time**—the feasibility check only needs a WSL2 environment and does not occupy mainline effort.
+
+1. Install Darling inside WSL2 and run a minimal command-line Mach-O;
+2. **Load a minimal AppKit window** (even a single white rectangle)—the decisive gate;
+3. Read `Info.plist` and locate the main binary.
+
+Failing gate 2 demotes AppOnWin to a "compatibility assessment tool" and removes it from the mainline.
+
+**Three states, not two**: the spike result is `pass` (measured success) / `fail` (measured failure) / `blocked` (environment unavailable, could not execute). `blocked` **is not** `pass`—writing "not verified" as "passed" is precisely the class of error this project most wants to avoid.
+
+### 5.2 Design of the Contract Layer
+
+#### 5.2.1 The nine exit-code semantics
+
+| Code | Meaning | When used |
+|---|---|---|
+| 0 | Success | Flow completed and artefact verification passed |
+| 1 | Unclassified failure | Internal error or a failure not covered elsewhere (`9999`) |
+| 2 | Parameter error | Missing, misspelled or mutually exclusive CLI arguments (`1002` / `1003` / `1004`) |
+| 3 | Capability not implemented | The feature belongs to a later stage and is explicitly not done yet (`7001`) |
+| 4 | Explicitly unsupported | The input's type or category falls inside a hard boundary; no bypass attempted (`1005`) |
+| 5 | Missing external dependency | makensis / wine / 7z / innoextract etc. absent (`2001` / `2002`) |
+| 6 | Build or installation failure | Project build, dependency collection, staging or compilation error (`4001`–`5002`) |
+| 7 | Artefact verification failure | The artefact exists but violates the spec: wrong architecture, missing files, hash mismatch (`6001`–`6003`) |
+| 130 | User interruption | SIGINT / SIGTERM received (`9001`) |
+
+**The distinction between 3 and 4 is deliberate**: 3 means "not done now, will be done later"; 4 means "never will be done". Callers use it to decide between retrying and abandoning.
+
+#### 5.2.2 Error-code segments never cross boundaries
+
+| Segment | Range | Meaning |
+|---|---|---|
+| 1000 | 1001–1999 | Environment and input |
+| 2000 | 2001–2999 | External tools |
+| 3000 | 3001–3999 | Runtime |
+| 4000 | 4001–4999 | Build and assembly |
+| 5000 | 5001–5999 | Packaging |
+| 6000 | 6001–6999 | Artefact verification |
+| 7000 | 7001–7999 | Capability not implemented |
+| 9000 | 9001–9999 | Flow control and internal errors |
+
+Each direction defines concrete codes in its own errors module, but **segments never cross boundaries**. `4xxx` always means input-artefact handling and never acquires a different meaning for some direction's convenience.
+
+`7xxx` gets its own segment because it **is not an error** but "not done yet". Mixing it into `1xxx` would make it impossible for a front end to distinguish "the user configured something wrong" from "the feature is not written".
+
+#### 5.2.3 Exit codes and error-code segments must be checked in pairs
+
+The `errorSegment` field in `exit-codes.json` is not merely a comment—it declares "which error code pairs with which exit code", and `validate.mjs` uses it to cross-check every report.
+
+| Exit code | Meaning | Paired error codes |
+|---|---|---|
+| 2 | Parameter and input error | `1002` `1003` `1004` |
+| 4 | Explicitly unsupported | `1005` |
+| 5 | Missing external dependency | `2001` `2002` |
+| 6 | Build or installation failure | `4001`–`5002` |
+| 7 | Artefact verification failure | `6001`–`6003` |
+| 3 | Capability not implemented | `7001` |
+
+**`1005` is the only exception in the `1xxx` segment paired with exit code 4**: `1002` means "the path is wrong", `1005` means "this thing itself cannot be done". Their implications for automation are opposite—the former should retry, the latter should stop. In the implementation `exitCodeFor()` must test `1005` before routing by segment; reversing the order files it under exit code 2.
+
+**This check was added later.** Early on it validated only "is the error-code format correct", which allowed a **cross-segment mismatch** such as "`verify` fails with exit code 7 but the error code is `M2W_1004` (input missing, segment 1xxx)"—format legal, semantics displaced; the caller looks up the artefact by exit code 7 when the real problem is a parameter. Even earlier, the contract marked `exit 4` with `errorSegment: "1002"` while all four implementations mapped `1002` to exit 2, and contract and implementation silently diverged for a long time. Both are the same class of problem: **validation checked existence, not self-consistency.**
+
+#### 5.2.4 Division of labour between stdout and stderr
+
+When `--json` / `--report` is set, **stdout carries only JSON and logs go to stderr**. A pipe can then hand stdout to `jq` without filtering log lines.
+
+**This is the rule most easily broken**, and three directions broke it:
+
+- mac2win's `verify` wrote logs to stdout;
+- exeonmac's `version` printed human-readable text directly;
+- exeonmac's `--report` conflicted with the `_StdoutToStderr` redirection mechanism—during redirection `sys.stdout` *is* stderr, so a subcommand writing its report to `sys.stdout` put JSON into stderr and `wepack ... --report | jq` received empty input. The fix is to use `_out()` uniformly.
+
+The principle is consistent: **structured output and human output must go to different streams**.
+
+### 5.3 Decision Logic: One Predicate, One Implementation
+
+#### 5.3.1 doctor and verify once judged "is 7-Zip present" two different ways
+
+- `doctor` only checked whether `7z` was on PATH;
+- `verify` checked environment variables, the project directory, Homebrew, MacPorts, PATH, and finally scanned `/Applications/*.app`.
+
+On the measured machine this produced a direct contradiction: `doctor` reported "[FAIL] 7z not installed" while at the same moment `verify` was successfully extracting and verifying with the 7-Zip bundled inside BlueStacks.
+
+Worse, the FAIL from `doctor` made the aggregate self-check `allOk = false` with exit code 5—a perfectly usable environment judged unusable. The user would install the Homebrew version, re-run, and only then see green, having needed to do nothing at all.
+
+**Rule**: the logic for one decision must exist in exactly one place. `doctor` now reports the same binary path that `verify` actually uses.
+
+**"Not installed" and "installed but you cannot find it" are different things.** The former requires user action; the latter is tool failure. Measured environment: the `7zz` on PATH was a build-sandbox wrapper script (failing with `spawnSync 7zz ENOENT`), Homebrew was absent, yet BlueStacks and Parallels each bundled a **working** 7-Zip at `/Applications/*.app/Contents/MacOS/`.
+
+#### 5.3.2 Tool probing cannot rely on exit codes alone
+
+`/bin/echo i` also exits with 0. Judging by exit code alone accepts it as 7-Zip.
+
+The consequence is insidious: the subsequent `7zz l -slt` receives unrelated text, no file list can be parsed, and the final report says "payload file count 0"—which looks like a corrupt installer but is actually a mis-selected tool.
+
+**The criterion is now output features**: the output of `i` must contain both `7-Zip` (the program naming itself) and `Formats:` (the format-list header). Both must be present.
+
+The same problem takes another form on the ExeOnMac side: PATH may contain a "forwarding shim"—the file exists and `os.access` passes, but the actual invocation returns 127. Tool probing therefore performs a smoke invocation in addition to the existence check, judges by exit code, skips shims that do not run, and suggests `WEXE_7Z` for specifying the real binary.
+
+#### 5.3.3 Explicit configuration must not fall back silently
+
+`MAC2WIN_7ZIP` is how a user explicitly says "use this one". An early implementation, when that path did not exist, would **quietly continue searching** and eventually use another copy on the system.
+
+A user investigating "why did nothing change after I swapped the 7-Zip version" is sent entirely the wrong way: `doctor` reports the other copy's path while the user believes their own setting is in effect.
+
+**The semantics are now "use it or fail explicitly"**: a missing path reports `M2W_1003` / exit code 2, and a path that exists but is not 7-Zip also explains why. There is no fallback.
+
+Likewise, the `catch { return null }` in `verify` used to swallow configuration errors into "cannot infer target architecture", then verify against the default architecture and deliver a completely unrelated conclusion. Errors are now distinguished by message: configuration errors propagate, and only extraction failures return `null`.
+
+#### 5.3.4 `undefined` and `null` are not interchangeable
+
+`successReport` used to test `result.zipArtifact !== null`. When the caller omits the field it is `undefined`, and `undefined !== null` is true—so the report gained a spurious `{kind: 'zip', target: 'x86'}` entry with `path` and `bytes` missing.
+
+Two consequences: the contract requires `artifacts[].path` to be a non-empty string, making the whole report non-compliant; and downstream code deciding "there is a downloadable artefact" by `artifacts.length > 0` renders a dead download link.
+
+**The criterion is now `typeof value === 'string' && value !== ''`.** The empty string is more insidious than `undefined`—`typeof '' === 'string'` holds, so a type-only check lets it through.
+
+### 5.4 Failure Paths: Timeouts, Retries, Degradation, Fault Tolerance
+
+#### 5.4.1 Verification has three outcomes, not two
+
+Artefact verification has three possible outcomes. The early implementation distinguished only the first two and misfiled the third as the first.
+
+| `ok` | `complete` | Conclusion | Exit code | Error code |
+|---|---|---|---|---|
+| ✓ | ✓ | Verification passed | 0 | — |
+| ✗ | any | Verification failed (the artefact is bad) | 7 | `M2W_6001` |
+| ✓ | ✗ | Verification incomplete (tooling missing) | 5 | `M2W_2001` |
+
+**Why they must be separate**: `ok` answers "were problems found"; `complete` answers "was everything verified". They are orthogonal.
+
+The third row was added later. "7-Zip not found, skipping payload verification" used to be recorded as a `warn`, and since `ok` only looked for `fail` entries, `ok === true` resulted, the CLI printed "verification passed", and the exit code was 0—**while not a single one of the 4,000+ payload files had been compared**.
+
+**Why this is more dangerous than a crash**: a verification failure prompts investigation; a false pass does not. The user takes an installer whose header alone was checked, together with a "verification passed" conclusion, and distributes it.
+
+**Why 5 and 7 must be separate paths**: 5 means "I did not verify; install the tool and re-run", 7 means "I verified; the artefact is broken and must be rebuilt". Merging them sends the user investigating in the wrong direction.
+
+#### 5.4.2 The second harvest after a timeout must tolerate failure
+
+After a timeout, `process.communicate(timeout=15)` harvests the output, and this step can itself time out—the child inherited the pipe, so even after the parent dies the pipe stays open.
+
+The implementation tolerates this fully: on a second timeout it force-closes the pipe handle and falls back to `wait(5)`, never raising again during wind-down. The original implementation lacked this protection, so a timeout raised an uncaught `TimeoutExpired`, leaving the process uncleaned and the log unwritten.
+
+#### 5.4.3 Three-step process-group cleanup
+
+`process.terminate()` alone is not enough: wine spawns `wineboot`, `services.exe` and `explorer.exe`, and after the parent is killed those children keep the prefix occupied, causing conflicts on the next installation.
+
+Cleanup has three steps: `SIGTERM` the whole process group, wait 5 seconds for wine to finish writing the registry, then `SIGKILL` the group. `wineserver -k` is implemented as a cleaner alternative for interactive mode.
+
+The same problem on the `console` side is solved with `process.kill(-pid)`—children start in their own process group, and a negative pid addresses the whole group. The default timeout is 30 minutes, 60 seconds for `doctor`, overridable via `WACMIN_TIMEOUT_MS`, with `0` meaning unlimited.
+
+#### 5.4.4 Failed extraction clears half-products
+
+When every extraction method fails, half-products created in the output directory during this run are removed so the directory stays clean. Otherwise a subsequent attempt with the same directory is rejected as "not empty" and the user must clean up manually.
+
+#### 5.4.5 Installation failure does not auto-fallback to interactive
+
+A silent installation failure does not automatically pop up an interactive window. The reasoning: automatic fallback interrupts batch runs, and the user may not be at the machine, so the window would hang indefinitely.
+
+`--interactive` is explicitly specified by the user. This is a deliberate trade-off: **a little less "intelligence", a little more predictability**.
+
+#### 5.4.6 Non-empty directories are refused, not deleted
+
+`create_prefix` and `extract` error out when the target directory is non-empty; they neither overwrite nor delete. The directory may contain user data, and the tool has no authority to decide what may be removed.
+
+A `--force` flag exists, but it changes only the error message, not the behaviour—deletion is the user's decision, not the tool's.
+
+#### 5.4.7 Exit codes are insufficient to judge installation success
+
+There are both "exit code 1 with nothing installed" and "exit code 0 having released only a few temporary files". `run_install` therefore snapshots `drive_c`'s (file count, total bytes) before and after and judges by **net increment**: at least 8 files and at least 1 MiB.
+
+The threshold is not 1 because real installers leave a bootstrap loader and logs behind even when the user cancels midway; file count alone is also insufficient because some installers create many empty directories and zero-byte placeholders.
+
+Two concepts are expressed separately in code: `InstallRun.exit_ok` answers "does the installer consider itself successful" (including MSI's 3010 = reboot required but succeeded), while `InstallRun.ok` answers "did this installation actually produce usable files". When the former passes and the latter does not, the log states "the installer reported success but no files landed in the prefix" and suggests `--interactive` / `--silent-args` for investigation.
+
+#### 5.4.8 Missing layers do not block installation
+
+The application may never reach that code path, and failing hard would make a package that "installs but lacks MFC" completely uninstallable. What is missing is reported explicitly through `warnings` and written to `install.log`.
+
+#### 5.4.9 A broken recipe is equivalent to no recipe
+
+When YAML is corrupt or fields are missing, `load()` returns `None` and probing takes over, so one bad cache entry does not block packaging. But **a recipe hit still verifies the file**: if the recipe's `entry` no longer exists (installer version changed, path moved), the code falls back to re-scanning and logs a WARN rather than trusting it blindly—blind trust in a cache produces a bundle that cannot be opened by double-clicking.
+
+#### 5.4.10 Browser-launch failure must not terminate the application
+
+Without an `error` listener, `spawn`'s error event escalates to `uncaughtException`; the log shows `spawn cmd ENOENT` and then the process dies. The fix is to attach an `error` listener and degrade to logging.
+
+### 5.5 Files and Disk
+
+#### 5.5.1 Measuring clonefile space
+
+`st_blocks` or `du` cannot determine whether clonefile saves space. APFS counts shared blocks repeatedly for each copy, so `du` cannot tell that blocks are shared.
+
+The correct measurement is volume free-space delta:
+
+```python
+before = free_space(path)
+clone_tree(src, dst)
+consumed = before - free_space(path)   # real consumption
+```
+
+This detail caused a misjudgement once: asserting with `du -sk` reported 20 MB both before and after clonefile, leading to the conclusion that "clonefile did not take effect".
+
+**The other face of the same trap**: `disk.allocated` in `install --json` is the sum of `st_blocks`, which **in the clonefile case is an upper bound rather than real consumption**. The report states this explicitly rather than pretending it is precise.
+
+#### 5.5.2 zip Unix permission bits must be written explicitly
+
+`external_attr = (mode << 16) | dosAttrs`, with `create_system` set to `3` (Unix)—only when marked Unix will the extractor read the mode from the high 16 bits.
+
+Three accompanying rules:
+
+| Rule | Reason |
+|---|---|
+| Directory names must end with `/` and carry `S_IFDIR` | Otherwise the extractor treats them as ordinary files and the directory structure is mangled |
+| Symlinks carry `S_IFLNK` | Otherwise the link is written as an ordinary file, becoming a content copy |
+| `Contents/MacOS/*` defaults to `0755` by role on Windows | Windows has no mode, so permission can only be inferred from the path's role |
+
+**Why not rely on the host**: GNU zip writes Unix bits but requires a Unix host; most cross-platform libraries write zero or only DOS attributes for external attributes. A custom writer depends on no host, and its rules are explicit and guarded by tests.
+
+#### 5.5.3 dosdevices links must be relative
+
+`c:` points to `../drive_c` as a relative link. With an absolute path, copying the `.app` to another machine or restoring from backup invalidates every link and the application cannot start.
+
+`z:` pointing to `/` is standard Wine practice, letting installers reach the original installer at `Z:\Users\...\setup.exe`—without copying the installer into the prefix, which saves space and guarantees the original remains unmodified.
+
+#### 5.5.4 Two download-to-disk strategies
+
+| Scenario | Strategy | Direction |
+|---|---|---|
+| With `.part` staging | Write a temporary file first, `rename` after length verification. A mid-way failure never leaves a complete-looking bad file | ExeOnMac |
+| Without `.part` staging | Write the target file directly; an interruption leaves a truncated file, but the next run discards it when the architecture assertion fails and re-downloads | Mac2Win |
+
+**Mac2Win's downloads have no `.part` staging**—a known implementation difference whose behaviour is equivalent to "detect a bad cache and re-download"; it does not affect correctness. Stating this plainly is more important than presenting a uniform story.
+
+#### 5.5.5 Overwrite by removing first
+
+The target directory is removed before the upstream operation, avoiding a half-new, half-old artefact produced by "old files remaining plus new file writes failing".
+
+#### 5.5.6 Packaging must exclude Apple junk files
+
+macOS leaves three classes of files in directories: `.DS_Store`, `._*` (AppleDouble) and `__MACOSX`. Inside a Windows installer they are meaningless and show up as odd files to users. The exclusion rules **match exactly these three leaf names**, never by wildcard, to avoid deleting user data.
+
+### 5.6 Invoking External Processes
+
+#### 5.6.1 Silent parameters as argv, not strings
+
+Parameters are passed as lists, never concatenated into strings. A path containing spaces would otherwise be split again.
+
+**NSIS's `/D=` and wine's quoting rules are irreconcilable on paths containing spaces.** NSIS documentation requires `/D=` to be the last parameter and its path to be unquoted (even with spaces); wine, when assembling POSIX argv into a Windows command line, **automatically adds a pair of double quotes** around any argument containing spaces.
+
+With both rules in force, the installer receives `"/D=C:\Program Files\App"`—NSIS only recognises `/D=` at the start of the line, discards the whole thing once quoted, and falls back to its own default directory.
+
+Measured evidence (Ondra 1.3.0, same prefix, same installer):
+
+| `/D=` value | Net file increase | Landing point |
+|---|---|---|
+| `C:\Program Files\DirTestA` | **0** | Nothing installed (exit code still 0) |
+| `C:\DirTestNoSpace` | 6424 | `C:\DirTestNoSpace` |
+
+The only variable is whether the path contains a space. Wine also does not support 8.3 short names (measured: `C:\PROGRA~1` does not exist), so there is no workaround.
+
+The default installation directory is therefore `C:\Wacmin\<AppName>`, **containing no spaces**. When the application name itself contains a space (e.g. 空谷 Ondra) it is sanitised to underscores. This is not a sacrifice of fidelity—a program running under wine is not on real Windows anyway, and installing to `C:\Wacmin\App` versus `C:\Program Files\App` makes no visible difference to the user, whereas one installs and the other does not.
+
+If `--install-dir` specifies a path containing spaces and the installer is NSIS, `/D=` will still fail silently; the net-increment check then judges "not installed" and reports honestly rather than pretending success.
+
+**Inno's `/DIR=` rule is the opposite, yet the code likewise does not quote it.** Inno requires quotes when the value contains spaces, but wine adds them for us—adding our own results in escaping to `\"`. Measured:
+
+| argv value | What Inno sees | Result |
+|---|---|---|
+| `/DIR=C:\Program Files\Ondra` | `"/DIR=C:\Program Files\Ondra"` | Correct |
+| `/DIR="C:\Program Files\Ondra"` | `"/DIR=\"C:\Program` + `Files\Ondra\""` | Split into two arguments |
+
+**InstallShield's `/v` must not carry literal quotes.** The official documentation writes `/v"/qn"`, but under wine the inner quotes are escaped to `\"` and the installer receives a deformed argument list. The compact form `/v/qn` is used instead (accepted by both InstallShield and msiexec).
+
+#### 5.6.2 Subprocess output decoding must tolerate errors
+
+`subprocess.run(..., text=True)` decodes with the locale encoding and `errors='strict'`. A single non-UTF-8 byte raises `UnicodeDecodeError`, and the outer layer treats that as "tool execution failed", reporting "7z cannot extract"—a completely wrong conclusion that sends people to investigate their 7z installation.
+
+Bad bytes are normal: wine prints Windows paths containing Chinese in cp1252/cp936, some localised 7z builds output filenames in the system code page, and installers write control characters straight into stderr. This project has 19 `subprocess.run` call sites, all previously bare `text=True`.
+
+They now use a shared constant `wepack.tools.TEXT_MODE` (`text=True` + `encoding='utf-8'` + `errors='replace'`). Judgements rely on exit codes and on-disk artefacts, not on output text, so replacing a few characters affects no conclusion. A static-scanning test guards this: bare `text=True` may not reappear in the source.
+
+#### 5.6.3 Verification hashing does not land on disk
+
+For 4086 files inside a 200 MB exe, calling `7zz x -so` once per file means 4086 process creations—measured at over ten minutes without completing. The approach is **one extraction plus local hashing**: stream the extract into memory with `7zz x -so` and hash there; 4086 files took **0.87 seconds**.
+
+#### 5.6.4 Cancellation must actually kill the process tree, or "cancelled" is a lie
+
+An MCP client can send `notifications/cancelled` to cancel an in-flight tool call. There is one easy mistake here: **rejecting a Promise does not mean the task stopped**.
+
+If you only stop waiting and leave the subprocess alone, you get the hardest class of symptom to diagnose—the agent reports "cancelled", yet half an artefact sits on disk, a half-downloaded runtime sits in `~/.wacmin/mac2win/cache/`, and the next build reads it, fails its assertion, and reports an error with no relation to the cancellation at all.
+
+`runDirection` in `console/src/directions.mjs` therefore accepts a `signal`, and on abort behaves as in Highlight 18: send `SIGTERM` to the **entire process group**, wait two seconds, then `SIGKILL` if still alive. The result carries `aborted: true` so callers can label the run "cancelled" rather than "failed".
+
+**Why two seconds rather than an immediate `SIGKILL`**: `SIGKILL` gives the process no chance to clean up, leaving lock files in the Wine prefix so the next run reports "prefix is in use". Two seconds is enough for most processes to honour `SIGTERM`; a timeout means it is wedged, and a hard kill is then the only option.
+
+**Unknown `requestId` values are ignored silently.** The specification requires it, and a client may send a cancellation after the response already arrived—that is not an error, only ordering.
+
+### 5.7 Encoding and Chinese Text
+
+#### 5.7.1 The real offset of the NSIS signature
+
+NSIS's `firstheader` layout is `+0 flags`, `+4 siginfo (0xDEADBEEF)`, `+8 signature ("NullsoftInst")`, `+20 length`. The signature lives at `+4` and `+8`, **not at the overlay start**.
+
+Testing `DEADBEEF` at `overlay+0` misses it. This was hit during implementation: a real sample was judged `unknown` until the first 24 bytes of the overlay were dumped and the offset error became apparent.
+
+#### 5.7.2 MSI table data is column-major, not row-major
+
+Column c starts at index `c * rows` and occupies `rows` u16 values.
+
+`_Columns` is **four parallel column-major arrays**, not (table, column, name) triples:
+
+```
+[0n, 1n)  string number of the table name (not its position in _Tables)
+[1n, 2n)  column ordinal (low 15 bits meaningful; 0x8000 = temporary column)
+[2n, 3n)  string number of the column name
+[3n, 4n)  column type (measured values do not match the msidbColumnType enum; this tool does not rely on it)
+```
+
+`_StringPool` begins with a 4-byte total character count, followed by 4-byte entries of `(cch:u16, refs:u16)`; strings are packed tightly in `_StringData` with no separators.
+
+**Row count is not necessarily total u16 count ÷ column count**: measured, PowerShell's File stream is 18260 bytes = 9130 u16, while 8 columns × 913 rows occupies only 7304, leaving 1826 trailing values belonging to other data (that MSI packs multiple tables into one stream). Row count is therefore determined by content: the length of the leading run of `fil`+32 hex values is the row count, after which columns are read in column-major order.
+
+#### 5.7.3 Four stages on the Chinese path
+
+Chinese is not an edge case—ExeOnMac's target users install Chinese software. Four stages on this path each have distinct traps.
+
+1. **Compose the path: keep Chinese, remove spaces.** The default directory is `C:\Wacmin\<application name>`, with whitespace in the name converted to underscores (`空谷 Ondra` → `空谷_Ondra`). Chinese must be retained (users need to recognise `C:\Wacmin\记事本`) and spaces removed (the NSIS `/D=` hard constraint). Both requirements must hold simultaneously without conflicting. Note that this rule constrains only **ExeOnMac (silent installation inside a Wine prefix)**; installers produced by Mac2Win are run interactively by users on real Windows and are not subject to `/D=`'s space constraint.
+2. **Convert to Windows form: `drive_c/A/B` → `C:\A\B`.** This step must not introduce new spaces, or all previous effort is void. The test `test_windows_form_has_no_space_for_nsis` guards this gate.
+3. **Into argv: Chinese passes through wine without mojibake.** Measured: `wine cmd /c "mkdir C:\Wacmin\记事本"` creates a directory whose on-disk name is UTF-8 bytes `e8 ae b0 e4 ba 8b e6 9c ac`, and `if exist` matches it correctly.
+4. **Into the bundle id: Chinese must be stripped, but not to the point of losing all discriminating power.** See highlight 17.
+
+#### 5.7.4 Encoding of the placeholder registry
+
+If the base layer does not ship registry files, placeholders must be written. Wine's `.reg` must be UTF-16LE with a BOM and begin with `WINE REGISTRY Version 2`. Writing UTF-8 makes wine error out.
+
+#### 5.7.5 Restart suppression goes through a .reg file
+
+When an installer calls `ExitWindowsEx` the system must not actually reboot. The approach writes `wepack-suppress-restart.reg` into the prefix and imports it with `wine regedit /S`.
+
+The registry binary is never edited directly—only a `.reg` file is written. The file stays in the prefix for auditability and rollback.
+
+#### 5.7.6 3010 must count as success
+
+MSI exit code 3010 means "success but reboot required". This is MSI convention, not an error. Without special handling, a large number of MSIs would be misjudged as failed installations.
+
+#### 5.7.7 Code-point truncation in Info.plist
+
+`CFBundleName` is truncated by **code point** (≤15 characters), never mid-character—one Chinese character occupies 3 bytes in UTF-8, and byte truncation produces an illegal sequence that `plutil` rejects outright. `CFBundleVersion` is normalised to dotted numerals with non-numeric segments replaced by 0.
+
+#### 5.7.8 Streaming decoders need `stream` mode or Chinese text shatters into U+FFFD
+
+MCP's stdio transport is a byte stream, and the kernel decides where `data` events split—independent of character boundaries. A Chinese character occupies 3 bytes and can easily be split after its first two:
+
+```javascript
+// Wrong: decode each chunk independently; a multi-byte character spanning chunks becomes U+FFFD
+buffer += chunk.toString('utf8')
+
+// Right: TextDecoder's stream mode retains the incomplete bytes internally
+this.#buffer += this.#decoder.decode(chunk, { stream: true })
+```
+
+**This error is unrecoverable**: once `U+FFFD` enters the string, no amount of later concatenation restores the original bytes. It manifests as "Chinese occasionally turns into question marks in some tool result"—only the one splitting that actually happened goes wrong, so it is hard to reproduce reliably in tests.
+
+`ai/src/protocol.mjs`'s `LineDecoder` therefore accumulates with `TextDecoder` in `stream: true` mode and **decodes first, then splits on `\n`** rather than splitting bytes and decoding line by line: one message may span several chunks and one line of text may itself be split, so both dimensions need handling.
+
+### 5.8 Interfaces and Streaming Output
+
+#### 5.8.1 UI wording must match the backend's verdict
+
+Once the backend stops lying, a lying UI still defeats the purpose. Mac2Win's web console used to render "`${result.verify.length}` items passed"—that is **all items**, including `warn` and unverified ones. With 5 of 10 items unverified, the UI still said "10 items passed".
+
+**There are now four phrasings**:
+
+| Situation | Wording | Colour |
+|---|---|---|
+| Any `fail` | `N items failed` | Red |
+| Any unverified item | `N passed, M unverified` | Amber |
+| `warn` present but all verified | `N passed, M with warnings` | Amber |
+| All green | `N passed` | Green |
+
+Amber rather than green for unverified, because green tells the user "safe to distribute". Not red either—the artefact has no detected defect, and red would push the user toward the wrong action of rebuilding.
+
+#### 5.8.2 ANSI escape handling in terminal output
+
+The `console` dashboard converts subprocess stderr into SSE events pushed to the browser. Real stderr carries ANSI colour codes, and two traps were hit:
+
+1. **A colour code sits between `▸` and `[`.** Stripping must handle all three sequence classes (CSI `\x1b[...`, OSC `\x1b]...`, two-character sequences); an incomplete regex fails to match.
+2. **Chunk boundaries can split a sequence.** Accumulating before stripping is wrong—`incompleteEscapeTail()` must first hold back a possibly-split tail, then strip, then accumulate.
+
+Without the second, occasional half-sequences leak into the UI as garbage such as `[36m`.
+
+#### 5.8.3 Three consistency points in SSE
+
+Server-Sent Events is a one-way stream with three boundary conditions:
+
+1. **The stream must close after `done`.** Otherwise non-browser clients (`curl`, or a test helper using `request`) wait for `end` indefinitely and appear to time out.
+2. **Late subscribers must receive earlier events.** A browser connecting after the task started would otherwise see a blank pane. A 256 KB event buffer is used, evicting the earliest `log` events first when it overflows so structural events (`stage` / `done`) are retained.
+3. **Wind-down must flush.** A final log line without a trailing newline would be left in the buffer by the line-splitting logic and lost.
+
+#### 5.8.4 Why SSE instead of WebSocket
+
+Progress is one-way (server → browser), for which SSE suffices: native `EventSource` support, ordinary HTTP transport, automatic reconnection. WebSocket would add handshake and heartbeat complexity for no benefit here.
+
+#### 5.8.5 Progress weights must follow elapsed time
+
+If averaged across phases, packaging (over half the total duration) would occupy only 1/8, and users would watch the bar stall at 87%. Weighted by expected duration, the progress curve roughly matches actual elapsed time. The weight table is in section 10.3.
+
+### 5.9 Default Parameters and Why They Were Chosen
+
+| Default | Why |
+|---|---|
+| `target: "x86"` | The project's positioning is "build x86 Windows packages on ARM macOS". x86 runs on both 32-bit and 64-bit Windows, covering the most ground |
+| `electronVersion: "43.0.0"` | Official `win32-ia32` builds stopped at v44. This is the **highest usable version**, not an arbitrary pick |
+| `compression: "lzma"` | The smallest of NSIS's supported compressions. The cost is compile time, but packaging compiles once |
+| `desktopShortcut: true` | Windows users expect to launch from the desktop. Setting false forces them to hunt through the Start menu |
+| `requireAdmin: false` | Per-user installation avoids UAC prompts. Enabled only when writing to `Program Files` is genuinely needed |
+| `verify: true` | Verification is the only guarantee of artefact trustworthiness. Turning it off skips verification, **not safety checks** |
+| `outDir: "dist-mac2win"` | The `dist-` prefix makes it coverable by a single `.gitignore` rule; the suffix names the source direction |
+| `WACMIN_TIMEOUT_MS: 1800000` | 30 minutes. The slowest measured real build (including downloads) is under 20 minutes, leaving margin without hanging forever |
+| macOS minimum `13.0` | Requires `iconutil`, `sips` and APFS clonefile. 13 is where all three conditions stabilise together |
+| `--min-macos` default `13.0` | Consistent with ExeOnMac's `LSMinimumSystemVersion`, so one user's two directions do not demand different systems |
+| `requireAdmin: false` → installs to `%LOCALAPPDATA%\Programs\<App>` | The standard per-user location on Windows: no UAC elevation, and uninstallation leaves nothing that needs administrator rights to remove |
+
+**Configuration validation reports everything at once, not the first problem found.** A configuration file can only be edited one place at a time; reporting one problem per run forces five or six rounds. After merging, validation runs once and covers everything. The eight checks are in section 9.2.
+
+### 5.10 Abnormal Input and Malformed Data
+
+#### 5.10.1 Malformed reports must not crash the dashboard
+
+`console` reads report JSON produced by four directions. That JSON may be malformed because of version skew, an interrupted write, or a third-party generator. Nine crash inputs are covered:
+
+| Input | Consequence without handling |
+|---|---|
+| `stages: [null]` | Accessing `null.status` throws `TypeError` |
+| `checks: {}` | Calling `.map` on an object throws `TypeError` |
+| `ok: "true"` (a string) | String truthiness passes and the logic takes the wrong branch |
+| `artifacts: [{path: null}]` | Renders an empty link |
+| `error.code` as a number | Regex validation throws instead of returning no-match |
+| `stages[].status` with an unknown value | Progress bar width computes to `NaN` |
+| Artefact name containing an unpaired surrogate | JSON serialisation throws `URIError` |
+| `durationMs` negative | Formats as `-1ms` |
+| `input.path` empty string | Displays an empty path |
+
+The uniform strategy: **validate at the boundary, do not add defensive null checks internally**. The boundary layer converts malformed input into errors with explicit reasons; internals rely on the type contract.
+
+#### 5.10.2 Path traversal in zip entries
+
+Entry names are first normalised to a single separator, then rejected if they start with `/` or contain `..`. Entries such as `../../etc/passwd` in a zip are a common attack technique.
+
+#### 5.10.3 Four illegal forms of Windows filenames
+
+| Form | Handling |
+|---|---|
+| Reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`) | Check after stripping the extension, since `con.txt` is equally illegal |
+| Disallowed characters (`\ / : * ? " < > \|` and control characters) | Checked before packaging, reported as an error |
+| Segments ending in a dot or space | Such names are **silently discarded** on Windows, producing "packaged successfully but the filename does not match"; must be an error |
+| Paths longer than 260 characters | A hard NSIS boundary; error out and identify which segment is too long |
+
+#### 5.10.4 Help text and parser must agree in both directions
+
+Three things must hold: every option in help is accepted by the parser, every option accepted by the parser is documented in help, and a misspelt subcommand reports an explicit error rather than being treated as a path.
+
+Each is guarded by tests (each direction's `test/help.test.mjs`), because such divergence does not crash—it merely wastes the user's time. Concrete instances are in section 15.2.
+
+**One behavioural defect fixed in passing**: `win2mac biuld ./proj` and `apponwin asseess` were previously not recognised as "unknown subcommand"—the former reported "project directory does not exist", sending the user to inspect paths, and the latter was worse, printing a long help text and exiting with **code 0**, so `|| exit 1` in scripts never caught it.
+
+### 5.11 Cross-Platform and Backward Compatibility
+
+#### 5.11.1 Path separators
+
+Internally `/` is used uniformly; conversion happens only when writing NSIS scripts. Mixing separators in `File` paths makes makensis fail to find files—a path once assembled as `"/tmp/app\*.*"` caused exactly that.
+
+#### 5.11.2 Line endings
+
+Generated text files always use LF: NSIS scripts are compiled by `makensis` on macOS, where LF works; `Info.plist` is XML, for which LF is the spec-recommended value.
+
+#### 5.11.3 Executability determination
+
+macOS looks at the `x` bit; Windows looks at the extension. The main executable inside a `.app` is located via `Info.plist`'s `CFBundleExecutable`, independent of the `x` bit—but files under `Contents/MacOS/` must still be `0755`, or the system refuses to execute them.
+
+#### 5.11.4 Backward compatibility of artefacts
+
+The bundle-id hash suffix is added **only when non-ASCII characters are present**. Pure-ASCII input is returned unchanged so existing artefacts keep their ids—otherwise an upgrade would turn one application into two for existing users.
+
+#### 5.11.5 Published code values are immutable
+
+Exit codes and error codes are an external contract once published. New ones may only be appended. A breaking change to `schemaVersion` must increment it, and `console` branches accordingly.
+
+---
+
+## 6. Technology Stack and Dependency Inventory
+
+### 6.1 Technology Stack by Direction
+
+| Module | Language / runtime | Third-party packages |
+|---|---|---|
+| Mac2Win | Node.js ≥ 20 (ESM) | None; zero runtime dependencies |
+| ExeOnMac | Python ≥ 3.11 + Swift 6 (launcher) | None; standard library and system frameworks only |
+| Win2Mac | Node.js ≥ 20 (ESM) | None; custom zip writer |
+| AppOnWin | Node.js ≥ 20 (ESM) | None; custom plist and Mach-O parsers |
+| console | Node.js ≥ 20 (ESM) | None |
+| ai | Node.js ≥ 18.17 (ESM) | None; MCP transport layer written from scratch |
+| contracts | Node.js ≥ 20 (ESM) | None; validation scripts shared by all four directions |
+
+**This point deserves emphasis**: all five subprojects introduce **not a single npm or PyPI third-party package**. PE header parsing, zip read/write, plist parsing, Mach-O parsing, CFB compound document parsing, MSI table parsing, MIME tables, the HTTP server, SSE push, YAML-subset read/write and the test framework are all either custom-built or use language built-ins (Node's `node:test`, Python's `unittest`).
+
+**Specifically on the Python side**, every implementation uses only the standard library: `argparse`, `struct`, `subprocess`, `pathlib`, `hashlib`, `urllib`, `tarfile`, `tempfile`, `shutil`, `signal`, `json`, `re`, `logging`, `dataclasses`, `enum`, `typing`, `datetime`, `time`, `os`, `sys`, `platform`, `tomllib`.
+
+**The Swift side** uses only the system frameworks `AppKit` and `Foundation`.
+
+The cost is writing several low-level parsers ourselves; the benefit is zero transitive dependencies, zero supply-chain risk, and the ability to run immediately after `git clone` without `npm install`.
+
+### 6.2 External Tool Dependencies
+
+The following tools are not distributed with this project. Users install them on the host; this project invokes them as separate processes.
+
+**The complete inventory lives in chapter 3 of [`NOTICE`](./NOTICE), which is the single source of truth**, recording name, version, copyright holder, licence, official address, purpose and modification status for every entry. This section lists only the tool name, licence type and purpose, so readers can quickly judge what to install and what licensing obligations follow. Volatile details such as version numbers are not maintained in two places.
+
+| Tool | Licence | Purpose |
+|---|---|---|
+| **NSIS** (`makensis`) | zlib/libpng License | Mac2Win compiles install scripts into `.exe` |
+| **7-Zip** (`7zz`) | LGPL-2.1-or-later + unRAR restriction | Extracts NSIS / Inno / MSI containers; artefact verification |
+| **Wine** (`wine64`) | LGPL-2.1-or-later | ExeOnMac runs Windows PE binaries |
+| **Gcenx macOS_Wine_builds** | LGPL-2.1-or-later | Runnable x86_64 Wine prebuild for macOS |
+| **Rosetta 2** | System component, not open source | Translates x86_64 instructions on Apple Silicon |
+| **innoextract** (optional) | zlib License | Unpacks Inno Setup installers |
+| **msitools** (optional) | LGPL-2.1-or-later | Unpacks MSI; falls back to the custom MSI table parser |
+| **Darling** (under evaluation) | LGPL-2.1-or-later (some components GPL) | Runtime foundation for AppOnWin, via WSL2 |
+| **WSL2** | System component | Provides a Linux environment for Darling |
+| **plutil** | System component | Win2Mac uses it as the authority for validating `Info.plist` |
+| **sips / iconutil** | System component | ExeOnMac icon scaling and `.icns` packaging |
+| **swiftc** | System component | ExeOnMac compiles the Swift launcher and the badge compositor |
+| **git** | GPL-2.0 | Fetching the source |
+| **Homebrew** (optional) | BSD-2-Clause | Recommended way to install the above tools on macOS |
+| **cargo-xwin** (optional) | Apache-2.0 / MIT | Mac2Win cross-compiles the Tauri Rust shell |
+| **Rust toolchain** (optional) | Apache-2.0 / MIT | Mac2Win compiles the Rust shell when `buildRustShell: true` |
+| **LLVM / clang-cl** (optional) | Apache-2.0 with LLVM Exceptions | Linker when Mac2Win compiles the Rust shell |
+| **MSVC CRT headers and libraries** (optional) | Permits this use by cargo-xwin but **forbids redistribution** | Mac2Win links the MSVC target; neither cached nor redistributed |
+
+
+### 6.3 Framework Runtimes Bundled into Artefacts
+
+During packaging, Mac2Win includes the target framework's **Windows x86 prebuilt runtime** in the artefact. These runtimes are not distributed with the repository; the build process downloads them from official upstream addresses. Copyright holders, licences and official addresses are listed in chapter 4 of [`NOTICE`](./NOTICE).
+
+| Runtime | Version range | Licence | Purpose |
+|---|---|---|---|
+| **Node.js** (win-x86) | 20 / 22 LTS (default 22.23.5) | MIT | Application host for plain Node and most frameworks |
+| **Electron** (win32-ia32) | ≤ 43.0.0 | MIT | Electron application host |
+| **NW.js** (win-ia32) | Per project (default 0.90.0) | MIT | NW.js application host |
+| **Tauri** | No runtime bundled | MIT / Apache-2.0 | Rust-compiled native exe requiring no JS runtime |
+
+
+**Why Electron's ceiling is 43**: Electron stopped publishing `win32-ia32` prebuilt packages from v44. mac2win gates higher versions during preflight so users do not fail at the download stage. Measured evidence is in highlight 9.
+
+**Redistribution obligations**: Node.js, Electron and NW.js are MIT-licensed and require retaining the original copyright notice and licence text when redistributing. Installers produced should include these runtimes' `LICENSE` files, or provide accessible licence text in the installer wizard or an about page.
+
+**Network-dependent sizes** (downloaded on first build, then reused from `~/.wacmin/mac2win/cache/`):
+
+| Runtime | Compressed size | Unpacked payload |
+|---|---|---|
+| Node.js 22.23.5 win-x86 | about 32 MB | about 80 MB |
+| Electron 43.0.0 win32-ia32 | about 100 MB | about 220 MB |
+| NW.js 0.90.0 win-ia32 | about 90 MB | about 200 MB |
+| Wine 11.21 osx64 (ExeOnMac) | about 225 MB | about 600 MB |
+
+### 6.4 Indirect and Transitive Dependencies
+
+**This project has no transitive dependencies of its own**—none of the seven modules in the repository (five directions, `console`, `ai`, `contracts`) introduces npm or PyPI packages, so there is no "A depends on B, B depends on C" chain.
+
+**Indirect dependencies exist at the runtime level**, bundled by the upstream builders; this project neither splits nor modifies them. The itemised account is in chapter 6 of [`NOTICE`](./NOTICE) and is not repeated here. One point worth knowing in advance: Electron / NW.js / Node.js embed Chromium / V8 / libuv, and Wine embeds FreeType / libpng / MoltenVK; those components' licences ship with the upstream packages and this project does not modify them.
+
+### 6.5 Technology This Project Does Not Use
+
+**The complete list lives in [`NOTICE`](./NOTICE) chapter 8 as the single source of truth** — 17 entries, including items that are frequently misattributed to this project: no MCP official SDK, no LLM API calls, no third-party code-signing service.
+
+The four questions readers ask most often are answered directly here:
+
+| Often assumed to be used | Actual situation |
+|---|---|
+| **npm / PyPI third-party packages** | All seven modules have zero dependencies. PE header parsing, zip I/O, plist / Mach-O / CFB / MSI parsing, the MIME table, the HTTP server, SSE push, YAML-subset I/O and the test harness are all written in-house or use built-in language capability. |
+| **YAML libraries** (PyYAML / Yams) | Recipes and `compat.yaml` go through a hand-written restricted-subset serialiser; the Swift launcher ships its own ~130-line restricted parser. Only the syntax subset this project actually uses is supported — generality is not a goal. |
+| **WebSocket** | Progress is one-way (server → browser), so SSE suffices. See [5.8.4](#584-why-sse-instead-of-websocket). |
+| **x86 emulators / filesystem drivers / kexts** | None are used. ExeOnMac relies on the Wine runtime; AppOnWin plans to use Darling through WSL2. Both run entirely in user space. |
+
+### 6.6 Fonts and Icons
+
+**Bottom line: this repository contains no font files and no icon assets.** Per-item attribution of responsibility is in [`NOTICE`](./NOTICE) chapter 9; what follows covers only the three things most often misunderstood:
+
+- **ExeOnMac extracts icons, but they never enter the repository.** Extraction operates on the installer supplied by the user, and the result is written only into that user's local `.app`, never distributed with this project.
+- **Chinese fonts must be supplied by the user.** This project bundles no commercial fonts and offers no font downloads. If a user places fonts such as Microsoft YaHei or SimSun into the shared layer, the licensing responsibility rests with that user.
+- **Win2Mac generating no icon is a legitimate state.** `--icon` accepts a user-supplied `.icns`; without one no icon is generated and the artefact remains legitimately distributable.
+
+Every visual element of the console and the dashboard is drawn with CSS — no bitmaps, no SVG assets, no icon font.
+
+---
+
+## 7. Installation and Deployment
+
+### 7.1 Prerequisites
+
+| Item | Requirement |
+|---|---|
+| Node.js | ≥ 20 (Mac2Win / Win2Mac / AppOnWin / console) |
+| Python | ≥ 3.11 (ExeOnMac) |
+| Swift | 6.0+, requires Xcode Command Line Tools (ExeOnMac compiles the launcher) |
+| Operating system | Per direction, see chapter 14 |
+
+This project **requires no** `npm install` or `pip install`—there are no third-party package dependencies.
+
+**Node.js's `≥ 20` is a hard requirement**, not a conservative choice: `node:test`'s `--test` concurrency model, the stable `fetch` implementation and ESM top-level await all become complete at 20. **Python's `≥ 3.11`** is required for `tomllib` and `X | Y` type syntax.
+
+### 7.2 Obtaining External Tools
+
+```bash
+# macOS: Homebrew
+brew install makensis sevenzip
+
+# Optional: improves Inno and MSI extraction fidelity
+brew install innoextract msitools
+
+# Required on Apple Silicon: Rosetta 2
+softwareupdate --install-rosetta --agree-to-license
+
+# If a Wine runtime is needed on macOS (ExeOnMac)
+cd exeonmac && python3 -m wepack.cli runtime install
+```
+
+The Windows side has no hard external-tool dependency; Win2Mac artefacts are best verified once on macOS.
+
+**Alternative 7-Zip sources**: if the Homebrew build cannot be installed, mac2win also searches `~/.wacmin/mac2win/bin/7zz`, MacPorts, PATH, and any 7-Zip embedded under `/Applications/*.app/Contents/MacOS/`. The `MAC2WIN_7ZIP` environment variable specifies a path explicitly; if that path is unusable it reports an explicit error rather than falling back silently.
+
+### 7.3 Contract Self-Check
+
+```bash
+node contracts/validate.mjs
+```
+
+### 7.4 Installing Each Direction
+
+No installation step is required; run directly from source. To use them as commands, each subproject's `package.json` declares a `bin` field so `npm link` exposes them globally; ExeOnMac's `wepack` can be installed into the current Python environment via `pip install -e .`.
+
+| Direction | Run directly | Global install (optional) |
+|---|---|---|
+| Mac2Win | `node mac2win/bin/mac2win.mjs` | `cd mac2win && npm link` |
+| ExeOnMac | `python3 -m wepack.cli` (inside `exeonmac/`) | `cd exeonmac && pip install -e .` |
+| Win2Mac | `node win2mac/bin/win2mac.mjs` | `cd win2mac && npm link` |
+| AppOnWin | `node apponwin/bin/apponwin.mjs` | `cd apponwin && npm link` |
+| console | `node console/bin/wacmin-console.mjs` | `cd console && npm link` |
+
+### 7.5 Unified Entry Point
+
+```bash
+node console/bin/wacmin-console.mjs list
+```
+
+### 7.6 Uninstallation
+
+| Item | How to uninstall |
+|---|---|
+| All code | Delete the repository directory; nothing is left anywhere on the system |
+| ExeOnMac artefacts | Drag the `.app` to the Trash; that completes uninstallation |
+| ExeOnMac shared layer | `~/Library/Application Support/wexe/` is retained for reuse by other bundles; thorough cleanup requires manual deletion, which is irreversible |
+| Mac2Win cache | `~/.wacmin/mac2win/cache/`; deleting it causes a re-download on the next build |
+| console history | `~/.wacmin/history.json` |
+| ai layer | Nothing to uninstall; it writes no state. If you registered the MCP server with a client, remove the entry from that client's configuration |
+
+`wepack` provides no `uninstall` subcommand and never deletes files outside a bundle on its own. Cleaning the `wexe` root directory is left to the user.
+
+---
+
+## 8. Quick Start
+
+This project has zero third-party package dependencies, so it runs immediately after `git clone` with no `npm install` or `pip install`.
+
+```bash
+git clone https://github.com/ntars/Wacmin.git
+cd Wacmin
+
+# 1. Contract self-check (verifies exit codes, error-code segments and report structure)
+node contracts/validate.mjs
+
+# 2. Show the status of all four directions
+node console/bin/wacmin-console.mjs list
+
+# 3. Aggregate environment self-check across directions (runs in parallel)
+node console/bin/wacmin-console.mjs doctor
+
+# 4. Check whether the four directions honour the contract (really invokes each)
+node console/bin/wacmin-console.mjs contract
+```
+
+### 8.1 Building a Windows Installer on macOS
+
+```bash
+cd mac2win
+
+# Check the environment first
+node bin/mac2win.mjs doctor
+
+# Preflight and print the plan only; no download, no build, no disk writes
+node bin/mac2win.mjs build /path/to/your-app --dry-run
+
+# Real build
+node bin/mac2win.mjs build /path/to/your-app
+
+# Or open the graphical interface
+node bin/mac2win.mjs ui /path/to/your-app
+```
+
+The artefact lands in `<project>/dist-mac2win/`, named like `your-app-1.0.0-x86-setup.exe`.
+
+**How to build each project type** (framework detection is automatic; `--framework` forces a choice):
+
+| Project type | Command | Artefact shape |
+|---|---|---|
+| Electron | `node bin/mac2win.mjs build ./my-electron-app` | A genuine native window, with the main executable renamed to your product name |
+| NW.js | `node bin/mac2win.mjs build ./my-nwjs-app` | Native window |
+| Tauri | `node bin/mac2win.mjs build ./my-tauri-app` | Browser UI by default; native window requires `buildRustShell: true` |
+| Plain Node service / static site | `node bin/mac2win.mjs build ./my-server` | Built-in static server plus launcher; UI in the browser |
+
+Tauri needs extra preparation (about 1.5 GB) for a native window:
+
+```bash
+rustup target add i686-pc-windows-msvc
+cargo install cargo-xwin
+```
+
+Then set `"buildRustShell": true` in `mac2win.config.json`.
+
+**Common commands**:
+
+```bash
+# Verify an existing artefact only
+node bin/mac2win.mjs verify ./dist-mac2win/my-app-1.0.0-x86-setup.exe
+
+# Graphical interface
+node bin/mac2win.mjs ui
+
+# Keep intermediate artefacts for investigation
+node bin/mac2win.mjs build ./app --keep-staging
+
+# Specify the output directory
+node bin/mac2win.mjs build ./app --out ./release
+
+# Force a framework
+node bin/mac2win.mjs build ./app --framework electron
+
+# Skip verification (not recommended)
+node bin/mac2win.mjs build ./app --no-verify
+```
+
+**What preflight output looks like**:
+
+```
+✓ Host OS: macOS 27.0.0 (arm64)
+✓ Host CPU architecture: arm64 (Apple Silicon)
+✓ Node version: v22.22.2
+✓ NSIS compiler: v3.13 (/opt/homebrew/bin/makensis)
+✓ Project directory: /path/to/project
+✓ Project framework: Tauri (high confidence): src-tauri/ directory present
+✓ Framework and architecture combination: Tauri + x86 feasible
+! Native window: no Rust shell, the UI will open in the system default browser
+✓ Host entry: /path/to/cordis-host/lib/index.js
+✓ Front-end output: /path/to/dist
+✓ Target architecture: x86 (32-bit, runs on both 32-bit and 64-bit Windows)
+```
+
+`!` marks a warning (can continue, with degradation); `✗` marks an error (halts).
+
+**Offline environments**: the first build downloads runtimes. Pre-download and specify them:
+
+```json
+{
+  "runtimeArchive": "/path/to/node-v22.23.5-win-x86.zip",
+  "runtimeChecksum": "9c01245683c87e3f81eedfbad82c1665611749627cd1b0b5a42921db9361b4a6",
+  "electronArchive": "/path/to/electron-v43.0.0-win32-ia32.zip"
+}
+```
+
+Once downloaded, the cache at `~/.wacmin/mac2win/cache/` prevents further downloads.
+
+**Common error codes at a glance**:
+
+| Code | One-line meaning | What to do |
+|---|---|---|
+| `M2W_2001` | makensis missing | `brew install makensis` |
+| `M2W_3001` | Runtime download failed | Check the network; or point `runtimeArchive` at a local file |
+| `M2W_4001` | Project build command failed | Run `npm run build` manually in a terminal first |
+| `M2W_4003` | Native module present | Switch to a pure-JS alternative (the error names the package) |
+| `M2W_5002` | NSIS compilation failed | Use `--keep-staging`, then run makensis manually |
+| `M2W_6001` | Artefact verification failed | **Do not distribute.** The log lists item-by-item results |
+
+### 8.2 Wrapping a Windows Installer as a .app on macOS
+
+```bash
+cd exeonmac
+
+# 1. Environment self-check
+python3 -m wepack.cli doctor
+
+# 2. Identify the installer
+python3 -m wepack.cli detect ~/Downloads/setup.exe
+
+# 3. Static extraction (optional, to confirm the main program)
+python3 -m wepack.cli extract ~/Downloads/setup.exe -o /tmp/out
+
+# 4. Install and produce the .app
+python3 -m wepack.cli install ~/Downloads/setup.exe -o "~/Applications/MyApp (Win).app"
+
+# 5. Open the result
+open "~/Applications/MyApp (Win).app"
+```
+
+After `install` completes it prints:
+
+```
+App bundle   /Users/u/Applications/MyApp (Win).app
+Type         nsis
+Install dir  drive_c/Wacmin/MyApp
+Exit code    0 (duration 131.7s)
+Disk usage   logical 2.4 GB / actual 2.4 GB
+Entry point  drive_c/Wacmin/MyApp/MyApp.exe
+Install log  .../Contents/Recipes/install.log
+```
+
+**Install a Wine runtime first on first use** (choose one of three):
+
+```bash
+# Download from GitHub (about 225 MB)
+python3 -m wepack.cli runtime install
+
+# Copy from an installed CrossOver / Whisky, no network
+python3 -m wepack.cli runtime install --from-vendor
+
+# Use a local archive
+python3 -m wepack.cli runtime install --archive /path/to/wine-devel-11.21-osx64.tar.xz
+
+# Check status
+python3 -m wepack.cli runtime status
+```
+
+The base layer and the launcher need to be built only once:
+
+```bash
+python3 -m wepack.cli layers build base   # reused by all subsequent bundles
+sh launcher/build.sh                      # compile the launcher
+```
+
+### 8.3 Building a macOS App Bundle on Windows
+
+```powershell
+cd win2mac
+node bin\win2mac.mjs build C:\path\to\app --executable .\MyApp --out .\dist
+```
+
+Common parameters:
+
+```powershell
+node bin\win2mac.mjs build .\app `
+  --name "My App" `
+  --version 1.0.0 `
+  --bundle-id com.example.myapp `
+  --executable .\MyApp `
+  --icon .\icon.icns `
+  --associate .myext `
+  --min-macos 13.0
+```
+
+Running on a non-Windows host prints a warning without halting; add `--strict-host` to refuse.
+
+### 8.4 Assessing Whether a macOS App Can Run on Windows
+
+```bash
+# Structure and framework parsing (runs on any platform)
+node apponwin/bin/apponwin.mjs assess /path/to/MyApp.app
+node apponwin/bin/apponwin.mjs parse /path/to/MyApp.app
+
+# Feasibility spike (requires Windows + WSL2 + Darling; reports blocked otherwise)
+node apponwin/bin/apponwin.mjs spike
+```
+
+### 8.5 Driving Any Direction Through the Unified Entry Point
+
+```bash
+node console/bin/wacmin-console.mjs run mac2win build ../myapp --dry-run
+node console/bin/wacmin-console.mjs run exeonmac version
+node console/bin/wacmin-console.mjs web 7777   # start the web dashboard, bound to 127.0.0.1 only
+```
+
+### 8.6 Handing It to an AI
+
+Three ways in; pick the one matching where you are.
+
+**In a terminal** (`wacmin` emits JSON by default so scripts and agents can parse it; `--human` gives readable output):
+
+```bash
+node ai/bin/wacmin.mjs list                          # what each direction supports
+node ai/bin/wacmin.mjs status --human                # what is installed, what is missing
+node ai/bin/wacmin.mjs doctor mac2win                # missing tools and how to install them
+node ai/bin/wacmin.mjs run apponwin assess /Applications/X.app
+node ai/bin/wacmin.mjs contract                      # contract compliance across four directions
+```
+
+Exit codes pass through unchanged: if `wacmin run exeonmac doctor` returns 5, `wacmin` returns 5. Scripts can judge success without parsing JSON.
+
+**In an MCP-capable client** (Claude Desktop, WorkBuddy, Cline, etc.), register `ai/bin/wacmin-mcp.mjs` as a stdio server:
+
+```json
+{
+  "mcpServers": {
+    "wacmin": {
+      "command": "node",
+      "args": ["/absolute/path/Wacmin/ai/bin/wacmin-mcp.mjs"]
+    }
+  }
+}
+```
+
+`node ai/bin/wacmin.mjs mcp` prints a ready-to-paste snippet with the local path filled in. If the client cannot find `node`, set `command` to the output of `which node`. Once registered, the client sees six tools and the agent decides when to call them.
+
+**In an agent's prompt**: `ai/skills/wacmin/SKILL.md` is the discriminator an agent reads (when this repository applies, how to choose among the four directions), while `ai/experts/wacmin-expert.md` is the expert profile for when judgement criteria matter more than step-by-step operations.
+
+---
+
+## 9. Configuration
+
+Configuration has three layers: **contract files** (shared by all four directions, not overridable per direction), **direction configuration files** (per-project configuration for each direction), and **environment variables** (deployment-time overrides).
+
+### 9.1 Contract Files
+
+These three files are the common language of the four directions. Changing them changes the external behaviour of every direction.
+
+| File | Content | Change rule |
+|---|---|---|
+| `contracts/exit-codes.json` | The semantics of the nine exit codes and the permitted error-code segments per code | **Append only; never change meanings.** Once published, changing a code value breaks every script that depends on it |
+| `contracts/error-prefixes.json` | The four directions' error-code prefixes (`M2W` / `EOM` / `AOW` / `W2M`) and the seven-segment allocation | Segments may not cross boundaries; a new direction must register its prefix here first. `WAC` and `CNT` are reserved |
+| `contracts/run-report.schema.json` | The structure of `--report` / `--json` output | A breaking change must increment `schemaVersion`; `console` branches on it |
+
+`contracts/validate.mjs` is the self-checker for these three files, and it also validates individual reports:
+
+| Category | Content |
+|---|---|
+| Contract self-consistency | Exit codes cover the mandatory values (0/1/2/130), no two meanings collide, every referenced error code falls in a defined segment; all four prefixes present, no duplicates, no reserved prefix; each segment's `range` resolves back to that segment |
+| Report structure | **Recursive** validation against `run-report.schema.json`: required fields, types, enums, patterns, ranges, and `additionalProperties: false` at **every level** |
+| Cross-field invariants | `ok === (exitCode === 0)`; `ok=false` requires `error` while `ok=true` requires `error: null`; no `ok` stage may follow a `failed` one; error-code prefix belongs to the direction, its segment exists, and it **pairs with the exit code** |
+
+**Tests for the checker itself**: `contracts/validate.test.mjs`. This script is the single authority in CI for "is the contract obeyed", yet it had no tests for a long time — so two blind spots persisted:
+
+1. **`additionalProperties: false` was never enforced** — the schema declares it on every level, but the script only compared top-level `required`. A report with `{"thisFieldShouldNotExist": 123}` still printed "✓ contract self-consistent".
+2. **Segments were inferred from the first digit** — `9999` (internal error, an independent segment) and `9998` (part of segment `9000`, range `9001-9998`) both start with 9 and were both mapped to `9000`. The consequence: the `9999` segment could **never be matched**. Delete it from `error-prefixes.json` entirely and validation stays green.
+
+Segment membership is now decided by the actual `range` in `error-prefixes.json` (`segmentOf()`), shared by both call sites.
+
+**Division of labour and consistency between the two checkers**: `contracts/validate.mjs` runs offline on a single report; `console/src/contract-check.mjs` actually spawns all four directions and reads their runtime output. Both **must reach the same verdict** on the same report — guarded by `console/test/contract-consistency.test.mjs` (17 samples). That guard is what first exposed three divergences: extra fields on nested levels, `ok=true` carrying an `error`, and a `direction` outside the enum (previously only "matches the caller" existed, so a caller and implementation that were wrong together both passed).
+
+```bash
+# Contract self-check
+node contracts/validate.mjs
+
+# Validate one report; --exit-code also compares against the real process exit code
+node contracts/validate.mjs --report /tmp/report.json --exit-code 0
+```
+
+### 9.2 Mac2Win Configuration File
+
+Place `mac2win.config.json` at the project root (or `mac2win.json`; the first one that exists is used). The two filenames are equivalent, and `mac2win.config.json` takes precedence when both exist.
+
+```json
+{
+  "productName": "Example App",
+  "version": "1.0.0",
+  "publisher": "Ntarstudio",
+  "target": "x86",
+  "format": "nsis",
+  "entry": "main.js",
+  "frontendDist": "dist",
+  "runtimeVersion": "22.23.5",
+  "compression": "lzma",
+  "desktopShortcut": true,
+  "requireAdmin": false,
+  "alsoZip": false,
+  "verify": true
+}
+```
+
+**All 32 configurable keys**:
+
+| Key | Default | Description |
+|---|---|---|
+| `framework` | `"auto"` | `auto` / `electron` / `nwjs` / `tauri` / `node` / `static`. `auto` decides from `package.json` dependencies and directory structure |
+| `target` | `"x86"` | `x86` / `x64`. `x86` is the project's primary target; `x64` is also supported |
+| `format` | `"nsis"` | `nsis` / `zip` |
+| `productName` | Inferred from `package.json` | Installer display name and artefact filename |
+| `version` | Inferred from `package.json` | Three-part version number |
+| `publisher` | Inferred from `package.json`'s `author` | Publisher, written into the installation wizard |
+| `identifier` | `null` | Application identifier, used for the registry uninstall entry |
+| `frontendDist` | Auto-detects `dist` / `build` / `out` / `.output/public` | Front-end output directory (relative to the project root). Adopted only if it contains `index.html` |
+| `entry` | Inferred from `package.json`'s `bin` / `main` | Host entry script (relative to the project root) |
+| `resources` | `[]` | Extra files or directories shipped with the artefact |
+| `buildCommand` | Inferred as `npm run build` when `scripts.build` exists | Project build command run before packaging |
+| `preflightCommands` | `[]` | Commands run during preflight to surface environment problems early |
+| `launcherExe` | `"node.exe"` | Launcher filename, must be `.exe` |
+| `launcherArgs` | `["{entry}"]` | Launch arguments; `{entry}` is replaced with the entry path |
+| `env` | `{}` | Environment variables injected into the target application |
+| `dataEnv` | `null` | Names an environment variable whose value is the application data directory |
+| `runtimeVersion` | `"22.23.5"` | Node.js runtime version |
+| `runtimeArchive` | `null` | Local runtime file (`node.exe` or a `win-x86` zip), for offline environments |
+| `runtimeChecksum` | `null` | Expected SHA-256 paired with `runtimeArchive` |
+| `electronVersion` | `"43.0.0"` | Electron version; **must be ≤ 43 for the x86 target** |
+| `electronArchive` | `null` | Local Electron zip, for offline environments |
+| `nwjsVersion` | `"0.90.0"` | NW.js version |
+| `nwjsFlavor` | `"normal"` | NW.js distribution flavour |
+| `nwjsArchive` | `null` | Local NW.js zip |
+| `buildRustShell` | `false` | Whether to cross-compile the Rust shell for a Tauri project |
+| `tauriDir` | `null` | Path to Tauri's `src-tauri` directory |
+| `rustProfile` | `"release"` | Rust compilation profile |
+| `iconFile` | `null` | Installer icon, must be `.ico` |
+| `licenseFile` | `null` | Licence file shown in the installation wizard |
+| `outDir` | `"dist-mac2win"` | Output directory (relative to the project root, or absolute) |
+| `artifactName` | `null` | Artefact filename. Left empty, it is generated from product name and version |
+| `verify` | `true` | Whether to run full verification after the build. **Turning it off skips verification only, not safety checks** |
+| `alsoZip` | `false` | Additionally produce a portable zip alongside the installer |
+| `compression` | `"lzma"` | `lzma` / `zlib` / `bzip2` / `none` |
+| `desktopShortcut` | `true` | Whether to create a desktop shortcut |
+| `requireAdmin` | `false` | Whether installation requires administrator rights |
+| `keepStaging` | `false` | Retain the intermediate staging directory for troubleshooting |
+
+**Configuration merge order** (later overrides earlier):
+
+```
+built-in defaults → package.json inference → framework inference → configuration file → command-line arguments
+```
+
+**Framework detection must precede configuration merging**, because it determines where the defaults for `entry` and `frontendDist` come from, and those defaults must in turn be overridable by user configuration. A reversed order produces either user settings silently overwritten by framework inference, or framework inference that never takes effect.
+
+**Configuration validation runs after step 4 as a single pass**, reporting all problems at once rather than exiting at the first:
+
+| Check | Behaviour on failure |
+|---|---|
+| `target` outside the allowed set | Error, listing the valid values |
+| `format` outside the allowed set | Same |
+| `compression` outside the allowed set | Same |
+| `verify` / `alsoZip` not boolean | Error |
+| `format` already `zip` while `alsoZip: true` | Report "meaningless" and give the two correct forms |
+| `version` not three-part | Error, suggesting at least `1.0.0` |
+| Both `entry` and `frontendDist` empty | Report "nothing to package" |
+| `launcherExe` not `.exe` | Report "a Windows launcher can only be a PE-format .exe" |
+
+**Why validation reports everything at once**: a configuration file can only be edited in one place at a time; reporting one problem per run forces five or six rounds. After merging, validation runs once and covers everything.
+
+### 9.3 Environment Variables
+
+| Variable | Direction | Default | Purpose |
+|---|---|---|---|
+| `MAC2WIN_CACHE` | Mac2Win | `~/.wacmin/mac2win/cache` | Runtime cache directory. Reused across projects, avoiding re-downloads |
+| `MAC2WIN_7ZIP` | Mac2Win | Auto-detected | Explicit 7-Zip path. **An unusable path reports an explicit error with no silent fallback** (see 5.3.3) |
+| `MAC2WIN_NO_7ZIP` | Mac2Win | Unset | Setting `1` forces "no 7-Zip present", used to exercise the "verification incomplete" branch |
+| `MAC2WIN_MAKENSIS` | Mac2Win | Auto-detected | Explicit `makensis` path |
+| `MAC2WIN_NODE_BASE` | Mac2Win | `https://nodejs.org/dist` | Node.js runtime download base URL; point at an internal mirror when the network is restricted |
+| `WACMIN_HOME` | console | `~/.wacmin` | Dashboard history directory. Used for tests and multi-instance isolation, avoiding pollution of real history |
+| `WACMIN_PORT` | console | `0` (random) | Default port for the web dashboard |
+| `WACMIN_TIMEOUT_MS` | console | `1800000` (30 minutes) | Per-call subprocess timeout. `0` means unlimited |
+| `WEXE_HOME` | ExeOnMac | `~/Library/Application Support/wexe` | Root of runtime, prefix, shared layers and recipe library |
+| `WEXE_RECIPES` | ExeOnMac | `~/.wexe/recipes` | Recipe library directory |
+| `WEXE_7Z` | ExeOnMac | Probed from PATH | Explicit 7-Zip binary path |
+| `WEXE_INNOEXTRACT` | ExeOnMac | Probed from PATH | Explicit innoextract path |
+| `WEXE_MSIEXTRACT` | ExeOnMac | Probed from PATH | Explicit msiextract path |
+
+**Why `MAC2WIN_CACHE` is partitioned by architecture**: `x86` and `x64` `node.exe` are two different files. Sharing one directory lets them overwrite each other and yields an artefact that claims x64 but is actually x86—an error that only surfaces during artefact verification. Cache directory names carry an architecture tag (`node-22.23.5-win-x86` / `node-22.23.5-win-x64`), eliminating the problem at its root.
+
+**`WEXE_HOME` is used extensively in tests**—pointing the shared layer at a temporary directory gives full isolation without touching the real user directory.
+
+**`MAC2WIN_NO_7ZIP=1` is an escape hatch for the "verification incomplete" branch.** It is not for coverage padding: the decisive branch for a missing 7-Zip is only reached when **the user's machine happens to lack it**. A developer machine almost certainly has it, so the branch may go unexercised for a year—and when it is finally reached, the user receives a report that lied.
+
+### 9.4 ExeOnMac Directories and Configuration
+
+**Shared layer directory** (`WEXE_HOME` redirects it wholesale):
+
+```
+~/Library/Application Support/wexe/
+├── layers/
+│   ├── base/            # Windows skeleton (already contains the full VC++ / ATL set)
+│   ├── vcpp/            # VC++ runtime (optional; only to overwrite with Microsoft originals)
+│   ├── mfc/             # MFC runtime (absent from base; user-supplied)
+│   ├── dotnet/          # .NET Framework (user-supplied)
+│   └── fonts-cn/        # Chinese fonts (base's Fonts is empty; user-supplied)
+├── runtime/
+│   └── wine/            # Wine runtime (x86_64)
+└── logs/
+```
+
+**In-bundle configuration** (`compat.yaml`): located at `{App} (Win).app/Contents/Recipes/compat.yaml`, the single source of truth for that bundle. The full field definition is in `exeonmac/schema/compat.schema.json`.
+
+```yaml
+app: WeChat
+version: "3.9.10"
+entry: drive_c/Program Files/Tencent/WeChat/WeChat.exe
+installer:
+  type: nsis
+  silent_args: " /S"
+  completed: true
+  fallback_interactive: false
+layers:
+  - base
+  - vcpp
+  - fonts-cn
+font_map:
+  微软雅黑: PingFang SC
+  宋体: Songti SC
+file_associations: []
+known_issues: []
+bundle_id: com.wexe.win.tencent.wechat
+icon_source: exe:drive_c/Program Files/Tencent/WeChat/WeChat.exe#0
+```
+
+Additional field conventions:
+
+1. **`entry` must be relative to `Contents/Resources/Private/`**, starting with `drive_c/` and using forward slashes. Not `C:\` form, not an absolute path.
+2. **`layers[0]` must be `base`**. Order is mount order; later layers overwrite same-named files from earlier ones. Enforced by a hard check in code.
+3. **`silent_args` preserves any leading space** (e.g. `" /S"`). NSIS's `/S` relies on that space to separate it from a path argument.
+4. **`font_map` keys are Windows font names** and values are macOS font names. The launcher generates `fontsub.reg` and imports it with `wine regedit /S` before starting.
+5. **`file_associations` is empty by default**. When non-empty, elements look like `.7z`, and wepack generates `CFBundleDocumentTypes` accordingly.
+6. **`known_issues` holds human-readable sentences**, not error codes. The UI displays them verbatim.
+
+**Recipe library** (`~/.wexe/recipes/<key>.yaml`) caches "what this installer produces".
+
+**The key is the first 16 hex digits of the installer's SHA-256.** Content rather than filename, because re-downloading often yields `setup (1).exe`; a content-derived key hits regardless of the name.
+
+Recipes store **the entry program and dependency layers**—both discovered after installation, and discovery itself is heuristic (scoring to pick the main program, scanning the import table to match layers). Caching them buys two things:
+
+| Benefit | Explanation |
+|---|---|
+| Speed | Skips entry scanning (about 10 ms) and layer matching (about 24 ms); hashing a 33 MB installer takes only 20 ms |
+| Stability | In directories with multiple main programs, a re-scan could in theory pick a different exe; the recipe locks in the previous result |
+
+Management commands:
+
+```bash
+wepack recipe list                    # list local recipes
+wepack recipe show <key|installer>    # inspect a recipe
+wepack recipe save <app>              # export a recipe from a built .app
+wepack recipe rm <key>                # delete a recipe (moved to the Trash, recoverable)
+```
+
+`--no-recipe` bypasses the library entirely (neither reading nor writing), useful for investigating "is the cache causing this odd behaviour".
+
+**Silent parameter table**:
+
+| Installer | Parameters | Note |
+|---|---|---|
+| NSIS | `/S /D=C:\Wacmin\AppName` | `/D` must be last and **unquoted**; the path must not contain spaces (see 5.6.1) |
+| Inno Setup | `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=C:\...` | `/DIR=` is **also unquoted**—wine adds the quotes; adding them ourselves causes escaping |
+| InstallShield | `/s /v/qn` | Must not be written `/v" /qn"`; literal quotes get escaped by wine |
+| MSI | `msiexec /i pkg.msi /qn /norestart` | |
+| WiX Burn | `/quiet /install /norestart` | |
+| Squirrel | `--silent` | Accepts no directory parameter; installs to `%LOCALAPPDATA%\<AppName>` |
+
+`--silent-args` overrides the built-in parameters.
+
+### 9.5 Win2Mac / AppOnWin Configuration
+
+These two directions currently accept command-line parameters only and read no configuration file.
+
+- **Win2Mac**: `--name` / `--version` / `--executable` / `--payload` / `--icon` / `--bundle-id` / `--vendor` / `--associate` / `--min-macos` / `--category` / `--strict-host` and others; the complete list is in `node win2mac/bin/win2mac.mjs build --help`.
+- **AppOnWin**: `--sample` / `--app` for `spike`; `assess` and `parse` accept a single `.app` path.
+
+**Why these two directions have no configuration file**: their parameter sets are too small to justify one, and a configuration file would only add the interpretive cost of "which takes precedence, the file or the command line".
+
+---
+
+## 10. API and Module Reference
+
+This project offers three external interfaces: **the command line** (one per direction, unified through the contract), **local HTTP interfaces** (each direction's graphical interface), and **MCP tools** (for AI clients). There is no SDK; module-level APIs are internal implementation details, listed here by responsibility so problems can be located.
+
+All three interfaces are shells over the same layer: each ultimately calls `console/src/directions.mjs` to spawn a subprocess, and no path bypasses the contract.
+
+### 10.1 Command-Line Interface
+
+The subcommands and exit codes of the four directions follow the same contract.
+
+| Direction | Command | Subcommands |
+|---|---|---|
+| Mac2Win | `mac2win` | `build` / `verify` / `ui` / `doctor` |
+| ExeOnMac | `wepack` | `detect` / `extract` / `install` / `package` / `build` / `layers` / `recipe` / `runtime` / `doctor` / `version` |
+| Win2Mac | `win2mac` | `build` / `verify` / `doctor` |
+| AppOnWin | `apponwin` | `assess` / `parse` / `spike` / `doctor` |
+| Unified entry | `wacmin-console` | `list` / `run` / `doctor` / `contract` / `web` |
+| AI unified entry | `wacmin` | `list` / `status` / `run` / `doctor` / `contract` / `mcp` / `skill` |
+
+**Common options** (identical across directions): `--json` outputs machine-readable results, `--report` outputs the unified run report, `--verbose` enables debug-level logs, `-h/--help`, `-v/--version`.
+
+**Relationship between `--json` and `--report`**: `--report` emits exactly the structure defined by `contracts/run-report.schema.json`; `--json` is an alias or subset in some directions. Both share the same constraint: **stdout carries only JSON and logs go to stderr**, so a pipe can hand stdout directly to `jq`.
+
+**ExeOnMac failure output format**:
+
+```json
+{
+  "ok": false,
+  "error": "File not found: /tmp/x.exe",
+  "hint": null,
+  "exit_code": 2
+}
+```
+
+`ok` is equivalent to `supported`. A non-null `unsupported_reason` implies exit code 4.
+
+### 10.2 Unified Run Report
+
+The structure emitted by `--report` is defined by `contracts/run-report.schema.json` with `additionalProperties: false`.
+
+| Field | Type | Description |
+|---|---|---|
+| `schemaVersion` | integer, fixed `1` | Format version. Incremented on breaking changes; `console` branches on it |
+| `direction` | enum | `mac2win` / `exeonmac` / `apponwin` / `win2mac` |
+| `ok` | boolean | Overall success, equivalent to `exitCode === 0` |
+| `exitCode` | integer | Process exit code, see `exit-codes.json` |
+| `command` | string | The subcommand actually executed |
+| `startedAt` / `finishedAt` | date-time | Start and end times |
+| `durationMs` | integer | Elapsed time |
+| `host` | object | Host snapshot: `platform`, `arch` (required), `osVersion`, `toolVersion` (optional) |
+| `input` | object | Input identification: `path`, `kind`, `confidence`, `evidence[]`, `supported`, `unsupportedReason` |
+| `stages[]` | array | Per-phase records, each with `id`, `name`, `status` (`pending`/`running`/`ok`/`failed`/`skipped`), `durationMs`, `message`, `errorCode` |
+| `artifacts[]` | array | Artefact list, each with `path`, `kind`, `bytes` (required), `sha256`, `target` (optional) |
+| `checks[]` | array | Artefact verification items, each with `name`, `passed` (required), `detail`, `severity` (optional, enum `required` / `advisory`) |
+| `warnings[]` | string[] | Non-blocking facts the user should know, such as degradation or precision loss |
+| `error` | object \| null | Failure details: `code` (must match `^[A-Z0-9]{2,4}_[0-9]{4}$`), `message` (required), `hint`, `details[]` (optional). `null` on success |
+
+**`checks[].passed` is a boolean, not `ok`**. This was a real trap: internal objects expressed the field as `{name, ok, detail}`, and direct serialisation produced a contract error reading "missing boolean field `passed` (actual keys: name, ok, detail)". Because `additionalProperties: false`, the extra `ok` was also invalid. **The fix added a field-mapping layer rather than changing internal naming**—internal code keeps the more natural semantics, the external contract stays stable, and each side honours its own concerns.
+
+**`artifacts[].path` must be a non-empty string.** This requirement exposed an `undefined !== null` defect; see 5.3.4.
+
+**`stages` stop on failure.** No subsequent phases should appear after a failure, so seeing `running` after `failed` in a report is itself evidence of an implementation bug.
+
+### 10.3 Phase Breakdown by Direction
+
+Using Mac2Win as the example, `build` has eight phases with weights (weights drive the overall progress percentage):
+
+| # | `id` | Name | Weight |
+|---|---|---|---|
+| 1 | `preflight` | Preflight | 1 |
+| 2 | `project-build` | Project build | 3 |
+| 3 | `runtime` | Prepare runtime | 4 |
+| 4 | `collect` | Collect dependencies | 2 |
+| 5 | `stage` | Stage files | 4 |
+| 6 | `manifest` | Generate manifest | 2 |
+| 7 | `package` | Package installer | 5 |
+| 8 | `verify` | Verify artefact | 3 |
+
+**Why weights are not uniform**: averaged across phases, packaging (over half the total duration) would occupy only 1/8 and users would watch the bar stall at 87%. Weighted by expected duration, the progress curve roughly matches actual elapsed time.
+
+**ExeOnMac's eight phases**: `detect` → `mkdir` → `prefix` → `install` → `scan` → `package` → `register` → `write`. Isomorphic to Mac2Win's eight phases, differing in that step 3 creates a Wine prefix rather than preparing a Node runtime.
+
+### 10.4 Local HTTP Interfaces
+
+Two graphical interfaces each start a local service, **bound to `127.0.0.1` only**.
+
+**Mac2Win console** (`mac2win ui`):
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/state` | GET | Current state snapshot |
+| `/api/preflight` | POST | Run preflight without building |
+| `/api/build` | POST | Start a build |
+| `/api/cancel` | POST | Cancel the running build |
+| `/api/verify` | POST | Verify a specified artefact |
+| `/api/probe` | POST | Probe a project directory for framework and entry |
+| `/api/reveal` | POST | Reveal the artefact in the file manager |
+| `/api/events` | GET | SSE event stream: progress, logs, completion |
+
+**Console dashboard** (`wacmin-console web`):
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/history` | GET | The last 20 run records |
+| `/api/status` | GET | Availability of the four directions |
+| `/api/contract` | GET | Contract check results |
+| `/api/run` | POST | Trigger a subcommand in some direction |
+
+**Why SSE instead of WebSocket**: progress is one-way (server → browser), for which SSE suffices: native `EventSource` support, ordinary HTTP transport, automatic reconnection. WebSocket would add handshake and heartbeat complexity for no benefit.
+
+### 10.5 Internal Module Boundaries
+
+Module APIs are not an external commitment, but knowing the division of responsibilities helps locate problems.
+
+**Mac2Win** (`mac2win/src/`):
+
+| Module | Responsibility |
+|---|---|
+| `core/config.mjs` | Configuration reading, framework inference, validation, normalisation |
+| `core/preflight.mjs` | Host, architecture and external-tool preflight |
+| `core/frameworks.mjs` | Framework detection (Electron / NW.js / Tauri / Node / static) |
+| `core/runtime.mjs` | Node runtime download, caching, architecture assertion |
+| `core/electron.mjs`, `core/nwjs.mjs` | Runtime acquisition and assembly per framework |
+| `core/rust-shell.mjs` | cargo-xwin compilation of the Tauri Rust shell |
+| `core/collector.mjs` | Walk the require graph from the entry, intercept native modules |
+| `core/stager.mjs` | Lay out directories per framework, inject compatibility shims |
+| `core/nsis.mjs` | Generate the NSIS script and compile it |
+| `core/zip.mjs`, `core/zipwriter.mjs` | zip reading (with path traversal protection) and writing (with Unix permission bits) |
+| `core/builder.mjs` | Orchestrate the eight phases, chaining the whole flow |
+| `core/report.mjs` | Phase tracking and report generation |
+| `core/errors.mjs` | Error code definitions and exit-code mapping |
+| `verify/pe.mjs` | PE/COFF header parsing |
+| `verify/artifact.mjs` | Three-state artefact verification |
+| `server/app.mjs` | Console HTTP service |
+| `launcher/bootstrap.mjs` | The in-artefact launcher (static server + path traversal protection) |
+
+**Win2Mac** (`win2mac/src/`): `core/bundle.mjs` (`.app` directory assembly), `core/plist.mjs` (`Info.plist` generation), `core/wexezip.mjs` (zip writer preserving Unix mode), `core/verify.mjs` (artefact verification), `core/builder.mjs` (orchestration), `core/report.mjs`, `core/errors.mjs`.
+
+**AppOnWin** (`apponwin/src/core/`): `macho.mjs` (Mach-O header parsing), `plist.mjs` (`Info.plist` parsing), `assess.mjs` (framework determination and portability assessment), `spike.mjs` (three-gate verification), `report.mjs`, `errors.mjs`.
+
+**ExeOnMac** (`exeonmac/wepack/`):
+
+| Package | Responsibility |
+|---|---|
+| `cli.py` | All subcommand entry points, argument parsing, doctor |
+| `pe.py` | PE parsing: headers, sections, resource tree, import table, version resource |
+| `tools.py` | External tool location and smoke testing |
+| `runtime.py` | Wine runtime download, extraction, architecture validation |
+| `detect/` | Installer detection, including `cfb.py` (compound document) and `msi_tables.py` (MSI table parsing) |
+| `extract/` | Static extraction and main-exe candidate ranking (`candidates.py`) |
+| `prefix/` | Wine prefix creation, clonefile, validation, space accounting |
+| `install/` | Silent installation orchestration, restart suppression, process cleanup |
+| `layers/` | Layer build, validation, mounting, import-table matching (`match.py`) |
+| `package/` | `.app` assembly, `Info.plist`, icon composition, Swift launcher compilation, artefact verification |
+| `recipes/` | compat.yaml read/write plus the recipe library |
+| `models.py` | Cross-stage data models |
+| `errors.py` | Error types and exit codes |
+| `paths.py` | Global path resolution (the only place permitted to write state) |
+| `log.py` | Logging (stderr plus optional file) |
+
+**Module divisions follow process phases, not technical layers.** `detect/` only detects and `extract/` only extracts; neither calls the other's internal functions, communicating solely through `models.Detection` / `models.ExtractResult`.
+
+**Console** (`console/src/`): `directions.mjs` (dispatch capability for the four directions: entry point, subcommands, produces, and `runDirection`'s process management and cancellation), `server.mjs` (local service, SSE, history persistence), `contract-check.mjs` (four-direction contract compliance checking, including reverse probes).
+
+**`directions.mjs` is the capability; `bin/wacmin-console.mjs` is the entry point.** The direct reason for splitting them is that the AI layer also needs to dispatch the four directions, while the entry file parses argv, prints usage, and sets `process.exitCode` when imported — `console` never reads its own stdout, so this stayed hidden for a long time, but the MCP specification requires `stdout` to carry protocol messages only, making the same pattern fatal in an MCP server. After the split the entry file carries an `isDirectRun()` guard (comparing via `realpathSync` rather than string equality, since symlinks and `./` prefixes would otherwise slip through), so importing it has zero side effects.
+
+**AI integration layer** (`ai/src/`):
+
+| Module | Responsibility |
+|---|---|
+| `protocol.mjs` | JSON-RPC encoding/decoding, newline framing, error code constants. Pure functions, touches no process |
+| `tools.mjs` | Definitions of the six tools (name, description, JSON Schema, annotations) and parameter-to-argv translation |
+| `server.mjs` | Handshake and version negotiation, `tools/list`, `tools/call` dispatch, `notifications/cancelled` cancellation |
+
+**The boundary between the three is "does it have side effects"**: `protocol.mjs` runs in any context; `tools.mjs` performs pure transformation and issues no commands; only `server.mjs` touches stdin/stdout and subprocesses. Consequently protocol-layer tests need no process, and tool-layer tests need no real build.
+
+**Why a translation layer exists instead of exposing argv straight to the agent**: field names do not map one-to-one onto positional command-line arguments — the origin field is called `project` in `mac2win` / `win2mac` but `installer` in `exeonmac` (which has no notion of a "project", only an installer). An agent assembling the command line itself would copy `project` across to `exeonmac`, producing `wepack build -o /tmp/o` and an argparse error about a missing `installer` — **the error points at a missing argument while the real cause is a dropped field in the translation layer**. Keeping that mapping in one place means the agent only has to state which direction, what the origin is, and where the artefacts go.
+
+### 10.6 MCP Tool Contract
+
+The transport layer follows MCP 2025-06-18 stdio: **newline-delimited JSON-RPC**, not LSP's `Content-Length:` framing. `stdout` may carry protocol messages only; any logging must go to `stderr`. This is not fastidiousness — one extra non-protocol line on `stdout` and the client's parser drops the stream immediately.
+
+**Handshake**: the client sends `initialize` (with `protocolVersion` / `capabilities` / `clientInfo`); the server replies with `protocolVersion` / `capabilities` / `serverInfo` / `instructions`. Version negotiation is "echo the requested version if supported, otherwise reply with our latest" — **never reject outright**, since rejection makes the client treat the server as unavailable when only the version number differs.
+
+**Tool results carry two distinct error layers**:
+
+| Layer | Expression | When |
+|---|---|---|
+| Protocol error | Top-level `error` field (`-32700` / `-32600` / `-32601` / `-32602` / `-32603`) | The request itself is invalid: malformed JSON, unknown method, wrong argument type |
+| Tool execution error | `result.isError = true`, with a readable reason in `content` | The command genuinely ran and failed: missing file, missing 7-Zip, failed verification |
+
+**A failed build is valid information and must not be swallowed as a protocol error.** Wrapping it as `-32603` leaves the agent with only "internal error", no `M2W_1002` code, and therefore no way to tell the user "what is missing is not your project but 7-Zip".
+
+**Parameters of the six tools** (fields other than `required` may be omitted):
+
+| Tool | Main parameters | Returns |
+|---|---|---|
+| `wacmin_list_directions` | none | Per direction: `host`, `installed`, `produces`, `subcommands` |
+| `wacmin_doctor` | `direction` | Presence of each external tool plus install commands |
+| `wacmin_build` | `direction` (required), `project` / `installer` (one per direction), `outDir`, `arch`, `extraArgs[]` | Artefact paths, byte sizes, `ok` / `complete`, `checks[]` |
+| `wacmin_verify` | `direction`, artefact path | Three-state verification result, no rebuild |
+| `wacmin_assess` | `appPath` | Framework verdict, portability score, blockers |
+| `wacmin_run` | `direction` (required), `command` (required), `args[]` | Passthrough stdout and exit code |
+
+**`wacmin_build` declares only `direction` as required, and not out of laziness**: the origin field is one of two depending on direction (`project` or `installer`), and JSON Schema's `required` cannot express "A or B, at least one". Hard-coding `required: ['direction', 'project']` would reject legitimate `exeonmac` calls. Validation lives in the translation layer, where the error message is also more useful than a schema violation.
+
+**Cancellation**: the client sends `notifications/cancelled` with `params.requestId`; the server looks up the table and aborts the matching request. Unknown IDs are ignored silently — the specification requires it, and a client may send a cancellation after the response has already arrived. Aborting must genuinely kill the subprocess **tree** (`SIGTERM` → 2 seconds → `SIGKILL`), otherwise the tool reports "cancelled" while half an artefact sits on disk.
+
+**Tool annotations change client behaviour**: clients mostly skip the confirmation prompt for tools with `readOnlyHint: true`. So `wacmin_build` / `wacmin_run` must be marked non-read-only — marking build read-only would let an agent write to disk and run for minutes without the user knowing.
+
+---
+## 11. Directory Structure
+
+### 11.1 Repository Structure
+
+```
+Wacmin/
+├── contracts/                 Shared contract (single source of truth)
+│   ├── exit-codes.json        Unified exit codes
+│   ├── exit-codes.schema.json Schema for the exit-code file
+│   ├── error-prefixes.json    Error-code prefixes and segment allocation
+│   ├── run-report.schema.json --report / --json output structure
+│   ├── validate.mjs           Contract self-check + report validation
+│   └── validate.test.mjs      Tests for the checker itself
+├── mac2win/                   Direction 1 · Produce Windows installers on macOS
+│   ├── bin/mac2win.mjs        Single command entry
+│   ├── src/                   Core implementation
+│   │   ├── core/              config, preflight, frameworks, runtime, collector, stager, packaging, orchestration, reporting
+│   │   ├── verify/            PE parsing and artefact verification
+│   │   └── server/            Local console HTTP service
+│   ├── web/                   Console front-end static assets
+│   ├── test/
+│   └── package.json
+├── exeonmac/                  Direction 2 · Run Windows programs on macOS
+│   ├── bin/wepack             Development entry (PYTHONPATH injection, no install)
+│   ├── wepack/                Python package
+│   │   ├── cli.py             Subcommand entry and doctor
+│   │   ├── pe.py              PE parsing
+│   │   ├── tools.py           External tool location and smoke testing
+│   │   ├── runtime.py         Wine runtime management
+│   │   ├── detect/            Installer detection (incl. CFB, MSI tables)
+│   │   ├── extract/           Static extraction and main-program scoring
+│   │   ├── prefix/            Prefix creation and clonefile
+│   │   ├── install/           Silent installation orchestration
+│   │   ├── layers/            Layer building and import-table matching
+│   │   ├── package/           .app assembly, icons, launcher build, verification
+│   │   ├── recipes/           compat.yaml read/write and recipe library
+│   │   └── models.py / errors.py / paths.py / log.py
+│   ├── launcher/              Swift launcher (AppKit + Foundation)
+│   ├── tools/badge.swift      Icon badge composition
+│   ├── runtime/fetch.sh       Wine runtime download script (entry point without installing the Python package)
+│   ├── schema/compat.schema.json
+│   ├── tests/
+│   └── pyproject.toml
+├── win2mac/                   Direction 3 · Produce macOS app bundles on Windows
+│   ├── bin/win2mac.mjs
+│   ├── src/core/              bundle / plist / wexezip / verify / builder / report / errors
+│   ├── test/
+│   └── package.json
+├── apponwin/                  Direction 4 · Run macOS programs on Windows
+│   ├── bin/apponwin.mjs
+│   ├── src/core/              macho / plist / assess / spike / report / errors
+│   ├── test/
+│   └── package.json
+├── console/                   Unified entry for the four directions (CLI + web dashboard)
+│   ├── bin/wacmin-console.mjs Executable entry (thin shell: parses argv and prints only)
+│   ├── src/                   directions.mjs / server.mjs / contract-check.mjs
+│   ├── web/
+│   ├── test/
+│   └── package.json
+├── ai/                        AI integration layer (MCP / CLI / Skill / expert package)
+│   ├── bin/
+│   │   ├── wacmin.mjs         Unified command-line entry
+│   │   └── wacmin-mcp.mjs     MCP server entry (stdio)
+│   ├── src/
+│   │   ├── protocol.mjs       JSON-RPC codec and newline framing
+│   │   ├── tools.mjs          Six MCP tool definitions and parameter translation
+│   │   └── server.mjs         Handshake, tool dispatch, cancellation
+│   ├── skills/wacmin/SKILL.md         Lets an agent decide when to call
+│   ├── experts/wacmin-expert.md       Expert package: criteria and methodology
+│   ├── test/
+│   └── package.json
+├── .github/                   CI workflows
+├── LICENSE                    Layered licence map
+├── LICENSE                    Apache-2.0 full text (for GitHub detection)
+├── LICENSE-MIT                MIT full text
+├── LICENSING.md          Layer routing table
+├── NOTICE                     Third-party components and licence statements (the only copy)
+├── README.md                  Chinese documentation (this file)
+└── README_EN.md               English documentation
+```
+
+The four directions are **mutually independent**: each direction's dependencies, tests and releases do not affect the others. Yet they are **mutually complementary**: they share one contract layer, which is what allows `console/` to drive all four with a single codebase.
+
+**No subdirectory retains any standalone document.** All explanatory material is consolidated in this file, and licensing plus compliance statements are consolidated in `LICENSE` and `NOTICE` at the root. The reasoning is in section 1.1.
+
+### 11.2 Artefact Structure: ExeOnMac's `.app`
+
+```
+{App Name} (Win).app/
+└── Contents/
+    ├── Info.plist                       # Required
+    ├── PkgInfo                          # Optional, content APPL????
+    ├── MacOS/
+    │   └── launcher                     # Required, Swift executable, native arm64
+    ├── Resources/
+    │   ├── AppIcon.icns                 # Required
+    │   ├── original.ico                 # Optional, original icon backup
+    │   └── Private/                     # Required, the only writable area
+    │       ├── drive_c/                 # Installation output lands here
+    │       ├── dosdevices/
+    │       │   ├── c -> ../drive_c      # Relative link, valid after the bundle moves
+    │       │   └── z -> /
+    │       ├── system.reg
+    │       ├── user.reg
+    │       └── userdef.reg
+    ├── Recipes/
+    │   ├── compat.yaml                  # Required, the bundle's single source of truth
+    │   └── install.log                  # Required (may be an empty file)
+    └── Shared -> ../../wexe/layers       # Optional symlink, for manual inspection only
+```
+
+`Shared` is an optional symlink that the runtime does **not** depend on: the launcher locates the shared layer via `WEXE_HOME` or `~/Library/Application Support/wexe`, with no path hard-coded into the bundle, so bundles are movable, back-up-able and distributable.
+
+**Required `Info.plist` fields**:
+
+| Key | Value | Note |
+|---|---|---|
+| `CFBundleName` | `{App Name}`, ≤15 characters | Truncated by code point from the end, never mid-character |
+| `CFBundleDisplayName` | `{App Name} (Win)` | Shown in Finder and the Dock |
+| `CFBundleIdentifier` | `com.wexe.win.{reverse domain}` | Must be unique; on collision a suffix is appended and a `known_issues` entry recorded |
+| `CFBundleExecutable` | `launcher` | |
+| `CFBundlePackageType` | `APPL` | |
+| `CFBundleIconFile` | `AppIcon` | Without the `.icns` extension |
+| `CFBundleShortVersionString` | `{version}` | `1.0` when unavailable |
+| `CFBundleVersion` | Numeric normalisation of `{version}` | Non-numeric segments replaced by 0 |
+| `CFBundleInfoDictionaryVersion` | `6.0` | |
+| `LSMinimumSystemVersion` | `13.0` | |
+| `NSHighResolutionCapable` | `true` (boolean) | |
+| `LSApplicationCategoryType` | `public.app-category.utilities` | Overridable via `compat.yaml` |
+| `NSSupportsAutomaticGraphicsSwitching` | `true` (boolean) | Dual-GPU switching |
+
+Keys explicitly **not** set: `LSUIElement` (setting it removes the Dock icon), `LSBackgroundOnly` (same), `NSPrincipalClass` (the launcher does not use `NSApplicationMain` and manages its own lifecycle). `CFBundleDocumentTypes` is generated only when `compat.yaml`'s `file_associations` is non-empty; by default no associations are claimed.
+
+**`install.log` format**: plain text, UTF-8, one event per line:
+
+```
+[YYYY-MM-DDTHH:MM:SSZ] <level> <event> <detail>
+```
+
+Required events:
+
+| event | Meaning |
+|---|---|
+| `detect` | Installer type and confidence |
+| `prefix.create` | Prefix path, clonefile source layers |
+| `install.start` | The actual command line and arguments executed |
+| `install.exit` | Installer exit code, elapsed time |
+| `install.settled` | Active wind-down because file count stopped growing (installer never exits) |
+| `install.fallback` | Reason for falling back to interactive after silent failure |
+| `reboot.suppressed` | `ExitWindowsEx` intercepted, recording "pretended the reboot succeeded" |
+| `scan.entry` | The selected main exe and its score |
+| `package.done` | Artefact path and final verification result |
+
+The log contains no user file contents and no full environment dumps.
+
+**Icon generation pipeline**:
+
+```
+.ico / .exe resources
+  → parse ICONDIR, take the largest frame (PNG frames written directly, BMP frames get a file header)
+  → sips converts to PNG, scaled to 1024
+  → compose the badge (CoreGraphics, tools/badge.swift)
+  → generate AppIcon.iconset (16/32/64/128/256/512 at @1x and @2x)
+  → iconutil -c icns
+```
+
+Badge specification: one quarter of the main icon's size, content a white `W` or the four-pane Windows logo, background `#0078D4` (Windows blue) or `#8E8E93` (system grey), bottom-right with a 4 px margin, opacity 0.9. Plain `sips` cannot composite layers, so that step uses the in-repository `tools/badge.swift` (CoreGraphics, a system framework), still introducing no third-party imaging library.
+
+**Without icon resources a placeholder is used** (blue background, white W). The artefact is legitimately distributable, but its appearance is not faithful.
+
+### 11.3 Artefact Structure: Mac2Win Output
+
+```
+<project>/
+└── dist-mac2win/
+    ├── your-app-1.0.0-x86-setup.exe      # NSIS installer (default)
+    ├── your-app-1.0.0-x86.zip            # Portable zip (when alsoZip: true)
+    └── staging/                          # Intermediate artefacts, cleaned by default
+```
+
+`staging/` is deleted after a successful build; `--keep-staging` retains it for investigation, in which case `staging/installer.nsi` can be compiled manually with `makensis`.
+
+**Installer internal layout** (NSIS payload):
+
+```
+$INSTDIR/
+├── node.exe              # Or renamed to the launcher name
+├── bootstrap.mjs         # Launcher
+├── launch.json           # Launch arguments
+├── app/                  # The application itself
+│   ├── main.js
+│   └── node_modules/     # Flattened dependencies
+└── LICENSE-*             # Licence texts of the bundled runtimes
+```
+
+**Why the payload has an extra `app/` level**: NSIS's `File /r` does not include the source directory name when expanding. A direct `File /r "src\*.*"` into `$INSTDIR` would lose the `app/` level, and verification would report "required file not found". The fix is for `SetOutPath` to add the `app` level first.
+
+### 11.4 Artefact Structure: Win2Mac Output
+
+```
+<out>/
+└── My App.app/
+    └── Contents/
+        ├── Info.plist
+        ├── PkgInfo
+        ├── MacOS/
+        │   └── MyApp            # User-supplied executable, permission 0755
+        └── Resources/
+            ├── icon.icns        # Only when --icon is provided
+            └── payload/         # Additional files from --payload
+```
+
+A same-named `.zip` is produced alongside, with Unix permission bits written explicitly by the custom zip writer.
+
+---
+
+## 12. Performance
+
+Performance in each direction is determined by its foundation; this project only wires things together and makes no performance promises. The table below contains measured values for horizontal reference only.
+
+### 12.1 Key Metrics
+
+| Direction | Metric | Measured |
+|---|---|---|
+| Mac2Win | Full build (with verification, warm cache) | about 19 seconds |
+| Mac2Win | Full build (with verification, cold cache) | Network-dependent; runtimes are 32–100 MB |
+| Mac2Win | Artefact verification (per-file SHA-256 over 4060 files) | order of 2 seconds |
+| Mac2Win | Project build (real project) | Determined by the project itself |
+| ExeOnMac | Installer detection | milliseconds |
+| ExeOnMac | Static extraction (34 MB NSIS sample, 4898 files) | seconds |
+| ExeOnMac | Prefix creation (clonefile of a 382 MB base layer) | sub-second, metadata space only |
+| ExeOnMac | Silent installation (34 MB installer) | about 132 seconds |
+| ExeOnMac | `.app` assembly (plist + icon + launcher) | seconds; launcher compile about 4 ms on cache hit |
+| Win2Mac | `.app` assembly + zip | about 1 second for a 2 KB sample; pure I/O |
+| AppOnWin | Structure parsing and framework determination | milliseconds (reads plist and Mach-O headers) |
+| console | Four-direction `doctor` (serial) | 555 ms |
+| console | Four-direction `doctor` (parallel) | 486 ms |
+
+**Why Mac2Win's duration has a range**: it includes downloading the framework's Windows runtime. Runtimes are cached in `~/.wacmin/mac2win/cache/`; a hit means assembly and compression only, a miss means network. Quoting a fixed number of seconds would mislead users.
+
+**Test scale and duration** (measured on this machine; hardware-dependent).
+
+**This table is the single source of truth for test counts in this repository.** The rest of the README only states that tests pass and does not repeat the numbers — the same figure stored in several places inevitably drifts, and this repository previously saw two such divergences: a total written as 978 (actually 1150), and the English edition recording mac2win as 131.
+
+| Subproject | Tests | Duration | Notes |
+|---|---|---|---|
+| mac2win | 132 | about 30 seconds | |
+| exeonmac | 416 | about 5 minutes | Includes on-the-spot NSIS / Inno compilation and 3 real wine installs |
+| win2mac | 121 | about 2 seconds | |
+| apponwin | 91 | about 0.5 seconds | |
+| console | 215 | about 11 seconds | |
+| ai | 132 | about 9 seconds | |
+| contracts | 58 | about 2 seconds | Includes 15 documentation-count self-checks |
+| **Total** | **1165** | — | See "0 skipped repository-wide" below |
+
+**Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
+
+- **exeonmac**: `Ran 333 tests / OK (skipped=10)` on CI — 10 tests covering MSI table parsing, Inno version detection and NSIS unpacking had never run on CI;
+- **mac2win**: `# tests 131 / # pass 128 / # skipped 3` on CI — the skipped assertions were core rejection paths such as "a console program must be rejected when validated as a GUI".
+
+Both were fixed by **generating fixtures on the spot** (MSI built as raw CFB in pure Python, NSIS via `makensis`, Inno via ISCC compiled for real under wine) instead of relying on files left over on the local machine, and by adding `check_no_skips.py` / `check-no-skips.mjs` to CI: a non-zero skip count fails immediately, and a total below the baseline also fails (so a deleted fixture shows up as *fewer* tests rather than as *red*).
+
+mac2win additionally had three tests that skipped "when no usable 7-Zip is present locally". They defend "an explicit path wins over the system one" and "doctor and verify use the same criterion" — a reasonable-sounding skip condition (if it isn't installed, don't test it), but a clean CI runner never has it installed, so those three were green yet never executed, and verifying those two things is their only reason to exist. They now use `fixtures.mjs`'s `fake7zip()` to produce a script that satisfies the detection criterion: `probeCandidates()` only requires "is a file / can run `i` / output contains `7-Zip` and `Formats:`", which has nothing to do with being a *real* 7-Zip — it decides whether **this candidate would be selected by verify**, while unpacking capability is covered by the tests against real artefacts.
+
+**The baseline itself is also read from this table, not stored elsewhere.** `contracts/doc-counts.mjs --min <module>` prints the figure from the table for CI's `--min` to consume; `--check` verifies that the total equals the sum of the rows and that both language editions agree item by item. The `contracts` job in CI runs it.
+
+This is not gratuitous caution. Those three baselines used to be hard-coded in `ci.yml` (then `--min 132`, `--min 416`, `--min 43`), forming a second copy of the same numbers as the table — update the table but forget the workflow and the guard waves things through against a stale baseline. This repository has already diverged three times for this reason: a total written as 978 (actually 1150), the English edition recording mac2win as 131, and section 6.5 versus `NOTICE` chapter 8 each holding a different list of "technology not used". **Preventing drift does not rely on "remembering to update both places"; it relies on giving each number exactly one write site that everything else reads.**
+
+### 12.2 A Real Two Hours → One Minute
+
+The Ondra project initially took **6241 seconds (1 h 44 min)** per build and produced **51,534 files**. The root cause was not the environment but a design defect.
+
+pnpm symlinks each package's dependencies into its own `node_modules`—measured, **80 of 83** packages did so. `copyTree` did not skip the nested `node_modules` when copying packages, turning the symlink farm into real files.
+
+| Metric | Before | After |
+|---|---|---|
+| Payload file count | 51,534 | **6,722** |
+| Build duration | 6241 s | **56.5 s** |
+| Dependency package files | 3777 (50k after expansion) | 3306 |
+
+The fix: `copyTree` accepts `skipDirs` and skips `node_modules` at any depth when copying dependency packages—dependencies are already collected centrally and flattened at the **same level**, so the nested copy is redundant.
+
+The **110×** improvement came entirely from this one change.
+
+### 12.3 I/O Overhead in Managed Environments
+
+In sandboxed, EDR-scanned or network-drive environments, a single file copy can carry a fixed overhead of 25–40 ms, and **concurrency does not bypass it**:
+
+| Operation | Normal SSD | Managed environment |
+|---|---|---|
+| Single `copyFile` | < 1 ms | 25–40 ms |
+| 20 concurrent copies within `/tmp` | 4 ms | 4 ms (concurrency effective) |
+| 20 concurrent copies **across directories** | ~5 ms | 762 ms (concurrency ineffective) |
+
+This is caused by the environment's I/O interception layer. After fixing the design defect above, even a managed environment completes in 56 seconds.
+
+**Two approaches ruled out along the way**: `tar -cf - | tar -xf -` is blocked by the sandbox's stdout redirection (`Unrecognized archive format`); hard links carry the same fixed overhead in a managed environment and fail with `EXDEV` across volumes.
+
+### 12.4 clonefile Space and Time
+
+After copying a 64 MB file, volume free space decreases by **less than 1 MB** (metadata level).
+
+**Measurement method**: `st_blocks` or `du` cannot be used—APFS counts shared blocks repeatedly for each copy. Only the volume free-space delta works:
+
+```python
+before = free_space(path)
+clone_tree(src, dst)
+consumed = before - free_space(path)   # the real consumption
+```
+
+This detail caused a misjudgement once: asserting with `du -sk` reported 20 MB both before and after clonefile, leading to the conclusion that "clonefile did not take effect".
+
+**Degradation**: clonefile fails across volumes or on non-APFS filesystems and falls back to `cp -R`, with `method="copy"` in the result and a WARNING logged. In that case space really is consumed.
+
+### 12.5 Why Verification Is Measured in Seconds, Not Minutes
+
+For 4086 files inside a 200 MB exe, calling `7zz x -so` once per file means 4086 process creations—measured at over ten minutes without completing.
+
+The approach is **one extraction plus local hashing**: streaming the extract into memory with `7zz x -so` and hashing there; 4086 files took **0.87 seconds**.
+
+### 12.6 Why No Performance Promises
+
+Compatibility-layer performance is determined by the layer beneath: Wine's graphics performance depends on MoltenVK / D3DMetal translation, and Electron artefact startup depends on Chromium cold start. This project only wires things together and does not modify those layers. Promising specific frame rates or startup times would be irresponsible.
+
+The numbers in the table are all **overheads this project itself produces** (packaging, verification, assembly, parsing), for which measured values can be given.
+
+---
+
+## 13. Security and Privacy
+
+This chapter states only what is actually done, and **what is not**. Claiming undone work as done is more dangerous than leaving it undone.
+
+### 13.1 Network Behaviour
+
+The program accesses the network in exactly two situations, both explicitly triggered by user action:
+
+| Direction | When | Target |
+|---|---|---|
+| Mac2Win | The build needs to download a runtime and the cache misses | `nodejs.org`, GitHub Releases (Electron), `dl.nwjs.io` (NW.js) and their mirrors |
+| ExeOnMac | The user explicitly runs `wepack runtime install` | GitHub Releases (Gcenx `macOS_Wine_builds`) |
+
+`mac2win build --dry-run`, `mac2win verify`, `apponwin assess`, `apponwin parse` and `win2mac build` (assembly phase) make **no network calls at all**. ExeOnMac's `detect` / `extract` / `package` also stay offline—only `runtime install` and the Wine-dependent `install` / `build` trigger runtime acquisition.
+
+**Mirror trade-off**: direct connections to `nodejs.org` from mainland China often run at tens of KB/s, making a 33 MB package take over ten minutes. A mirror list is therefore maintained, ordered by priority: official first, mirror on failure. **Checksums always come from the official source**—a mirror's `SHASUMS256.txt` may lag, so mirrors only accelerate the payload download.
+
+**The `ai/` layer makes no network calls at all.** The MCP server only talks to a local client over stdin/stdout, and `wacmin` only spawns local subprocesses. If an AI client uploads tool results to a model service that is the client's behaviour and outside this repository's control—see 13.5.
+
+### 13.2 Integrity Verification: How Far It Goes
+
+**This must be stated per source, because the four sources provide different levels of assurance.**
+
+| Runtime source | Integrity verification | Strength |
+|---|---|---|
+| Node.js (Mac2Win) | Downloads the official `SHASUMS256.txt` and compares SHA-256 per file; mismatch fails with `M2W_3002` | **Strong**: an officially published cryptographic checksum |
+| Electron (Mac2Win) | No hash verification; after extraction, asserts that `electron.exe`'s PE architecture matches the target | Weak: guarantees only "the right architecture was extracted", not "the bytes were untampered" |
+| NW.js (Mac2Win) | Same, asserting `nw.exe`'s architecture | Weak: same |
+| Wine (ExeOnMac) | Verifies only HTTP status and that `Content-Length` matches (download completeness); **no GPG signature verification** | Weak: detects truncated transfers, not source substitution |
+
+**Why Electron and NW.js have no hash verification**: neither upstream provides a stable, programmatically obtainable checksum list (Electron's `SHASUMS256.txt` appears only in some releases' assets, with inconsistent formatting; NW.js publishes no official checksums at all). Hard-coding a hash table would mean editing code on every version bump, and would fail wholesale whenever upstream re-uploads a file under the same version number.
+
+**Wine's signing gap is recorded with equal candour**: Gcenx provides no stable GPG signing flow. The same risk is recorded in `NOTICE` section 3.5; nothing is concealed.
+
+**What to do in security-sensitive settings**: use the offline paths. Mac2Win accepts `runtimeArchive` + `runtimeChecksum` pointing at a locally verified file; ExeOnMac accepts `wepack runtime install --archive <path>` pointing at a locally verified `tar.xz`. Both skip the download and perform only local verification.
+
+### 13.3 Security Boundary of Local Services
+
+`mac2win ui` and `wacmin-console web` each start a local HTTP service. **Both can spawn subprocesses**, making them an entry point equivalent to arbitrary local code execution, so the boundary must be tight.
+
+| Measure | Implementation | Threat addressed |
+|---|---|---|
+| Bind loopback only | `server.listen(port, '127.0.0.1')`, **never `0.0.0.0`** | Anyone on the same LAN executing commands through it |
+| Validate `Origin` / `Host` | Accept only `127.0.0.1` / `localhost` / `[::1]`, any port | **DNS rebinding**: a malicious page resolving its own domain to `127.0.0.1` and hitting this API from the browser |
+| Subcommand whitelist | The `ALLOWED_COMMANDS` set, 16 permitted values | Arbitrary command injection via the request body |
+| Static file path traversal protection | `normalize` the path, then confirm it is still inside the static root (`startsWith(root + sep)`) | `GET /../../node.exe` exfiltrating the runtime |
+| Reject failed URL decoding | `decodeURIComponent` throwing returns 400 | Malformed encoding bypassing path checks |
+
+**Mac2Win's in-artefact launcher carries the same protections.** It serves static files under `ui/` and checks identically: normalize, then confirm it remains inside the root. This is not a theoretical risk—artefacts are distributed to users' machines, where the environment is uncontrolled.
+
+### 13.4 Extraction and File Writing
+
+| Scenario | Protection | Direction |
+|---|---|---|
+| zip extraction | Entry names are normalised to a single separator, then rejected if they start with `/` or contain `..`. Entries such as `../../etc/passwd` in a zip are a common attack technique | Mac2Win |
+| Windows paths | Reject reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`), checked after stripping the extension since `con.txt` is equally illegal | Mac2Win |
+| Windows paths | Reject characters Windows disallows (`\ / : * ? " < > \|` and control characters) | Mac2Win |
+| Windows paths | Reject segments ending in a dot or space. Such names are **silently discarded** on Windows, producing "packaged successfully but the filename does not match" | Mac2Win |
+| Download to disk | Write a `.part` temporary file, `rename` after length verification. A mid-way failure never leaves a complete-looking bad file | ExeOnMac |
+| Overwrite | Remove the target directory before the upstream operation, avoiding a half-new, half-old artefact | Mac2Win |
+| Architecture assertion | Re-assert the PE architecture after extraction, preventing a corrupted runtime from a previous run lying in the cache | Mac2Win |
+| Non-empty directory | Error out; never overwrite or delete. `--force` changes only the error message, not the behaviour | ExeOnMac |
+| Registry modification | Never edit the prefix's registry binary; write a `.reg` text file and let `wine regedit /S` import it, retaining the file for audit and rollback | ExeOnMac |
+| Writable scope | Only `Private/` and `Recipes/` inside the bundle plus `~/Library/Application Support/wexe/`. Never `/Library`, `/usr` or `~/.wine` | ExeOnMac |
+
+**Mac2Win's downloads have no `.part` staging**; they write the target file directly, and an interruption leaves a truncated file that the next run discards when the architecture assertion fails—equivalent to "detect a bad cache". This is a known implementation difference that does not affect correctness.
+
+### 13.5 Privacy
+
+**No telemetry, analytics, crash reporting or usage statistics of any kind.** No request to any statistics service exists anywhere in the code. This can be verified independently:
+
+```bash
+grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
+  --include="*.mjs" --include="*.js" --include="*.py" \
+  mac2win console win2mac apponwin exeonmac ai
+```
+
+**Data left locally** (all under the user's home directory; deleting it clears everything):
+
+| Path | Content |
+|---|---|
+| `~/.wacmin/mac2win/cache/` | Downloaded Node / Electron / NW.js runtimes |
+| `~/.wacmin/history.json` | The dashboard's last 20 run records |
+| `~/Library/Application Support/wexe/` | Wine runtime, prefixes, shared layers, recipe library, install logs |
+| `~/.wexe/recipes/` | Recipe library (`WEXE_RECIPES` overrides) |
+
+**Why dashboard history lives there**: it is runtime data that should not enter version control, nor vanish because the repository was deleted. `WACMIN_HOME` overrides it for tests and multi-instance isolation—tests writing directly to the user's real directory would be a disaster, polluting the developer's dashboard history.
+
+**The AI layer adds no local data.** `ai/` keeps no state file, no conversation log, no tool-result cache. Its only output is the tool return value, handed back to the client over the stdio pipe.
+
+**The MCP privacy boundary deserves precision**: what this repository can promise is that it does not transmit anything on its own initiative. But tool results—artefact paths, error messages, and the usernames and tool versions that `doctor` observes—travel through the client to a model, and **that step is decided by the client the user chose, outside this repository's control**. Accordingly, `doctor` output contains only tool names, versions and paths, never environment-variable values or user identity. In privacy-sensitive settings, check the client's retention policy first.
+
+### 13.6 What Is Not Done
+
+| Item | Status | Reason |
+|---|---|---|
+| Artefact code signing | Not implemented | Requires a Windows EV certificate and `signtool`, impossible on macOS |
+| Artefact notarisation | Not implemented | Win2Mac artefacts are unsigned, and notarisation presupposes a signature |
+| Local service authentication | Not implemented | Loopback binding plus `Origin` validation already covers the threat model; adding auth complicates CLI triggering with no real gain |
+| Transport encryption | Not implemented | Loopback communication; encryption would be meaningless |
+| Supply-chain signature verification | Only for Node.js | See 13.2; other upstreams offer no usable list |
+| Sandbox isolation | Not implemented | The wrapped program shares the user's macOS session and can read and write any file the user can reach |
+| Malicious installer detection | Not implemented | This project does not judge whether an installer contains malicious code, only whether it can be wrapped |
+
+**The last point deserves emphasis**: ExeOnMac **really executes** the user-supplied installer inside Wine (silently). This differs fundamentally from "extracting it to look"—the installer's code actually runs with the current user's file access rights. Use `install` / `build` only on installers from trusted sources.
+
+---
+
+## 14. Compatibility
+
+### 14.1 Host and Target
+
+| Direction | Host requirement | Target | Actually verified |
+|---|---|---|---|
+| Mac2Win | macOS 11+ / Apple Silicon (recommended) | Windows x86 (i386 PE) and x64 | Verified: real build + three-state verification |
+| ExeOnMac | macOS 13+ / Apple Silicon | Windows programs (via Wine) | Verified: detection, extraction, prefix, `.app` wrapping, launch |
+| Win2Mac | Windows 10+ | macOS `.app` | Verified: real `.app` and zip produced |
+| AppOnWin | Windows 10+ / WSL2 | macOS programs (via Darling) | Not verified: no Windows + WSL2 + Darling environment |
+
+**Why Mac2Win targets Apple Silicon**: the project's positioning is "build x86 Windows packages on ARM macOS". Running on an Intel Mac works but loses that meaning, so preflight warns. Platform detection uses `process.platform !== 'darwin'`; architecture is not a hard rejection.
+
+**Why ExeOnMac requires macOS 13+**: it needs `iconutil`, `sips` and APFS clonefile, and 13 is where all three conditions stabilise together. The artefact's `LSMinimumSystemVersion` is likewise `13.0`.
+
+**Win2Mac also runs on non-Windows**: by default it only warns "host is not Windows"; `--strict-host` refuses instead. This is because packaging on macOS and immediately validating with `plutil` is a valid development flow—`plutil` is Apple's official tool and more authoritative than a custom parser. `--strict-host` is for release pipelines that must produce on the target platform.
+
+**AppOnWin's host detection**: `assess` and `parse` are pure read operations that **run on any platform**. Only `spike` requires a real Windows + WSL2 + Darling environment; when unavailable it reports "unverified" (exit code 5) rather than "passed".
+
+### 14.2 Runtime Version Requirements
+
+| Dependency | Minimum | Measured | Note |
+|---|---|---|---|
+| Node.js (host) | 20 | 22.x | Requires `node --test`, `fetch` and ESM top-level await |
+| Python (host) | 3.11 | 3.11+ | Requires `tomllib` and `X \| Y` type syntax |
+| Swift (host) | 6.0 | 6.0+ | ExeOnMac compiles the launcher; needs Xcode CLT |
+| NSIS | 3.x | 3.13 | The `MUI2` interface and `File /r` behaviour are stable in 3.x |
+| 7-Zip | 22.00 | 25.01 | The `7zz i` output format is stable from this version |
+| Wine | Unpinned | 11.21 | Gcenx devel build; other versions unverified |
+| Rosetta 2 | System-provided | — | Required on Apple Silicon |
+| `plutil` | System-provided | — | Optional, for Win2Mac's `Info.plist` validation |
+| `innoextract` | Any | 1.9 | Optional; the only viable Inno Setup extractor |
+| `msitools` | Any | — | Optional; preferred MSI extractor |
+
+**Node.js's `≥ 20` is a hard requirement**, not a conservative choice: `node:test`'s `--test` concurrency model, the stable `fetch` implementation and ESM top-level await all become complete at 20.
+
+### 14.3 Target Runtime Versions
+
+| Runtime | Supported range | Hard ceiling |
+|---|---|---|
+| Node.js (bundled into artefacts) | 20 / 22 LTS | None |
+| Electron (bundled into artefacts) | ≤ 43.0.0 | **v44 onwards no `win32-ia32` is published** |
+| NW.js (bundled into artefacts) | Per project (default 0.90.0) | None |
+| Tauri | No runtime bundled | The artefact is a Rust-compiled native exe |
+
+**Electron's 43 ceiling cannot be bypassed.** It is an upstream release policy, not something this project can solve. mac2win gates higher versions during **preflight** so users do not fail after downloading 100 MB.
+
+### 14.4 Hard Boundaries
+
+| Limitation | Reason | Workaround |
+|---|---|---|
+| Mac2Win's Electron x86 stops at v43 | No `win32-ia32` prebuilds from v44 onwards | None. Higher versions require abandoning the x86 target |
+| Mac2Win artefacts are unsigned | Requires a Windows EV certificate and `signtool`, neither possible on macOS | Sign in CI on a Windows runner |
+| Mac2Win does not support native modules (`.node`) | Compiled machine code is bound to OS/CPU | Switch to a pure-JS alternative; mac2win intercepts during collection and names the package |
+| Mac2Win cannot build macOS packages on a Mac for Windows | Platform binary formats differ (Mach-O vs PE) and the matching SDK is required | None. Build on the corresponding platform |
+| Mac2Win cannot build Linux packages on a Mac | Requires Linux glibc and an ELF toolchain | Docker is possible but out of scope |
+| Wails / Flutter desktop across architectures | Their Windows targets require the full MSVC toolchain | No equivalent path |
+| .NET / WPF across architectures | Requires the Windows SDK and MSBuild | No equivalent path |
+| ExeOnMac requires a self-supplied Wine x86_64 | Wine has never published an arm64 macOS build | None. Only via Rosetta 2 |
+| ExeOnMac cannot cover every Windows program | Wine compatibility is determined by the layer beneath; this project does not modify Wine | None. Per-program adaptation through the recipe library |
+| ExeOnMac does not support kernel drivers / anti-cheat / hardware dongles | Technically infeasible, and may risk account bans | None, and not intended |
+| Win2Mac cannot produce dmg / cannot sign / cannot notarise | `hdiutil` / `codesign` / `notarytool` are macOS-exclusive | Sign and notarise on macOS |
+| AppOnWin may not hold | Darling officially supports Linux only; on Windows it requires WSL2 and GUI support is labelled experimental upstream | Demote to a compatibility assessment tool |
+
+### 14.5 Software Categories ExeOnMac Explicitly Does Not Support
+
+On detecting the following characteristics it halts immediately with exit code 4, **attempting no bypass, no degradation, and offering no hint that it "might work"**.
+
+**Kernel and driver classes**: `.sys` drivers, kernel service registration (INF containing `AddService` + `ServiceType=1`), filesystem filter drivers (`minifilter` / `FltRegisterFilter`), virtual network adapters / TAP drivers, printer drivers. Reason: Wine has no kernel mode, so drivers cannot load.
+
+**Anti-cheat and protectors**: EasyAntiCheat, BattlEye, Riot Vanguard, nProtect GameGuard, XignCode3, Themida / VMProtect / Enigma. Reason: anti-cheat relies on kernel-level integrity checks and hypervisor-level detection, which Wine necessarily fails, and the software will be flagged as tampered; even if forced to start, the account would be kicked or banned, which harms the user.
+
+**Protectors are handled separately**: VMProtect-class protection only reports "may not run" without halting, because some single-player programs still work when packed. This is the only soft judgement in the list.
+
+**Hardware dependencies**: hardware dongles (`hasp` / `sentinel` / `rockey` / `aladdin`), TPM requirements, Secure Boot requirements, dedicated capture cards, biometric devices. Reason: macOS has no corresponding hardware abstraction layer, and this project installs no kext.
+
+**System-level components**: standalone Windows Update packages (`.msu`, requiring the full CBS stack), persistent system services (a service inside a prefix has no host after the bundle exits), global shell extensions (requiring an Explorer process; Wine's explorer does not support third-party extensions), input methods (Wine's IME bridge is incomplete), and driver installations requiring administrator elevation.
+
+**Installer types**:
+
+| Type | Status | Note |
+|---|---|---|
+| NSIS | Supported | 7-Zip extracts directly; a 4898-file sample verified |
+| Inno Setup | Supported (requires innoextract) | Without innoextract it reports honestly rather than faking success via 7z |
+| MSI | Supported | msiextract preferred; the custom table parser restores real filenames as a fallback |
+| InstallShield | Detection only | Newer versions use CAB plus custom scripts, where static extraction usually fails; goes through the silent-install path |
+| WiX Burn | Detection only | The bundle embeds multiple MSIs and must be unwrapped first |
+| Squirrel | Detection only | `--silent` suffices; it essentially extracts a nupkg |
+| Self-extracting RAR/SFX | Unsupported | Requires unrar, and most are password-protected |
+| Stub installers that download the payload | Unsupported | Fully offline; no proxy downloading |
+| Encrypted installers (password-protected) | Unsupported | 7-Zip would prompt interactively for a password, and this tool is non-interactive |
+
+Any type not listed is `unknown`, exit code 4.
+
+**Runtime behaviour limitations**: no window merging (Wine windows display independently, not integrated with the macOS menu bar), no guaranteed bidirectional clipboard sync (rich text and images do not pass), no global hotkeys, no precise Retina scaling (mixed-DPI multi-monitor setups may misalign), no GPU passthrough (MoltenVK / D3DMetal, performance limited by the translation layer), no exclusive audio (CoreAudio shared mode), no USB passthrough beyond HID.
+
+**The unsupported list only grows.** If an entry becomes supported in a later version, this section's boundary description must be amended before the code is changed.
+
+### 14.6 Cross-Platform Behaviour Differences
+
+Every place where the same code behaves differently across hosts:
+
+| Scenario | On macOS | On Windows | Handling |
+|---|---|---|---|
+| Path separator | `/` | `\` | `/` used internally; converted only when writing NSIS scripts |
+| Permission bits | Unix mode preserved | No such concept | Win2Mac's custom zip writer stores the mode in the central directory's external attributes, so `0755` survives extraction |
+| Filename case sensitivity | Case-insensitive by default (APFS is configurable) | Case-insensitive | Case-sensitive behaviour is never relied upon |
+| Trailing dots and spaces | Legal | Silently discarded | Checked before packaging and reported as an error, never silently rewritten |
+| Reserved device names | Legal | Illegal | Checked before packaging and reported as an error |
+| Line endings | LF | CRLF | Generated text files always use LF: NSIS scripts are compiled by `makensis` on macOS where LF works; `Info.plist` is XML for which LF is the spec-recommended value |
+| Executability determination | `x` bit | Extension | The main executable inside a `.app` is located via `CFBundleExecutable`, independent of the `x` bit |
+| Verdict casing | Insensitive | Insensitive | Enum values in the contract are always lowercase, avoiding platform differences |
+
+---
+## 15. Known Issues and Limitations
+
+### 15.1 Known Limitations by Direction
+
+**Mac2Win**
+
+1. **Electron's ceiling is version 43.** An upstream release policy, not something this project can bypass.
+2. **Artefacts are unsigned.** The `.exe` triggers a SmartScreen warning, and the only advice is to click "More info → Run anyway". Signing requires a Windows EV certificate and `signtool`, impossible on macOS.
+3. **Native modules are unsupported.** `.node` files are compiled machine code bound to OS/CPU. Collection intercepts them and names the offending package.
+4. **The Tauri Rust shell is not verified end-to-end on this machine.** The code exists (`src/core/rust-shell.mjs`) and preflight plus configuration are wired up, but LLVM could not be installed here because of sandbox limits. The `rsprobe.exe` compilation proves "arm64 macOS can produce a native Windows x86 GUI program", but a complete Tauri project has not been verified end-to-end.
+5. **The x64 target was added later.** The three places that hard-coded x86 (runtime filename, cache directory, architecture assertion) are fixed, but x64's measured coverage is smaller than x86's.
+6. **`--target x64` artefacts still have an i386 stub shell.** This is not a defect: NSIS always compiles a 32-bit installer, which runs on all Windows versions. The verification rules distinguish "shell" from "payload" accordingly.
+
+**ExeOnMac**
+
+1. **A self-supplied Wine x86_64 runtime is mandatory.** The repository ships no binaries; use `wepack runtime install`.
+2. **Compatibility is determined by Wine.** This project identifies, extracts, builds prefixes and packages; it does not modify Wine and does not promise that any specific Windows program will run.
+3. **Without innoextract, Inno Setup yields only the stub section**, and main-exe location fails. This is now reported honestly rather than as a false success.
+4. **The MSI 7z fallback restores files and directories only**, not component installation order or custom actions. The custom table parser covers only `File`, `Directory`, `Component` and `Shortcut`.
+5. **InstallShield and Burn are detection-only**, going through the silent-install path.
+6. **A silent installation failure does not auto-fallback to interactive.** `--interactive` must be specified explicitly. Reason: automatic fallback pops a window that interrupts batch runs, and the user may not be at the machine.
+7. **Restart suppression is "pretending success".** Installations that genuinely require a reboot (rare) manifest as "installed but will not start" and require manual investigation.
+8. **Runtime downloads verify no signatures**, only download completeness. Use `--archive` in security-sensitive settings.
+9. **Only the base layer can be built automatically.** mfc / dotnet / fonts-cn require user-supplied files.
+10. **Layer matching only inspects the static import table.** DLLs loaded via `LoadLibrary` (plugin architectures, delay loading) are invisible, and such programs need manual layer addition.
+11. **Wine window coordinate mapping under multi-monitor / HiDPI is not handled.**
+12. **Without icon resources a placeholder is used** (blue background, white W). The artefact is legitimately distributable, but its appearance is not faithful.
+13. **After a timeout the process group is force-killed, but Wine may leave lock files in the prefix.** Deleting `Private/.wine-*` manually before retrying is recommended (not automated).
+14. **MSI table parsing does not cover every MSI variant.** Some MSIs pack multiple tables into one stream, and row counts are inferred from content features, which can misjudge in extreme cases.
+
+**Win2Mac**
+
+1. **Artefacts are unsigned and not notarised.** First launch triggers a Gatekeeper prompt that the user must clear manually.
+2. **Cannot produce dmg.** `hdiutil` is a macOS-exclusive tool.
+3. **Does not compile Mach-O.** The file pointed to by `--executable` must be supplied by the user and must be a genuine Mach-O; otherwise the command warns rather than silently proceeding.
+4. **bundle id collision detection depends on `lsregister`**, which is macOS-only. Building on Windows cannot pre-check collisions, so verify once on macOS.
+
+**AppOnWin**
+
+1. **The largest uncertainty in the project.** Darling officially supports Linux only; on Windows it requires WSL2, and GUI support is labelled experimental upstream. Failing spike gate 2 demotes it to a compatibility assessment tool.
+2. **When the host is not Windows + WSL2, all three spike gates report "unverified" rather than "passed"**, so the verdict cannot be taken as evidence the direction is feasible.
+3. **The framework list is incomplete.** Frameworks absent from the list are always `unknown`; availability is never assumed.
+
+**console**
+
+1. **The web dashboard binds `127.0.0.1` only** and offers no remote access. This is a deliberate security trade-off.
+2. **History retains only the last 20 runs**, with no archiving or export.
+
+### 15.2 Three Divergences Between Documentation and Implementation
+
+This section records three real instances where "the documentation said one thing and the code did another". They are recorded not to assign blame but because all three belong to the class of problem that **does not crash, only wastes the reader's time**, and is therefore most easily waved through again and again.
+
+**① `mac2win ui --port` / `--no-open` were entirely absent from help**
+
+The feature worked and the code was correct, but help did not mention it at all. Users wanting to specify a port could only guess, and failing to guess, assumed it was unsupported. The fix writes both options into the help's "graphical interface options" section.
+
+**② `mac2win doctor` was missing from help's "usage" section**
+
+The command was supported—even the "unknown subcommand" error message listed it—yet the top of help omitted it. It appeared not to exist.
+
+**③ `--report` was undocumented in mac2win's help alone**
+
+The other three directions' help all mentioned "`--report` outputs the unified run report". The unified report contract is a core mechanism shared by all four directions, yet exactly one direction failed to surface it.
+
+Beyond "missing documentation" there is the reverse problem—**help promising what the code does not implement** (early on, `--no-package` was exactly that). Both directions must be guarded, which is why each direction's `test/help.test.mjs` asserts in both directions.
+
+### 15.3 The Time the Verifier Lied
+
+This section stands alone because it is the **most dangerous** class of defect encountered so far: the program did not crash, the tests were all green, the conclusion was explicit, and the conclusion was false.
+
+**Symptom**: on a machine without 7-Zip, `mac2win verify xxx-setup.exe` ended with "✓ verification passed" and exit code 0.
+
+**What was actually verified**: only the PE header. What the payload contained, whether `node.exe` was 32-bit or 64-bit, whether required files were present, whether the hashes of 4000+ files matched—**not one of these was checked**.
+
+**Why**: `VerifyReport.ok` only looked for `fail` entries, and "7-Zip not found, skipping payload verification" was recorded as a `warn`. `warn` does not affect `ok`, so the report had `ok === true` and the CLI faithfully printed "passed".
+
+**Why this is worse than a crash**: a verification failure prompts investigation; a false pass does not. The user takes an installer whose header alone was checked, together with a "verification passed" conclusion, and distributes it.
+
+**Fix**: split the verdict into two orthogonal dimensions, as in section 5.4.1. Two accompanying fixes were also made:
+
+- **The scope of `find7zip()`.** It used to check a few fixed absolute paths plus PATH. On the measured machine the `7zz` on PATH was a build-sandbox wrapper script (failing with `spawnSync 7zz ENOENT`) and Homebrew was absent—yet BlueStacks and Parallels each bundled a **working** 7-Zip at `/Applications/*.app/Contents/MacOS/`. "Not installed" and "installed but you cannot find it" are two different things: the former requires user action, the latter is tool failure.
+- **Probing must not rely on exit codes alone.** `/bin/echo i` also exits with 0, and the early implementation accepted it as 7-Zip. The consequence is insidious: the subsequent `l -slt` receives unrelated text, no file list can be parsed, and the final report says "payload file count 0"—which looks like a corrupt installer. The criterion is now output features (both `7-Zip` and `Formats:` present).
+
+The UI was corrected in the same place: it used to render "`result.verify.length` items passed"—that is **all items**, including `warn` and unverified ones. With 5 of 10 unverified, the UI still said "10 items passed". There are now four phrasings, with amber rather than green for unverified.
+
+`MAC2WIN_NO_7ZIP=1` is the escape hatch for this branch. It is not for coverage padding: the decisive branch for a missing 7-Zip is only reached when **the user's machine happens to lack it**. A developer machine almost certainly has it, so the branch may go unexercised for a year—and when finally reached, the user receives a report that lied.
+
+### 15.4 The Second Form of "the Verifier Is Lying"
+
+`target: "x64"` was selectable in the configuration and preflight said "feasible", but three places in the implementation hard-coded x86:
+
+| Layer | Hard-coded value | Consequence |
+|---|---|---|
+| Runtime download | Filename `node-v22.23.5-win-x86.zip` | A 32-bit runtime was downloaded |
+| Cache directory | `node-22.23.5-win-x86/` | The two architectures overwrote each other |
+| Architecture assertion | Required `isX86 === true` | A 32-bit payload was judged passing |
+| Verifier | `'target architecture x86'` | The report read "x86 passed" |
+
+Combined effect: `--target x64` produced a package claiming 64-bit but actually 32-bit, **with every check stamped as passed**. That is far more dangerous than an outright error.
+
+**Fix**: derive the platform identifier from the target (Node uses `win-x86` / `win-x64`, not Electron's `win32-ia32`); separate cache directories by architecture; change the assertion to "PE machine type === expected target"; have the verifier assert against `expectTarget` and title the check "target architecture x64".
+
+**One semantic that must be clarified**: after the fix, the first x64 run fails:
+
+```
+✗ Target architecture x64: actual is i386, not x86-64
+```
+
+Yet extracting the payload reveals `node.exe` is `PE32+ / x86-64`—**the application itself is correct**. The reason: an exe compiled by NSIS is always an i386 stub, merely an installer. The verification rules therefore distinguish two objects:
+
+| Object | Expectation |
+|---|---|
+| Installer shell | `PE32 / i386 / GUI` (NSIS's fixed form) |
+| Payload `node.exe` | Determined by `target`: `i386` or `x86-64` |
+
+Measured across both targets: `--target x86` → shell `PE32/i386` + payload `PE32/i386`; `--target x64` → shell `PE32/i386` + payload `PE32+/x86-64`. Reverse verification: validating a 32-bit artefact against the x64 target is correctly rejected.
+
+### 15.5 The "Nine Checks" Divergence from the Actual Eleven
+
+The documentation long stated "nine artefact checks" while measurement showed 11. The root cause was that checks had been added over time (required files split out, installer shell format added) without the documentation being updated.
+
+**The measured 11 checks**:
+
+| Check | Criterion | What a failure indicates |
+|---|---|---|
+| Artefact exists | File readable | Packaging failed |
+| Installer shell format | `MZ` + `PE\0\0` signature | Not a Windows executable |
+| Application body architecture | For target `x86`, assert the payload runtime is i386; the installer shell is always 32-bit NSIS and does not count toward the body criterion | Architecture mismatch on the target machine |
+| GUI subsystem | Optional header subsystem = `2` | Double-clicking pops a console window |
+| Installer format | 7-Zip identifies it as NSIS | Payload structure corrupted |
+| Payload file count | > 0 | Empty package |
+| Required file `node.exe` | Present in the payload | Will not start after installation |
+| Required file `bootstrap.mjs` | Present in the payload | Will not start after installation |
+| Required file `launch.json` | Present in the payload | Launch parameters missing |
+| Payload `node.exe` architecture | PE32 / i386 | Wrong runtime architecture |
+| File hashes | Per-file SHA-256 compared against the build manifest | Files corrupted during compression or extraction |
+
+**All 11 appear only during "post-build verification".** `mac2win verify <existing installer>` has no build manifest and cannot compare hashes, so it performs **10 checks**—the missing one being "file hashes". This is by design, not a defect: hashes prove "the artefact is byte-identical to what was just built", which cannot be proven for an installer of unknown provenance. Reporting 10 honestly is more important than falsely claiming 11 green.
+
+### 15.6 Other Fixed Defects
+
+| Defect | Symptom | Root cause | Fix |
+|---|---|---|---|
+| Symlink cycles hung packaging | Six minutes of no progress, directory growing to 374 MB | `fs.cp({dereference:true})` expanded cyclic symlinks | Deduplicate by `(dev, inode)` |
+| Symlinks copied as files | A single directory copy produced 44,346 files / 410 MB | `Dirent.isDirectory()` returns false for symlinks, so they were `copyFile`d, effectively expanding the whole `.pnpm` | `stat` symlinks separately and handle by target type |
+| Payload gained an extra `app/` level | Verification reported "required file not found" | `File /r` expansion does not include the source directory name | `SetOutPath` adds the `app` level |
+| `WriteRegStr` argument count wrong | makensis reported `expects 4 parameters` | `HKCU\Software\...` was merged into one argument | Separate the root key from the subkey |
+| Mixed separators in `File` paths | makensis could not find files | Assembled as `"/tmp/app\*.*"` | Normalise to `/` |
+| Launcher could not find the shell after renaming | Double-click flashed and exited | `launch.json` named `nw.exe` while the file had been renamed | Record the real name returned by repackaging, plus a fallback scan |
+| Browser-launch failure killed the app | Log showed `spawn cmd ENOENT`, then the process died | `spawn`'s error event had no listener and escalated to `uncaughtException` | Attach an `error` listener and degrade to logging |
+| Verification blocked by security policy | Build succeeded but reported `SAFE_DELETE_BULK_CONFIRM_REQUIRED` | Bulk deletion after extracting 4088 files | Delete the single directory immediately after extraction instead of batching |
+| Verification took over ten minutes | Stuck at "streaming hash comparison" | One `7zz x -so` call per file, 4086 process creations | One extraction plus local hashing |
+| Extraction added a top-level directory | `node.exe` was under `node-v22.23.5-win-x86/` | The official zip contains a prefix directory | Flatten the single root level after extraction |
+| `which 7zz` found a wrapper script | Verification reported "installer corrupted" | A same-named shim on PATH | Run `7zz i` once per candidate to validate |
+| Dependency collection missed transitive dependencies | Artefact failed on launch with `Cannot find package 'cosmokit'` | Collected only from the import graph, without expanding each package's declared `dependencies` | Two-phase collection: scan imports, then expand via `package.json` |
+| pnpm layout caused incomplete dependency copies | Same as above | `cordis-host/node_modules/@ntars/cordis` is a symlink whose dependencies live in the `node_modules` one level up | Rebuild a flattened `node_modules` from the collection |
+| Dependencies over-collected | Picked up `@napi-rs/canvas-darwin-arm64`, `node-gyp-build`, etc. | Scanned the whole `.pnpm` sibling directory, including devDependencies | Read only each package's own `package.json` `dependencies` |
+| `cfb` parsing treated `_StringPool` as mojibake | All MSI stream names failed to parse | Stream names are privately encoded | Use the root storage CLSID plus content-feature stream identification |
+| NSIS detection missed real samples | A real sample was judged `unknown` | Tested `DEADBEEF` at `overlay+0` while the signature sits at `+4` | Correct the offset |
+| `File` table row count misjudged | Trailing data treated as row content | Assumed rows = total u16 count ÷ column count | Determine row count from content features (a run of `fil`+32hex) |
+| Chinese application names collided on bundle id | 11 names produced only 1 id | `[^a-z0-9-.]` swallowed entire Chinese segments | Append an 8-hex SHA-256 prefix for non-ASCII input |
+| Wrong key names in the preflight error-code map | Building on Linux / Windows reports "project directory does not exist"; the user chases a path typo while the real cause is an unsupported host | `CHECK_ERROR_CODES` listed `host-os` / `native-window` while the source actually uses `host-platform` / `framework-shell`. A mismatched key raises nothing—it silently falls into the `?? PROJECT_NOT_FOUND` default | Use the real ids, plus a source-scanning test: every key must appear in a `new Check()` call, and every check that can fail must be explicitly mapped |
+
+---
+
+## 16. Changelog
+
+The changelog is maintained on the **GitHub Releases** page: <https://github.com/ntars/Wacmin/releases>
+
+The README describes the project's current state; releases record what changed each time. The two are not mixed.
+
+**Current state**: all four directions are established and wired into the contract. Mac2Win, ExeOnMac and Win2Mac are complete and can genuinely produce artefacts; AppOnWin is at the compatibility-assessment stage, with execution capability pending the spike verdict. All four AI integration forms (MCP server / unified CLI / Skill / expert package) are in place. Per-module test counts and durations are consolidated in section 12.1 and are not repeated here.
+
+---
+
+## 17. Roadmap
+
+Ordered by determinism; each item presupposes the one before it.
+
+| Order | Item | Status | Note |
+|---|---|---|---|
+| 1 | Mac2Win wrap-up | Complete | Packaging, verification and the graphical interface all landed; now in maintenance |
+| 2 | ExeOnMac's five phases | Complete | Detection, extraction, prefix, silent installation, `.app` wrapping, layering and the recipe library all landed |
+| 3 | Win2Mac assembly packaging | Complete | Permission-preserving zip writer, plist generation and verification |
+| 4 | AppOnWin execution capability | **Undetermined** | Gate 2 of the three (an AppKit window) is decisive and needs a real Windows + WSL2 + Darling environment |
+| 5 | console's full dashboard | In progress | The unified entry (CLI + web) works; history persistence and progress push have landed |
+| 6 | Tauri Rust shell end-to-end verification | Awaiting environment | Code ready; needs an environment able to install LLVM |
+| 7 | Code signing support | Under evaluation | Requires a Windows EV certificate and `signtool`, impossible on macOS; may need a CI-side solution |
+| 8 | macOS-side signing and notarisation | Under evaluation | Requires an Apple Developer certificate and `notarytool`, only possible on macOS |
+| 9 | Extended automatic layer builds | Scheduled | Only the base layer builds automatically today; mfc / dotnet / fonts-cn are user-supplied |
+| 10 | AI integration layer | Complete | All four forms landed—MCP server, unified CLI, Skill and expert package; the protocol layer is dependency-free and self-implemented |
+
+**Not on the roadmap** (explicitly excluded): a self-developed PE loader, FEX integration, an API semantic mapping layer, macFUSE / kext / system extensions, game-launcher business logic, cloud desktops, and **a built-in LLM or any wrapped model call**. The purpose of `ai/` is to hand this repository's capabilities to external AI, not to turn the project into an AI tool itself.
+
+---
+
+## 18. Contributing
+
+### 18.1 Four Rules of Discipline
+
+1. **Exit codes are append-only; meanings never change.** Once published, changing a code value breaks every dependent script.
+2. **Error-code segments never cross boundaries.** `4xxx` always means input-artefact handling and does not change meaning for any direction's convenience.
+3. **stdout carries only JSON when `--json` / `--report` is set.** Logs always go to stderr.
+4. **Help text must match the parser.** Three things must hold: every option in help is accepted by the parser, every option accepted by the parser is documented in help, and a misspelt subcommand reports an explicit error rather than being treated as a path. Each is guarded by tests (each direction's `test/help.test.mjs`), because such divergence does not crash—it only wastes time. Concrete instances are in section 15.2.
+
+### 18.2 Pre-Commit Checks
+
+```bash
+# Contract self-check (mandatory)
+node contracts/validate.mjs
+
+# Each direction's own tests
+cd mac2win  && npm test
+cd exeonmac && python3 -m unittest discover -s tests
+cd win2mac  && npm test
+cd apponwin && npm test
+cd console  && npm test
+cd ai       && npm test
+
+# Real-invocation contract compliance check
+node console/bin/wacmin-console.mjs contract
+```
+
+**The `ai` tests must also pass on ubuntu** (that is how CI runs them). If a new case depends on `darwin` or on an external tool, skip it conditionally rather than letting it turn red—the `ai` layer tests the dispatch path and protocol correctness, not any platform's packaging capability.
+
+### 18.3 Requirements for Adding Third-Party Components
+
+Any newly added third-party library, framework, font, icon or algorithm source must be registered first: **name, version, copyright holder, licence type, official address, purpose in this project, and whether and how it was modified**, with chapter 6 of `README.md` and `NOTICE` updated accordingly.
+
+**Components whose licence cannot be determined must be marked "to be confirmed" and withheld from merging. Defaults and fabrications are not acceptable.**
+
+The project currently has zero third-party package dependencies; this requirement exists to keep it that way, and is not a formality.
+
+### 18.4 How Tests Are Organised
+
+Tests live alongside the implementation; there is no separate `test` branch or standalone test project.
+
+| Direction | Framework | Location |
+|---|---|---|
+| Mac2Win / Win2Mac / AppOnWin / console | `node:test` (Node built-in) | `<direction>/test/*.test.mjs` |
+| ExeOnMac | `unittest` (Python standard library) | `exeonmac/tests/test_*.py` |
+
+**No test-framework dependency is introduced**, consistent with the zero-third-party-dependency principle. `node --test` and `python3 -m unittest discover` are sufficient.
+
+**Skip rather than fake**: tests requiring real Wine / 7z / innoextract / swiftc explicitly `skip` when the environment lacks them, and the test name states what is missing. Assertions never contain conditional passes such as "if the environment supports this then…"—that is not a test, it is documentation.
+
+### 18.5 Keeping Documentation in Sync with Code
+
+Changing code means changing documentation, in the same commit. Specific requirements:
+
+| Change type | Locations that must be updated |
+|---|---|
+| Adding/removing an exit code | `contracts/exit-codes.json`, section 5.2.1 of this file |
+| Adding/removing an error code | The direction's `errors` module, `contracts/error-prefixes.json`, section 5.2.2 |
+| Changing the report structure | `contracts/run-report.schema.json`, section 10.2, and increment `schemaVersion` |
+| Adding a configuration key | That direction's configuration validation, section 9.2 |
+| Adding an environment variable | Section 9.3 |
+| Adding a subcommand or option | That direction's help, `test/help.test.mjs`, section 10.1 |
+| Changing verification checks | That direction's implementation, sections 3.1 and 15.5 |
+| Adding an external dependency | Chapter 6 and `NOTICE` |
+
+### 18.6 How to Write Commit Messages
+
+Following the existing history style: **one sentence stating what changed, never "fixed some issues"**.
+
+```
+Drive the incomplete-verification message from report.blockers
+7-Zip: an explicitly specified path is no longer silently skipped
+doctor: no longer reports a working 7-Zip as missing, and puts per-item results into JSON
+```
+
+Format: `scope: what changed`. The scope may be a subproject (`mac2win` / `wepack` / `console`), a module (`doctor` / `verify`) or a component (`7-Zip` / `NSIS`). A colon separates scope from description.
+
+### 18.7 Viewing History
+
+Each subproject's full commit history is preserved in its subdirectory:
+
+```bash
+git log --oneline -- mac2win/
+git log --oneline -- exeonmac/
+git log --oneline -- console/
+```
+
+### 18.8 Contact
+
+| Channel | Address |
+|---|---|
+| Repository | <https://github.com/ntars/Wacmin> |
+| Issue tracker | <https://github.com/ntars/Wacmin/issues> |
+| Email | <ntars@qq.com> · <ntarsx@163.com> |
+
+---
+
+## 19. Copyright and Licence
+
+Copyright (c) 2026 Ntarstudio (Xingjiu Studio)
+
+This project is licensed per directory, using **only Apache License 2.0 and MIT** — both permissive. Full texts live in [LICENSE](./LICENSE) (Apache-2.0) and [LICENSE-MIT](./LICENSE-MIT) (MIT); the layer map is in [LICENSING.md](./LICENSING.md).
+
+| Scope | Licence |
+|---|---|
+| `contracts/` (shared contract layer) | **Apache-2.0** |
+| `console/` `mac2win/` `exeonmac/` `win2mac/` `apponwin/` `ai/` `docs/` | MIT |
+| Brand name, logo, interface design | All rights reserved |
+
+**Why the contract layer alone is Apache-2.0.** The readers of `contracts/` are not users of this project but third parties implementing against the contract. Apache-2.0 adds two things MIT does not: an express patent grant (Section 3) and the NOTICE retention obligation (Section 4d) — the latter matters most for files that get passed around.
+
+Redistribution requires only retaining the copyright notice, the licence texts and the [NOTICE](./NOTICE).
+
+**Names and trademarks.** Names and marks such as "Ntarstudio", "星玖工作室" and "Wacmin" belong to 星玖工作室. The code licences grant rights to code, not to trademarks.
+
+**Third-party names.** Names appearing in this documentation—Wine, Darling, Rosetta 2, NSIS, 7-Zip, Electron, NW.js, Tauri, Node.js, Gcenx, Darling and others—belong to their respective owners and are used only to describe dependencies and compatibility targets.
+
+**No warranty.** This program is provided "as is" under the Apache-2.0 and MIT terms, without any express or implied warranty.
+
+---
+
+## 20. NOTICE and Open-Source Compliance
+
+### 20.1 Where Statements Live
+
+The project uses a **single statement**: all third-party components, licence obligations and warranty disclaimers are consolidated in [`NOTICE`](./NOTICE) at the repository root. No subdirectory retains a separate NOTICE file.
+
+| File | Coverage |
+|---|---|
+| [`NOTICE`](./NOTICE) | Whole repository: the project's own licence, external tools, bundled runtimes, indirect dependencies, referenced projects, technology explicitly not used, fonts and icons, full warranty disclaimer, licence-text index, process for adding components |
+
+The reasoning is in section 1.1: the three NOTICE files overlapped heavily, writing the same 7-Zip entry five times, and once maintained separately there is a persistent risk that one copy is left unamended.
+
+### 20.2 Global Dependency Quick Reference
+
+Complete information (version, copyright holder, licence, official address, purpose, whether modified) appears in sections 6.2 and 6.3 of this file and in the itemised entries of `NOTICE`.
+
+| Component | Licence | Role in this project |
+|---|---|---|
+| NSIS | zlib/libpng | Build-time invocation, compiles install scripts |
+| 7-Zip | LGPL-2.1-or-later + unRAR restriction | Build-time and verification-time invocation |
+| Wine | LGPL-2.1-or-later | ExeOnMac runtime invocation |
+| Gcenx macOS_Wine_builds | LGPL-2.1-or-later | Source of the Wine prebuilt |
+| Rosetta 2 | System component (not open source) | Instruction translation on Apple Silicon |
+| innoextract | zlib License | Optional, extracts Inno Setup |
+| msitools | LGPL-2.1-or-later | Optional, extracts MSI |
+| Darling | LGPL-2.1-or-later (includes GPL components) | AppOnWin assessment target |
+| Node.js / Electron / NW.js | MIT | Framework runtimes bundled into artefacts |
+| Tauri | MIT / Apache-2.0 | Used by target projects; this project bundles no runtime for it |
+
+### 20.3 Obtaining Licence Texts
+
+| Licence | Address |
+|---|---|
+| Apache-2.0 / MIT | See [LICENSE](./LICENSE) |
+| LGPL-2.1-or-later | <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html> |
+| zlib License | <https://opensource.org/license/zlib> |
+| unRAR license | <https://www.rarlab.com/license.htm> |
+| Apache-2.0 | <https://www.apache.org/licenses/LICENSE-2.0> |
+
+If any of these links becomes unavailable, consult <https://www.gnu.org/licenses/> or the respective project's official repository.
+
+### 20.4 Redistribution Obligations Summary
+
+This project **does not distribute** the binaries of 7-Zip, Wine, NSIS, innoextract, msitools, Rosetta 2 or Darling. It only invokes versions installed by the user as separate processes, and therefore **does not trigger** LGPL source-provision obligations.
+
+This project **does distribute** the Node.js, Electron and NW.js runtimes (bundled into artefacts). All three are MIT, so the obligation is limited to retaining the original copyright notice and licence text; installers produced should include the corresponding `LICENSE` files, or provide accessible licence text in the installer wizard or an about page.
+
+If a user or third party bundles the non-distributed tools above together with this project's artefacts into a single installer and redistributes it, the LGPL source-provision obligation is triggered: the complete source of the affected components must be supplied, or a written offer of source availability valid for no less than three years must be provided, together with all copyright notices and licence texts.
+
+### 20.5 Requirements for Registering Third-Party Components
+
+Any newly added third-party library, framework, font, icon or algorithm source must be registered first: **name, version, copyright holder, licence type, official address, purpose in this project, and whether and how it was modified**, with chapter 6 of this document and `NOTICE` updated accordingly.
+
+**Components whose licence cannot be determined must be marked "to be confirmed" and withheld from merging. Defaults and fabrications are not acceptable.**
+
+---
+
+## Appendix A: Exit Code and Error Code Reference
+
+Arranged by segment. Prefixes: `M2W` (Mac2Win), `EOM` (ExeOnMac), `AOW` (AppOnWin), `W2M` (Win2Mac).
+
+### A.1 Segment-to-Exit-Code Pairing
+
+| Exit code | Meaning | Paired error-code segment |
+|---|---|---|
+| 1 | Unclassified failure | `9999` |
+| 2 | Parameter and input error | `1002` / `1003` / `1004` |
+| 3 | Capability not implemented | `7001` |
+| 4 | Explicitly unsupported | `1005` |
+| 5 | Missing external dependency | `2001` / `2002` |
+| 6 | Build or installation failure | `4001`–`5002` |
+| 7 | Artefact verification failure | `6001`–`6003` |
+| 130 | User interruption | `9001` |
+
+### A.2 Common Error Codes
+
+| Code | Meaning | Suggested action |
+|---|---|---|
+| `M2W_1002` | Project directory does not exist | Check the path |
+| `M2W_1003` | Invalid configuration value | Fix per the message; note that an unusable `MAC2WIN_7ZIP` path also reports this code |
+| `M2W_1004` | Input artefact unusable | Check that the file is intact |
+| `M2W_1005` | Explicitly unsupported (e.g. native modules, Electron ≥ 44) | Change the input; retrying is pointless |
+| `M2W_2001` | makensis / 7-Zip missing | `brew install makensis sevenzip` |
+| `M2W_2002` | External tool unusable | Check the path reported by `doctor` |
+| `M2W_3001` | Runtime download failed | Check the network; or point `runtimeArchive` at a local file |
+| `M2W_3002` | Runtime checksum mismatch | Delete the cache and re-download, or check `runtimeChecksum` |
+| `M2W_4001` | Project build command failed | Run `npm run build` manually in a terminal first |
+| `M2W_4003` | Native module present | Switch to a pure-JS alternative (the error names the package) |
+| `M2W_5002` | NSIS compilation failed | Use `--keep-staging`, then run `makensis` manually |
+| `M2W_6001` | Artefact verification failed | **Do not distribute.** The log lists item-by-item results |
+| `M2W_6002` | Required file missing when verifying an existing installer | The artefact is incomplete |
+| `M2W_6003` | Per-file hash mismatch | Corruption during compression or extraction |
+| `EOM_1005` | Explicitly unsupported software category | See 14.5; no bypass attempted |
+| `EOM_2001` | Wine runtime missing | `wepack runtime install` |
+| `EOM_6001` | `.app` artefact verification failed | See the verification rules in 11.2 |
+| `W2M_1005` | Input artefact unusable | Check the `.app` structure and executable |
+| `AOW_1005` | Explicitly unsupported framework | See the framework list in 3.4 |
+| `9999` | Internal error | File an issue with the complete log |
+
+**The complete list is authoritative in `contracts/error-prefixes.json` and each direction's `errors` module.** The table above covers common entries only.
+
+---
+
+## Appendix B: GitHub Push Guide
+
+This appendix provides the complete executable commands, checklists and failure fallbacks required by chapter 6 of `README提示词.md`. **Back up before executing anything.**
+
+### B.1 Backup (Step One, Not Optional)
+
+```bash
+# Full repository backup (including .git); the empty-directory argument prevents nesting
+BK=~/Wacmin-backup-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$BK"
+ditto /Users/ntars/Github/Wacmin "$BK/Wacmin"
+
+# Confirm the backup is complete
+du -sh "$BK/Wacmin"
+ls -a "$BK/Wacmin"
+```
+
+`ditto` is used rather than `cp -R` because it preserves extended attributes and resource forks completely; `cp -R` on macOS can lose some metadata.
+
+**To back up only the working tree without history**:
+
+```bash
+cd /Users/ntars/Github/Wacmin
+git archive --format=tar.gz -o "$BK/wacmin-worktree.tar.gz" HEAD
+```
+
+### B.2 Cleanup and Verification (Mandatory Before Pushing)
+
+```bash
+cd /Users/ntars/Github/Wacmin
+
+# 1. Confirm the current branch and remote
+git branch --show-current          # expect main
+git remote -v                      # expect origin pointing at ntars/Wacmin
+
+# 2. Working tree status: there should be no untracked temporary files
+git status --short
+
+# 3. Change list relative to HEAD: confirm every entry is intentional
+git diff --name-status HEAD
+
+# 4. File count and list that will enter the commit
+git ls-files | wc -l
+git ls-files
+
+# 5. Confirm there are no large files (threshold 5 MB)
+git ls-files -z | xargs -0 -I{} sh -c 'test -f "{}" && sz=$(stat -f%z "{}") && [ "$sz" -gt 5242880 ] && echo "$sz {}"' 2>/dev/null | sort -rn
+
+# 6. Confirm no macOS junk files entered the index
+git ls-files | grep -E '(^|/)\.DS_Store$|(^|/)\._[^/]*$|(^|/)__MACOSX/' || echo "no junk files"
+```
+
+**Verification checklist** (confirm each item):
+
+| # | Check | Expected result |
+|---|---|---|
+| 1 | `git status --short` | Only this change's intentional files, nothing else |
+| 2 | `git diff --name-status HEAD` | Every `D` entry is a document this change deletes; every `A` entry is a file this change adds |
+| 3 | Markdown files in `git ls-files` | Only `README.md` and `README_EN.md` at the root |
+| 4 | LICENSE / NOTICE in `git ls-files` | Only the root `LICENSE` and `NOTICE` |
+| 5 | Large-file scan | No output, or only explainable test fixtures |
+| 6 | macOS junk files | "no junk files" |
+| 7 | `.gitignore` coverage | `.DS_Store`, `node_modules/`, `dist*/`, `*.log` all present |
+
+### B.3 Commit and Push
+
+```bash
+cd /Users/ntars/Github/Wacmin
+
+# 1. Stage everything (-A records deletions)
+git add -A
+
+# 2. Confirm the staged content once more
+git status --short
+git diff --cached --stat
+
+# 3. Commit
+git commit -m "Consolidate documentation at the repository root; remove subdirectory README / LICENSE / NOTICE, correct check counts and test sizes"
+
+# 4. Push
+git push origin main
+```
+
+**If the remote has history the local copy lacks** (for example someone else committed), rebase first:
+
+```bash
+git pull --rebase origin main
+git push origin main
+```
+
+**If the remote content is entirely obsolete and needs a full refresh** (only for personal repositories with no collaborators):
+
+```bash
+# Risk warning: this discards all remote commits and is unrecoverable
+# The backup in B.1 must already be complete before executing
+git push --force-with-lease origin main
+```
+
+`--force-with-lease` rather than `--force`: the former refuses to push when the remote has been updated by someone else, avoiding overwriting their work.
+
+### B.4 Post-Push Verification
+
+```bash
+# The remote branch matches the local one
+git ls-remote origin main
+git rev-parse HEAD
+
+# Remote file list (requires an authenticated gh)
+gh api "repos/ntars/Wacmin/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E '\.(md)$'
+
+# Expect only README.md and README_EN.md
+```
+
+Browser-side check: open <https://github.com/ntars/Wacmin> and confirm the root holds only the four expected documents and that no subdirectory still contains `README.md` / `LICENSE` / `NOTICE`.
+
+### B.5 Failure Fallbacks
+
+| Error | Cause | Alternative |
+|---|---|---|
+| `remote: Permission to ntars/Wacmin.git denied` | Expired HTTPS credentials or insufficient rights | ① `gh auth login` then retry; ② switch to SSH: `git remote set-url origin git@github.com:ntars/Wacmin.git`; ③ check that `git config user.email` belongs to an account with access |
+| `fatal: unable to access ... Could not resolve host` | Network or proxy | ① Check the proxy: `git config --get http.proxy`; ② temporarily set `git config --global http.proxy http://127.0.0.1:PORT`; ③ change networks |
+| `RPC failed; curl 56 ... unexpected disconnect` | Transfer too large in one go | `git config --global http.postBuffer 524288000`; or `git config --global http.version HTTP/1.1`; or push in smaller batches |
+| `remote: error: GH001: Large files detected` | A file exceeds 100 MB | ① Remove it from the commit: `git rm --cached <file>` then `git commit --amend`; ② if already in history, `git filter-repo --path <file> --invert-paths`; ③ if it must be kept, enable Git LFS |
+| `error: src refspec main does not match any` | The local branch is not named `main` | `git branch -M main` then push again |
+| Filename case change has no effect | Git is case-insensitive | `git mv Readme.md README.md` (two steps: rename to a temporary name first), or set `git config core.ignorecase false` and rename |
+| `! [rejected] main -> main (non-fast-forward)` | The remote has new commits | ① `git pull --rebase origin main` then push; ② when the remote content is confirmed obsolete, `git push --force-with-lease` |
+| `fatal: refusing to merge unrelated histories` | Local and remote histories are unrelated | `git pull --allow-unrelated-histories origin main`, resolve conflicts, then push |
+| `Updates were rejected because the tag already exists` | Tag conflict | `git tag -d <tag>` and re-tag, or `git push --force origin <tag>` (only when the old tag is confirmed obsolete) |
+| Push succeeds but the web page shows no change | CDN cache or wrong branch | ① Confirm the branch: `git branch --show-current`; ② hard-refresh the page; ③ `gh api repos/ntars/Wacmin --jq .default_branch` to confirm the default branch |
+| `gh: command not found` | GitHub CLI not installed | `brew install gh`, then `gh auth login` |
+| SSH reports `Permission denied (publickey)` | No key configured | `ssh-keygen -t ed25519 -C "your@email"` → `gh ssh-key add ~/.ssh/id_ed25519.pub` → verify with `ssh -T git@github.com` |
+
+### B.6 Recreating the Remote Repository (Last Resort)
+
+Use only when pushes fail repeatedly and the remote content is confirmed fully disposable.
+
+```bash
+# Risk: deleting the remote also deletes Issues, PRs, Releases, Wiki and Actions records
+# The backup in B.1 must be complete, and Issues and Releases exported
+
+# Option 1: GitHub CLI
+gh repo delete ntars/Wacmin --yes
+gh repo create ntars/Wacmin --public --description "Bidirectional application interoperability suite for macOS and Windows"
+git remote set-url origin git@github.com:ntars/Wacmin.git
+git push -u origin main
+
+# Option 2: the web UI
+# 1. Open https://github.com/ntars/Wacmin/settings
+# 2. Scroll to the bottom, Danger Zone → Delete this repository
+# 3. Create a new repository, still named Wacmin, with no initialisation files
+# 4. Return to the local repository and run the set-url and push commands above
+```
+
+**This step destroys all collaboration records.** Use it only for a personal repository with no collaborators, after backing up.
+
+---
+
+## Appendix C: Self-Check Checklist
+
+Responding item by item to the ten requirements in chapter 5 of `README提示词.md`.
+
+| # | Check | Conclusion |
+|---|---|---|
+| 1 | Any colloquialisms or ambiguous sentences | Checked. The whole document is written in formal prose, free of exclamation marks and ellipsis-driven casualness; terms are defined at first use |
+| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 32 configuration keys (9.2), 13 environment variables (9.3), 14 external tools with all seven attributes (6.2), 10 subcommand families (10.1) |
+| 3 | Every highlight has concrete evidence | All twenty highlights follow the five-part structure (name / value / implementation / differentiation / evidence), with evidence drawn from measurement or reproducible commands |
+| 4 | All design details recorded | Chapter 5, eleven sections, covering abnormal input and boundaries, timeout/retry/degradation/fault tolerance, caching and performance, concurrency and consistency, storage optimisation, security measures, micro UX decisions, default-value rationale, cross-platform strategy |
+| 5 | Third-party projects, copyright and licences fully present in README and NOTICE | Chapter 6 plus the thirteen sections of `NOTICE`, consistent between the two |
+| 6 | Description consistent with actual features and directory structure | Directory structure (11.1) written from the actual `ls` output; test sizes (16) match measured output; check counts (15.5) distinguish the measured 11 from 10 |
+| 7 | Any text, code or assets of unknown or unauthorised origin | None. All code is original; referenced projects are itemised in `NOTICE` section 7 with an explicit statement that no code was copied |
+| 8 | Both own copyright protected and others' respected | Chapter 19 states own copyright and trademarks; `NOTICE` states others' copyright and redistribution obligations |
+| 9 | `README_EN.md` synchronised with the Chinese version, language links at the top of both | Yes. Section headings correspond one-to-one; both link to each other at the top |
+| 10 | Legal text in `NOTICE` retains the English original and matches the README | Yes. The MIT warranty disclaimer is retained verbatim in English; the dependency list matches chapter 6 |
+
+---
+
+**Last updated**: 2026-11-15 · reflecting the repository's current `main` branch

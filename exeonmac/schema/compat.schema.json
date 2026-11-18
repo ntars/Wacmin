@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wexe.dev/schema/compat.schema.json",
+  "title": "compat.yaml",
+  "description": "ExeOnMac 包内配置。位于 {App} (Win).app/Contents/Recipes/compat.yaml，是该包的唯一事实来源：launcher 读它定位入口，wepack 读它做增量重建。顶层字段顺序即序列化顺序。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["app", "entry", "installer", "layers"],
+  "properties": {
+    "app": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "应用显示名，不含 \" (Win)\" 后缀。对应 CFBundleName 的来源。",
+      "examples": ["微信", "7-Zip"]
+    },
+    "version": {
+      "type": "string",
+      "description": "应用版本，取安装器元数据；取不到时为空字符串。",
+      "pattern": "^[0-9A-Za-z._+\\-]*$",
+      "examples": ["3.9.10"]
+    },
+    "entry": {
+      "type": "string",
+      "minLength": 1,
+      "description": "入口 exe 路径，相对 Contents/Resources/Private/。必须以 drive_c/ 开头，使用正斜杠。",
+      "pattern": "^drive_c/.+\\.exe$",
+      "examples": [
+        "drive_c/Program Files/Tencent/WeChat/WeChat.exe",
+        "drive_c/Program Files/7-Zip/7zFM.exe"
+      ]
+    },
+    "installer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "completed"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["nsis", "inno", "installshield", "msi", "burn", "squirrel", "unknown"],
+          "description": "安装器类型，取值与 5.1 静默参数表一一对应。"
+        },
+        "silent_args": {
+          "type": "string",
+          "description": "实际使用的静默参数，原样记录，便于复现。",
+          "examples": [" /S"]
+        },
+        "completed": {
+          "type": "boolean",
+          "description": "静默安装是否成功完成。false 时包不可分发。"
+        },
+        "fallback_interactive": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否因静默失败回退到交互安装。"
+        }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "description": "已挂载的共享层，按挂载顺序排列。base 必须在首位。挂载语义：读时先 Private 再 Layers，写只写 Private。",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["base", "vcpp", "dotnet", "fonts-cn"]
+      },
+      "examples": [["base", "vcpp", "fonts-cn"]]
+    },
+    "font_map": {
+      "type": "object",
+      "description": "Windows 字体名 → macOS 字体名。launcher 启动前据此在 prefix 内写入字体替换注册表项（走 .reg 文件，不直接改注册表）。",
+      "additionalProperties": { "type": "string" },
+      "examples": [{ "微软雅黑": "PingFang SC", "宋体": "Songti SC" }]
+    },
+    "file_associations": {
+      "type": "array",
+      "description": "要声明的文件类型关联。默认空数组，不抢系统关联。非空时由 wepack 生成 CFBundleDocumentTypes。",
+      "items": { "type": "string", "pattern": "^\\.[A-Za-z0-9]{1,10}$" },
+      "default": [],
+      "examples": [[".7z", ".zip"]]
+    },
+    "known_issues": {
+      "type": "array",
+      "description": "已知问题，人类可读的一句话说明。供 UI 与文档引用。",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "bundle_id": {
+      "type": "string",
+      "description": "CFBundleIdentifier，格式 com.wexe.win.{反向域名}。必须全局唯一，撞了会导致 LaunchServices 混乱。",
+      "pattern": "^com\\.wexe\\.win\\.[a-z0-9]+(\\.[a-z0-9\\-]+)+$",
+      "examples": ["com.wexe.win.tencent.wechat"]
+    },
+    "icon_source": {
+      "type": "string",
+      "description": "图标来源描述，用于重建时定位原始图标。形如 \"exe:drive_c/.../WeChat.exe#0\" 或 \"ico:setup.exe#largest\"。",
+      "examples": ["exe:drive_c/Program Files/7-Zip/7zFM.exe#0"]
+    }
+  }
+}

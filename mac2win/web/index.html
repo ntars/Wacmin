@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>mac2win — x86 Windows 打包</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script>
+      /*
+       * 首帧主题，必须在样式表生效前执行。
+       * 不这么做的话，深色系统下会闪一帧白，观感很差。
+       */
+      (function () {
+        var stored = localStorage.getItem('mac2win.theme')
+        var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+      })()
+    </script>
+  </head>
+  <body>
+    <div class="app">
+      <header class="toolbar">
+        <div class="brand">
+          <svg class="brand__mark" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="2.5" y="4.5" width="19" height="13" rx="2.5" stroke="currentColor" stroke-width="1.5" />
+            <path d="M7 21h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            <path d="M12 4.5v13" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2.5" />
+            <path d="M5.5 8.5h3M15.5 8.5h3M5.5 12h3M15.5 12h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          <div class="brand__text">
+            <h1>mac2win</h1>
+            <p>ARM macOS → x86 Windows</p>
+          </div>
+        </div>
+        <div class="toolbar__right">
+          <span class="env" id="env"></span>
+          <button type="button" class="icon-button" id="theme-toggle" title="切换主题" aria-label="切换主题">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="4.25" stroke="currentColor" stroke-width="1.5" />
+              <path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.1 5.1l1.4 1.4M17.5 17.5l1.4 1.4M18.9 5.1l-1.4 1.4M6.5 17.5l-1.4 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <!-- 左栏：配置 -->
+        <section class="panel panel--config" aria-label="打包配置">
+          <div class="panel__head">
+            <h2>配置</h2>
+            <button type="button" class="text-button" id="reset">重置</button>
+          </div>
+
+          <div class="panel__body">
+            <label class="field">
+              <span class="field__label">项目目录</span>
+              <div class="field__row">
+                <input type="text" id="project" placeholder="/Users/你/Github/你的项目" spellcheck="false" />
+                <button type="button" class="button button--quiet" id="probe">探测</button>
+              </div>
+              <span class="field__hint" id="probe-hint">指向含 package.json 的项目根目录</span>
+            </label>
+
+            <div class="field-grid">
+              <label class="field">
+                <span class="field__label">产品名</span>
+                <input type="text" id="productName" placeholder="从 package.json 推断" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span class="field__label">版本号</span>
+                <input type="text" id="version" placeholder="1.0.0" spellcheck="false" />
+              </label>
+            </div>
+
+            <label class="field">
+              <span class="field__label">项目框架</span>
+              <select id="framework">
+                <option value="auto">自动识别</option>
+                <option value="electron">Electron（原生窗口）</option>
+                <option value="nwjs">NW.js（原生窗口）</option>
+                <option value="tauri">Tauri（可编 Rust 壳）</option>
+                <option value="node">纯 Node 服务</option>
+                <option value="static">静态站点</option>
+              </select>
+              <span class="field__hint" id="framework-hint">按 src-tauri 目录与 package.json 依赖判断</span>
+            </label>
+
+            <div class="field-grid">
+              <label class="field">
+                <span class="field__label">目标架构</span>
+                <select id="target">
+                  <option value="x86">x86（32 位，兼容最好）</option>
+                  <option value="x64">x64（64 位）</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">产物形态</span>
+                <select id="format">
+                  <option value="nsis">安装包 exe</option>
+                  <option value="zip">免安装 zip</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="field">
+              <span class="field__label">宿主入口</span>
+              <input type="text" id="entry" placeholder="cordis-host/lib/index.js" spellcheck="false" />
+              <span class="field__hint">留空则只打包前端</span>
+            </label>
+
+            <label class="field">
+              <span class="field__label">前端产物目录</span>
+              <input type="text" id="frontendDist" placeholder="dist" spellcheck="false" />
+            </label>
+
+            <label class="field">
+              <span class="field__label">构建命令</span>
+              <input type="text" id="buildCommand" placeholder="npm run build（留空则跳过）" spellcheck="false" />
+            </label>
+
+            <div class="field-grid">
+              <label class="field">
+                <span class="field__label">压缩</span>
+                <select id="compression">
+                  <option value="lzma">lzma（体积最小）</option>
+                  <option value="zlib">zlib（最快）</option>
+                  <option value="bzip2">bzip2</option>
+                  <option value="none">不压缩</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field__label">数据目录环境变量</span>
+                <input type="text" id="dataEnv" placeholder="APP_DATA_DIR" spellcheck="false" />
+              </label>
+            </div>
+
+            <div class="switches">
+              <label class="switch">
+                <input type="checkbox" id="verify" checked />
+                <span class="switch__track"><span class="switch__thumb"></span></span>
+                <span class="switch__text">构建后校验产物</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="desktopShortcut" checked />
+                <span class="switch__track"><span class="switch__thumb"></span></span>
+                <span class="switch__text">创建桌面快捷方式</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="alsoZip" />
+                <span class="switch__track"><span class="switch__thumb"></span></span>
+                <span class="switch__text">额外生成免安装 zip</span>
+              </label>
+              <label class="switch">
+                <input type="checkbox" id="keepStaging" />
+                <span class="switch__track"><span class="switch__thumb"></span></span>
+                <span class="switch__text">保留中间产物</span>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button type="button" class="button button--primary" id="build">
+                <span id="build-label">开始打包</span>
+              </button>
+              <button type="button" class="button button--quiet" id="cancel" hidden>取消</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 右栏：状态与日志 -->
+        <section class="panel panel--output" aria-label="构建状态">
+          <div class="panel__head">
+            <h2>构建</h2>
+            <div class="panel__head-right">
+              <span class="status-pill" id="status">待机</span>
+              <button type="button" class="text-button" id="clear">清空日志</button>
+            </div>
+          </div>
+
+          <div class="progress" id="progress-wrap" hidden>
+            <div class="progress__bar"><div class="progress__fill" id="progress-fill"></div></div>
+            <div class="progress__meta">
+              <span id="progress-stage">准备中</span>
+              <span id="progress-percent">0%</span>
+            </div>
+          </div>
+
+          <div class="result" id="result" hidden></div>
+
+          <div class="log" id="log" role="log" aria-live="polite"></div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

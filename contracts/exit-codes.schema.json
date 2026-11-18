@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ntars/Wacmin/contracts/exit-codes.json",
+  "title": "Wacmin 统一退出码",
+  "description": "四个方向共用的退出码契约。码值是对外承诺，脚本与前端汇总依赖它。新增码只能追加，不改变已有含义。",
+  "type": "object",
+  "required": ["version", "codes"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "codes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["meaning", "when"],
+        "properties": {
+          "meaning": { "type": "string", "description": "一句话含义" },
+          "when": { "type": "string", "description": "什么情况下返回" },
+          "errorSegment": {
+            "type": ["string", "null"],
+            "description": "对应错误码段位，如 1xxx。null 表示与段位无关"
+          }
+        }
+      }
+    }
+  }
+}

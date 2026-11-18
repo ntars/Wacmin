@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ntars/Wacmin/contracts/run-report.schema.json",
+  "title": "Wacmin 运行报告",
+  "description": "四个方向的 CLI 在 --json 模式下输出的统一结构。console 只认这一份，不认各方向自己的字段名。",
+  "type": "object",
+  "required": ["schemaVersion", "direction", "ok", "exitCode", "startedAt", "finishedAt", "stages"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "报告格式版本。破坏性变更时递增，console 据此分支。"
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["mac2win", "exeonmac", "apponwin", "win2mac"],
+      "description": "产出这份报告的方向。"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "整体是否成功。等价于 exitCode === 0。"
+    },
+    "exitCode": {
+      "type": "integer",
+      "description": "进程退出码，见 exit-codes.json。"
+    },
+    "command": {
+      "type": "string",
+      "description": "实际执行的子命令，如 build / verify / package。"
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "durationMs": { "type": "integer", "minimum": 0 },
+    "host": {
+      "type": "object",
+      "description": "宿主环境快照，便于复现问题。",
+      "required": ["platform", "arch"],
+      "properties": {
+        "platform": { "type": "string", "description": "darwin / win32" },
+        "arch": { "type": "string", "description": "arm64 / x64" },
+        "osVersion": { "type": "string" },
+        "toolVersion": { "type": "string", "description": "该方向工具自身版本" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "description": "输入物识别结果。",
+      "properties": {
+        "path": { "type": "string" },
+        "kind": { "type": "string", "description": "框架名或安装器类型" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "supported": { "type": "boolean" },
+        "unsupportedReason": { "type": ["string", "null"] }
+      }
+    },
+    "stages": {
+      "type": "array",
+      "description": "分阶段执行记录。失败即停，因此失败后不应有后续阶段。",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 0 },
+          "name": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "running", "ok", "failed", "skipped"]
+          },
+          "durationMs": { "type": "integer", "minimum": 0 },
+          "message": { "type": "string" },
+          "errorCode": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "产物清单。mac2win 出 exe/zip，exeonmac 出 .app，其余方向同理。",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind", "bytes"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["nsis-exe", "zip", "mac-app", "msi", "dmg", "pkg", "dir"]
+          },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "target": { "type": "string", "description": "x86 / x64 / arm64" }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "description": "产物校验项。每项独立可判定，任一 fail 即整体失败。",
+      "items": {
+        "type": "object",
+        "required": ["name", "passed"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "detail": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["required", "advisory"],
+            "default": "required"
+          }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "不影响成功但用户需要知道的事，如降级、精度损失。"
+    },
+    "error": {
+      "type": ["object", "null"],
+      "description": "失败时的错误详情。ok 为 true 时为 null。",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z0-9]{2,4}_[0-9]{4}$" },
+        "message": { "type": "string" },
+        "hint": { "type": ["string", "null"] },
+        "details": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": false } } },
+      "then": { "required": ["error"], "properties": { "error": { "type": "object" } } }
+    },
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "properties": { "error": { "type": "null" } } }
+    }
+  ]
+}

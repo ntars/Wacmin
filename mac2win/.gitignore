@@ -1,0 +1,25 @@
+# 依赖（本项目零运行时依赖，这些只可能来自误操作）
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# 构建产物
+dist-mac2win/
+*.exe
+*.zip
+.staging-*/
+
+# 日志
+*.log
+.mac2win-build.log
+
+# macOS 垃圾
+.DS_Store
+._*
+__MACOSX/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

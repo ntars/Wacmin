@@ -1,0 +1,309 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  contracts:
+    name: 契约自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 文档里的测试计数自洽
+        run: |
+          # README 12.1 声称自己是「测试计数的唯一来源」，但此前没有任何
+          # 东西在强制执行。同一份数字实际存了四处（两版表格、workflow 的
+          # --min、实跑结果），本仓库已经因此分叉三次。
+          # 这一步守住前两处：合计必须等于分项之和，两版必须逐项相同。
+          node contracts/doc-counts.mjs --check
+          node --test contracts/doc-counts.test.mjs
+
+      - name: 校验契约文件自洽
+        run: node contracts/validate.mjs
+      - name: 跑校验器自身的测试
+        run: |
+          # 这个脚本是「契约是否被遵守」的唯一权威，但它此前没有任何测试。
+          # 后果是两处失明长期存在：additionalProperties: false 从不执行、
+          # 段位按首字符推桶导致 9999 段永远命中不了 —— 检查器自己不会说话。
+          node --test contracts/validate.test.mjs > /tmp/contracts-tests.log 2>&1 || {
+            tail -40 /tmp/contracts-tests.log
+            exit 1
+          }
+          grep -E "^# (tests|pass|fail|skipped)" /tmp/contracts-tests.log
+          # 只关注「跳过的绿」：node --test 有 t.skip() 时退出码仍是 0
+          awk -F' ' '/^# skipped/ { if ($3 != 0) exit 1 }' /tmp/contracts-tests.log
+          awk -F' ' '/^# fail/ { if ($3 != 0) exit 1 }' /tmp/contracts-tests.log
+          # 用例数只许增不许减，否则等于有人删了断言。
+          # 基线从 README 12.1 读，不再硬编码 —— 硬编码等于把同一个数字
+          # 在第三处又存一份，而这正是 doc-counts 要根治的病。
+          MIN=$(node contracts/doc-counts.mjs --min contracts)
+          echo "contracts 基线 ${MIN} 项（取自 README 12.1）"
+          awk -F' ' -v min="$MIN" '/^# tests/ { if ($3 < min) exit 1 }' /tmp/contracts-tests.log
+      - name: 退出码与错误码配对不准分叉
+        run: |
+          # 每份报告里 exitCode 与 error.code 必须落在契约声明的同一格。
+          # 这类分叉（契约说 1002 配 4，实现全映射成 2）靠人工评审发现不了。
+          cat > /tmp/mismatch.json <<'JSON'
+          {"schemaVersion":1,"direction":"win2mac","ok":false,"exitCode":2,
+           "startedAt":"2026-01-01T00:00:00Z","finishedAt":"2026-01-01T00:00:01Z",
+           "stages":[],"error":{"code":"W2M_1005","message":"x","hint":null,"details":[]}}
+          JSON
+          if node contracts/validate.mjs --report /tmp/mismatch.json 2>/dev/null; then
+            echo "::error::错配的报告竟然通过了校验，校验逻辑失效"
+            exit 1
+          fi
+          echo "错配被正确拦下"
+
+  mac2win:
+    name: mac2win（macOS arm64）
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 安装打包工具
+        run: brew install makensis sevenzip
+      - name: 跑测试
+        working-directory: mac2win
+        run: |
+          # `node --test` 有 t.skip() 时退出码仍是 0，汇总里只写一行
+          # `# skipped 3`。以前就是裸的 npm test，那 3 项在 CI 上永远不跑
+          # 却全绿 —— 跳过的还是「控制台程序按 GUI 校验必须被拒」这类
+          # 拒绝路径的核心断言。
+          node --test "test/*.test.mjs" > /tmp/m2w-tests.log 2>&1 || {
+            tail -60 /tmp/m2w-tests.log
+            exit 1
+          }
+          grep -E "^# (tests|pass|fail|skipped)" /tmp/m2w-tests.log
+          # 基线取自 README 12.1，不在 workflow 里另存一份数字。
+          MIN=$(node ../contracts/doc-counts.mjs --min mac2win)
+          node test/check-no-skips.mjs /tmp/m2w-tests.log --min "$MIN"
+      - name: 端到端打包（静态站）
+        working-directory: mac2win
+        run: |
+          mkdir -p /tmp/e2e/dist
+          echo '<!doctype html><html><head><title>E2E</title></head><body>ok</body></html>' > /tmp/e2e/dist/index.html
+          echo '{"name":"e2e","version":"1.0.0"}' > /tmp/e2e/package.json
+          node bin/mac2win.mjs build /tmp/e2e --out /tmp/e2e/out --report > /tmp/e2e/report.json
+          node ../contracts/validate.mjs --report /tmp/e2e/report.json
+          ls -la /tmp/e2e/out/*.exe
+
+  exeonmac:
+    name: exeonmac（macOS arm64）
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 装测试依赖
+        run: |
+          # 这些不是「可选增强」，是测试夹具的运行前提：
+          #   makensis    → 现场编译 NSIS 样本
+          #   innoextract → 解 Inno 样本，同时也是下载 ISCC 工具链的解包器
+          # 7zz 由 wepack.tools.find_tool 自己找（macos runner 自带 p7zip/7zz）。
+          # swiftc 用于编译 launcher（Xcode CLT 自带，macos runner 必有）。
+          brew install makensis innoextract
+
+      - name: 缓存 wine 运行时
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/wexe/runtime
+          key: wexe-wine-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: 装 wine 运行时
+        working-directory: exeonmac
+        # 下载 100+ MB，命中缓存时是秒过。
+        # 这里**不吞错误**：装不上就让这一步红，而不是留给下一步以「跳过」
+        # 的形式静默降级 —— 那正是这次要根治的病。
+        run: python3 -m wepack runtime install
+
+      - name: 缓存 base 层
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Application Support/wexe/layers
+          key: wexe-base-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: 构建 base 层
+        working-directory: exeonmac
+        # wineboot 建 drive_c，是「真实安装」测试的前提。
+        # 冷启动约 1-2 分钟，命中缓存后跳过。
+        run: |
+          if [ -f "$HOME/Library/Application Support/wexe/layers/base/drive_c/windows/notepad.exe" ]; then
+            echo "base 层已在缓存中"
+          else
+            python3 -m wepack layers build base --timeout 600
+          fi
+
+      - name: 确认依赖齐全
+        working-directory: exeonmac
+        # 缺任何一个就在这里红，而不是等测试跑完由 check_no_skips 兜。
+        # 区别在报错时机：这里红 = 环境没装好，去改 workflow；
+        # check_no_skips 红 = 夹具或探测逻辑有缺陷，去改代码。
+        # 脚本本身带详细注释，用 wepack.tools 的冒烟测试判断「能用」
+        # 而不是 command -v 的「在 PATH 里」。
+        run: python3 tests/check_deps.py
+
+      - name: 缓存 ISCC 工具链
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/wexe-toolchain
+          key: wexe-iscc-6.0.5-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: 跑测试
+        working-directory: exeonmac
+        run: |
+          # `OK (skipped=N)` 的退出码同样是 0，跳过在报告里跟通过长得一样。
+          # 以前这一步就是裸的 discover，10 项测试在 CI 上永远不跑却全绿。
+          python3 -m unittest discover -s tests -v > /tmp/eom-tests.log 2>&1 || {
+            tail -60 /tmp/eom-tests.log
+            exit 1
+          }
+          tail -5 /tmp/eom-tests.log
+          # 同上，基线取自 README 12.1。
+          MIN=$(node ../contracts/doc-counts.mjs --min exeonmac)
+          python3 tests/check_no_skips.py /tmp/eom-tests.log --min "$MIN"
+
+      - name: 报告合规
+        working-directory: exeonmac
+        run: |
+          python3 -m wepack version --report > /tmp/eom.json
+          node ../contracts/validate.mjs --report /tmp/eom.json
+
+  win2mac:
+    name: win2mac（Windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 跑测试
+        working-directory: win2mac
+        run: npm test
+
+  apponwin:
+    name: apponwin（Windows）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 跑测试
+        working-directory: apponwin
+        run: npm test
+
+  console:
+    name: console 集成
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 跨方向集成测试
+        working-directory: console
+        run: npm test
+
+  ai:
+    name: ai 接入层
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 跑测试
+        working-directory: ai
+        run: npm test
+      - name: MCP 握手实跑（真起子进程，不注入假流）
+        working-directory: ai
+        run: |
+          # 单元测试用注入的内存流，看不到「进程真的能起来」这件事。
+          # 这一步真起一个 MCP server，喂三条消息，确认 stdout 里
+          # 只有协议消息 —— stdout 被日志污染是 MCP 最容易出的错。
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | node bin/wacmin-mcp.mjs > /tmp/mcp.out 2> /tmp/mcp.err
+
+          echo "--- stdout 行数 ---"
+          wc -l < /tmp/mcp.out
+
+          # 每一行都必须是可解析的 JSON-RPC 消息
+          node -e '
+            const fs = require("node:fs");
+            const lines = fs.readFileSync("/tmp/mcp.out", "utf8").split("\n").filter(Boolean);
+            if (lines.length !== 2) {
+              console.error(`期望 2 条响应（initialize + tools/list），实际 ${lines.length} 条`);
+              process.exit(1);
+            }
+            for (const line of lines) {
+              const message = JSON.parse(line);
+              if (message.jsonrpc !== "2.0") {
+                console.error(`非 JSON-RPC 消息混入 stdout：${line.slice(0, 120)}`);
+                process.exit(1);
+              }
+            }
+            const tools = JSON.parse(lines[1]).result.tools;
+            if (!Array.isArray(tools) || tools.length !== 6) {
+              console.error(`工具数应为 6，实际 ${tools?.length}`);
+              process.exit(1);
+            }
+            console.log(`stdout 干净：${lines.length} 条协议消息，${tools.length} 个工具`);
+          '
+
+      - name: 冒充客户端调一次工具
+        working-directory: ai
+        run: |
+          # 上一版用管道一次性喂完再关 stdin，服务读到 EOF 就按规范退出，
+          # 工具响应还没写出就没了 —— 这是分帧与生命周期的真实差异，
+          # 不是缺陷。这里用保持 stdin 打开的探针，模拟真实客户端。
+          node -e '
+            const { spawn } = require("node:child_process");
+            const child = spawn(process.execPath, ["bin/wacmin-mcp.mjs"], { stdio: ["pipe", "pipe", "pipe"] });
+            let out = "";
+            let err = "";
+            child.stdout.on("data", (chunk) => { out += chunk; });
+            child.stderr.on("data", (chunk) => { err += chunk; });
+            const send = (message) => child.stdin.write(JSON.stringify(message) + "\n");
+
+            send({ jsonrpc: "2.0", id: 1, method: "initialize",
+                   params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "ci", version: "1" } } });
+
+            setTimeout(() => {
+              send({ jsonrpc: "2.0", id: 2, method: "tools/call",
+                     params: { name: "wacmin_list_directions", arguments: {} } });
+            }, 400);
+
+            setTimeout(() => {
+              const lines = out.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+              const response = lines.find((item) => item.id === 2);
+              if (response === undefined) {
+                console.error("没收到工具响应");
+                console.error("stdout:", out.slice(-500));
+                console.error("stderr:", err.slice(-500));
+                process.exit(1);
+              }
+              const directions = response.result.structuredContent.directions;
+              if (directions.length !== 4) {
+                console.error(`方向数应为 4，实际 ${directions.length}`);
+                process.exit(1);
+              }
+              console.log(`工具调用成功：${directions.map((d) => d.id).join(" / ")}`);
+              child.stdin.end();
+              process.exit(0);
+            }, 2500);
+          '

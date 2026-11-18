@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "note": "对外契约。码值一经发布不再改动，只追加。四个方向必须共用这一份。",
+  "codes": {
+    "0": { "meaning": "成功", "when": "流程跑完且产物校验通过", "errorSegment": null },
+    "1": { "meaning": "未归类失败", "when": "内部错误，或不属于其他码的失败", "errorSegment": "9999" },
+    "2": { "meaning": "参数与输入错误", "when": "命令行参数缺失、拼写错误、互斥冲突，或输入物路径不存在", "errorSegment": "1002/1003/1004" },
+    "3": { "meaning": "能力未实现", "when": "该功能属于后续阶段，当前阶段明确不做", "errorSegment": "7001" },
+    "4": { "meaning": "明确不支持", "when": "输入物的类型或类别落在硬边界内，不尝试绕过", "errorSegment": "1005" },
+    "5": { "meaning": "缺少外部依赖", "when": "缺 makensis / wine / 7z / innoextract 等工具", "errorSegment": "2001/2002" },
+    "6": { "meaning": "构建或安装失败", "when": "项目构建、依赖收集、暂存、编译环节出错", "errorSegment": "4001-5002" },
+    "7": { "meaning": "产物校验失败", "when": "产物存在但不符合规范：架构错、文件缺、哈希不匹配", "errorSegment": "6001-6003" },
+    "130": { "meaning": "用户中断", "when": "收到 SIGINT / SIGTERM", "errorSegment": "9001" }
+  }
+}

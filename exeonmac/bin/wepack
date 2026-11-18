@@ -1,0 +1,8 @@
+#!/bin/sh
+# wepack 开发入口。免安装直接用：./bin/wepack --help
+# 安装到 PATH：pipx install --editable .  或  pip install --editable .
+set -eu
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+export PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m wepack "$@"

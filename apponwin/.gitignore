@@ -1,0 +1,23 @@
+# 依赖（本项目零运行时依赖）
+node_modules/
+package-lock.json
+
+# 构建产物
+dist-*/
+*.exe
+*.zip
+*.app/
+.staging-*/
+
+# 日志
+*.log
+
+# macOS 垃圾
+.DS_Store
+._*
+__MACOSX/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

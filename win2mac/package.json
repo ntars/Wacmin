@@ -1,0 +1,38 @@
+{
+  "name": "win2mac",
+  "version": "0.2.0",
+  "description": "在 Windows 上打包 macOS 应用包（.app 目录 + zip）| Packaging macOS app bundles on Windows",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Ntarstudio（星玖工作室）",
+    "url": "https://www.ntars.cn/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ntars/Wacmin.git"
+  },
+  "homepage": "https://github.com/ntars/Wacmin/tree/main/win2mac",
+  "bin": {
+    "win2mac": "./bin/win2mac.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "start": "node ./bin/win2mac.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "keywords": [
+    "macos",
+    "app-bundle",
+    "packaging",
+    "windows",
+    "cross-platform",
+    "build-tool"
+  ]
+}

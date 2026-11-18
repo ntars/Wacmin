@@ -1,0 +1,354 @@
+# NOTICE
+
+Wacmin — 打破 macOS 与 Windows 的架构限制，让两个平台的应用双向互通
+
+Copyright (c) 2026 Ntarstudio（星玖工作室）
+<https://www.ntars.cn/>
+
+本文件是本仓库的版权与第三方组件声明。它回答四个问题：本项目自身归谁、用了别人的什么、
+再分发时必须保留什么、哪些东西本仓库明确没有用。修改或再分发前请先读本文件与仓库根
+[`LICENSE`](./LICENSE)。
+
+**本文件是全仓唯一的合规声明**。本仓库采用单文档制：许可与合规信息全部集中在根目录的
+[`LICENSE`](./LICENSE) 与 `NOTICE`（即本文件），说明文档全部集中在 [`README.md`](./README.md)
+与 [`README_EN.md`](./README_EN.md)。任何子目录都不保留独立的 `LICENSE`、`NOTICE` 或
+`README`。这样做是为了避免同一份组件在两个方向各写一遍、版本号却各不相同。
+
+本文件覆盖全部五个方向：`mac2win`、`exeonmac`、`win2mac`、`apponwin`、`console`。
+某一组件只服务于单个方向时，在表格的「在本项目中的用途」一列标明所属方向。
+
+---
+
+## 一、本项目自身的许可
+
+| 范围 | 许可 | 依据 |
+| --- | --- | --- |
+| `contracts/` | **Apache-2.0** | 见 [`LICENSE`](./LICENSE) |
+| `console/`、`mac2win/`、`exeonmac/`、`win2mac/`、`apponwin/`、`ai/`、`docs/`、`.github/` | MIT | 同上 |
+| 品牌名称、Logo、界面设计 | 保留所有权利 | 不随代码许可一并授予 |
+| **被封装进产物的第三方运行时** | 由最终分发者承担许可义务 | 见第四节 |
+
+## 一之一、为什么契约层单独升为 Apache-2.0
+
+`contracts/` 是四个方向共用的对外契约：退出码段位、错误码前缀、报告结构、
+JSON Schema。它的读者不是本项目用户，而是**想按这套契约做第三方实现的人**。
+
+Apache-2.0 比 MIT 多给两样东西，恰好是这一层最需要的：
+
+1. **明示专利授权**（第 3 条）：第三方按契约实现时不必担心专利纠纷；
+2. **NOTICE 保留义务**（第 4 条 d 项）：归属声明不会在传递中丢失。
+
+除此之外与 MIT 完全一样：可商用、可闭源、可修改、可再许可，**没有传染性**。
+一份 Apache-2.0 只覆盖一个目录，其余六个模块仍是一份 MIT，署名与许可文本依然收敛。
+
+**两种许可都只给代码权利，不给商标权**。「Ntarstudio」「星玖工作室」「Wacmin」「Mac2Win」
+「ExeOnMac」「Win2Mac」「AppOnWin」等名称与标识归星玖工作室所有。未经书面许可，不得以
+本项目名义发布衍生版本，或以本项目名称暗示官方背书。
+
+---
+
+## 二、本项目零第三方包依赖
+
+五个子项目均**不引入任何 npm 或 PyPI 第三方包**：
+
+| 子项目 | 语言 / 运行时 | 依赖声明 |
+| --- | --- | --- |
+| `mac2win/` | Node.js ≥ 20（ESM） | `package.json` 的 `dependencies` 与 `devDependencies` 均为空 |
+| `win2mac/` | Node.js ≥ 20（ESM） | 同上 |
+| `apponwin/` | Node.js ≥ 20（ESM） | 同上 |
+| `console/` | Node.js ≥ 20（ESM） | 同上 |
+| `ai/` | Node.js ≥ 20（ESM） | 同上。**未引入 `@modelcontextprotocol/sdk`**，MCP 的 stdio 传输（换行分帧、JSON-RPC 编解码、握手与取消）为自研实现 |
+| `exeonmac/` | Python ≥ 3.11 + Swift | `pyproject.toml` 的 `dependencies = []` |
+
+它们只使用语言内置能力：
+
+- **Node.js 内置模块**：`fs`、`path`、`child_process`、`http`、`crypto`、`zlib`、
+  `os`、`url`、`util`、`events`、`stream`、`readline`、`node:test`。
+- **Python 标准库**：`argparse`、`struct`、`subprocess`、`pathlib`、`hashlib`、`urllib`、
+  `tarfile`、`tempfile`、`shutil`、`signal`、`json`、`re`、`logging`、`dataclasses`、
+  `enum`、`typing`、`datetime`、`time`、`os`、`sys`、`platform`。
+- **Swift 系统框架**：`AppKit`、`Foundation`。
+
+PE/COFF 头解析、Mach-O 头解析、zip 读写器、plist 生成与解析、MIME 表、HTTP 服务、
+SSE 推送、ANSI 转义序列剥离，均为自研实现。
+
+**MCP 协议实现同样为自研**：`ai/src/protocol.mjs` 与 `ai/src/server.mjs` 依据 MCP
+2025-06-18 规范文本实现，未复制任何 SDK 源码。MCP 规范本身以 MIT 许可发布，其文本被
+引用但代码未被使用，因此不产生分发义务。
+
+**因此本项目自身不存在传递依赖**。「A 依赖 B、B 依赖 C」的链条在本仓库内部不成立。
+
+### 2.1 关于 AI 接入层（`ai/`）
+
+`ai/` 只做一件事：把本仓库已有的命令行能力包装成 MCP 工具、统一命令与提示词文件。它
+**不引入模型、不调用模型、不携带密钥**。
+
+| 项目 | 情况 |
+| --- | --- |
+| 第三方包 | 无。含 MCP 协议层在内，全部为语言内置模块 |
+| 网络请求 | 无。MCP server 只经 stdin / stdout 与本机客户端通信，不发起任何外部连接 |
+| 数据外发 | 无。工具只在本机执行命令，返回结果写回同一条 stdio 管道 |
+| 提示词文件 | `ai/skills/wacmin/SKILL.md` 与 `ai/experts/wacmin-expert.md` 为本项目原创文本，随 MIT 许可分发 |
+| 模型交互 | 由用户所选的 AI 客户端负责。客户端如何处置工具返回的内容（是否上传、是否留存）不在本项目的控制范围内，亦不在本项目的许可与隐私承诺范围内 |
+
+---
+
+## 三、构建与校验依赖的外部工具
+
+以下工具在宿主机上以**独立进程**方式调用，不进入本仓库，也不由本仓库分发。用户须自行
+安装。本仓库不修改其源码，不链接其库，不包含其头文件。
+
+| 名称 | 版本 | 版权方 | 许可证 | 官方地址 | 在本项目中的用途 | 是否修改 |
+| --- | --- | --- | --- | --- | --- | --- |
+| NSIS（`makensis`） | 3.13（实测通过；3.x 应可用） | NSIS 项目贡献者 | zlib/libpng License | <https://nsis.sourceforge.io/> | Mac2Win 编译安装脚本为 `.exe` | 否，仅调用 |
+| 7-Zip（`7zz`） | 22.00 及以上（25.01 实测通过） | Igor Pavlov<br>Copyright (c) 1999–2025 Igor Pavlov | GNU LGPL-2.1-or-later + unRAR license restriction | <https://www.7-zip.org/> | Mac2Win 产物解包与完整性校验；ExeOnMac 解 NSIS / Inno / MSI / CAB 容器 | 否，仅调用 |
+| Wine（`wine64`） | 11.21（实测通过） | Wine 项目贡献者<br>Copyright (c) 1993–2026 Wine project contributors | GNU LGPL-2.1-or-later | <https://gitlab.winehq.org/wine/wine> | ExeOnMac 运行 Windows PE 二进制，提供 Win32 API 实现 | 否，仅调用 |
+| Gcenx macOS_Wine_builds | wine-devel-11.21-osx64 | Gcenx 及 Wine 项目贡献者 | 随 Wine，LGPL-2.1-or-later | <https://github.com/Gcenx/macOS_Wine_builds> | ExeOnMac：提供 macOS 上可运行的 x86_64 Wine 预编译构建 | 否，仅下载 tar.xz 并解压 |
+| innoextract（可选） | 任意（未指定最低版本） | Daniel Scharrer | zlib License | <https://constexpr.org/innoextract/> | ExeOnMac 解包 Inno Setup 安装包，还原真实目录结构 | 否，仅调用 |
+| msitools / `msiextract`（可选） | 任意（未指定最低版本） | GNOME 项目贡献者 | GNU LGPL-2.1-or-later | <https://gitlab.gnome.org/GNOME/msitools> | ExeOnMac 解包 MSI；缺失时回退到自研 MSI 表解析器 | 否，仅调用 |
+| Rosetta 2 | 系统自带 | Apple Inc.<br>Copyright (c) Apple Inc. | 系统组件，非开源，使用受 macOS 软件许可协议约束 | <https://support.apple.com/102583> | ExeOnMac：Apple Silicon 上翻译 x86_64 指令 | 否，仅依赖其存在 |
+| Darling（评估中） | 未固定 | Darling 项目贡献者 | GNU LGPL-2.1-or-later（部分组件为 GPL） | <https://www.darlinghq.org/> | AppOnWin 的运行底座，须经 WSL2 | 否，仅评估可行性 |
+| WSL2 | Windows 10 2004+ | Microsoft Corporation | 系统组件 | <https://learn.microsoft.com/windows/wsl/> | AppOnWin：为 Darling 提供 Linux 环境 | 否 |
+| `plutil` | 系统自带 | Apple Inc. | 系统组件 | — | Win2Mac 校验 `Info.plist` 的权威性 | 否，仅调用 |
+| `sips` / `iconutil` | 系统自带 | Apple Inc. | 系统组件 | — | ExeOnMac 图标缩放与 `.icns` 打包 | 否，仅调用 |
+| `swiftc` | Swift 6.0+（Xcode Command Line Tools） | Apple Inc. | 系统组件，使用受 Xcode 许可协议约束 | <https://swift.org/> | ExeOnMac 编译 Swift launcher 与角标合成工具 | 否，仅调用 |
+| `git` | 2.30+ | Software Freedom Conservancy | GPL-2.0 | <https://git-scm.com/> | 获取源码；不做运行时依赖 | 否，仅调用 |
+| Homebrew（可选） | 任意 | Homebrew 项目贡献者 | BSD-2-Clause | <https://brew.sh/> | 在 macOS 上安装 7-Zip、Wine 等外部工具的推荐方式 | 否 |
+| cargo-xwin（可选） | 0.23.1 | rust-cross | Apache-2.0 / MIT | <https://github.com/rust-cross/cargo-xwin> | Mac2Win 交叉编译 Tauri 的 Rust 壳 | 否，仅调用 |
+| Rust 工具链（可选） | 1.100.0+ | Rust Foundation | Apache-2.0 / MIT | <https://www.rust-lang.org/> | Mac2Win：`buildRustShell: true` 时使用 | 否，仅调用 |
+| LLVM / clang-cl（可选） | 18+ | LLVM Foundation | Apache-2.0 with LLVM Exceptions | <https://llvm.org/> | Mac2Win：Rust 壳的链接器 | 否，仅调用 |
+| MSVC CRT 头文件与库（可选） | — | Microsoft Corporation | Microsoft 允许 cargo-xwin 的此种用法，但**不允许再分发** | <https://learn.microsoft.com/> | Mac2Win：MSVC 目标链接 | 否，不缓存不分发 |
+
+### 3.1 关于 7-Zip 与 unRAR 限制
+
+7-Zip 主体以 GNU LGPL 授权，另含 **unRAR license restriction**。该限制禁止使用其代码
+开发 RAR 压缩算法，也禁止将其用于逆向 RAR 格式。
+
+本项目仅调用 7-Zip 解 NSIS、Inno Setup、MSI 与 CAB 容器，**不涉及 RAR 格式**，不触发该
+限制。
+
+**7-Zip 的发现机制**：`mac2win` 依次查找环境变量 `MAC2WIN_7ZIP`、`~/.wacmin/mac2win/bin/7zz`、
+Homebrew、MacPorts、`PATH`，最后扫描 `/Applications/*.app/Contents/MacOS/` 下由其它应用
+内嵌的 7-Zip。探测判据是输出特征（`i` 的输出须同时出现 `7-Zip` 与 `Formats:`），不是退出码。
+
+### 3.2 关于 cargo-xwin 与 MSVC SDK
+
+cargo-xwin 从微软官方 CDN 拉取 MSVC CRT 头文件与库。微软允许此种用法，但**不允许再分发
+这些文件**。本项目不缓存、不分发它们，仅由 cargo-xwin 在构建时临时拉取。
+
+### 3.3 关于 Rosetta 2
+
+本项目不包含、不分发 Rosetta 2。用户首次运行时系统会提示安装，或由用户执行
+`softwareupdate --install-rosetta` 主动安装。
+
+### 3.4 关于 Wine 的 LGPL 合规判定
+
+本项目以**独立进程**方式调用 `wine64`，不链接 Wine 的库，不包含 Wine 的头文件，不修改
+Wine 源码。在 LGPL-2.1 的框架下，此类调用属于「独立程序与库的动态链接场景」，本项目不
+构成 Wine 的衍生作品，因此本项目可以采用 MIT 协议。
+
+若未来需要修改 Wine 源码（例如打补丁），修改部分必须以 LGPL-2.1-or-later 开放，并保留
+原始版权声明。
+
+**分发义务**：本仓库不分发 Wine 二进制。`wepack runtime install` 从上游（Gcenx
+`macOS_Wine_builds`）下载，属于「从上游获取」，不构成再分发，因此不触发 LGPL 的源码
+提供义务。
+
+### 3.5 关于 Gcenx 构建的签名校验
+
+本项目不校验 Gcenx 构建的 GPG 签名（上游未提供稳定的签名流程），只校验下载完整性。这一
+风险已在 [`README.md`](./README.md) 第 13.2 节明确记录，不隐藏。
+
+---
+
+## 四、打包时纳入产物的框架运行时
+
+Mac2Win 在打包过程中从**官方源**下载以下运行时，**按原样**封装进产物，不修改其内容。
+这些运行时不随本仓库分发，仅由构建流程按需获取。
+
+| 名称 | 版本范围 | 版权方 | 许可证 | 官方地址 | 在本项目中的用途 | 是否修改 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Node.js（win-x86） | 20 / 22 LTS（22.23.5 实测） | OpenJS Foundation | MIT | <https://nodejs.org/> | 目标机上的 JavaScript 运行时，随产物分发 | 否 |
+| Electron（win32-ia32） | ≤ 43.0.0 | OpenJS Foundation / GitHub, Inc. | MIT | <https://www.electronjs.org/> | Electron 框架的 Windows 32 位运行时 | 否 |
+| NW.js（win-ia32） | 按项目声明（0.90.0 实测） | NW.js contributors | MIT | <https://nwjs.io/> | NW.js 框架的 Windows 32 位运行时 | 否 |
+| Tauri | 不打包运行时 | Tauri 工作组 | MIT / Apache-2.0 | <https://tauri.app/> | 产物为 Rust 编译的原生 exe，无需 JS 运行时 | 不涉及 |
+
+**为什么 Electron 的上限是 43**：Electron 官方自 v44 起不再发布 `win32-ia32` 预编译包。
+`mac2win` 在预检阶段即拦截更高版本，不让用户在下载阶段才失败。
+
+---
+
+## 五、被封装产物的许可义务（重要）
+
+Wacmin 只是打包器。**打出来的应用如果要分发，许可义务由分发者承担。**
+
+具体而言：
+
+1. **MIT 义务**。Node.js、Electron、NW.js 均以 MIT 授权，要求分发时保留原版权声明与许可
+   文本。打出的安装包内应包含这些运行时的 `LICENSE` 文件，或在安装向导、关于页面中提供
+   可访问的许可文本。
+2. **Electron 的额外组件**。Electron 内含 Chromium 及其依赖，其许可清单
+   （`LICENSES.chromium.html`）随官方发行包提供，应一并保留。
+3. **LGPL 组件的动态链接要求**。若产物内含以 LGPL 授权的组件，需保证其可被替换。
+4. **不得移除版权声明**。任何运行时文件内的版权头都不得删除或篡改。
+5. **单一安装包再分发**。若用户或第三方将 7-Zip、Wine、NSIS、innoextract、msitools 与本
+   项目产物打包为单一安装包再分发，则触发 LGPL 的源码提供义务：必须同时提供对应组件的
+   完整源码，或提供有效期不少于三年的书面源码获取方式，并保留其全部版权声明与许可文本。
+
+本项目不代为履行这些义务，也不对分发者的合规性作出保证。**分发前请自行核对所用运行时
+的许可条款。**
+
+---
+
+## 六、间接依赖与传递依赖
+
+本仓库内部的传递依赖为零（见第二节）。运行时层面存在由上游构建方打包的间接依赖，
+本项目不拆分、不修改：
+
+| 间接依赖来源 | 具体内容 | 许可处理 |
+| --- | --- | --- |
+| Wine 自身 | FreeType、libpng、MoltenVK 等系统库 | 由 Gcenx 构建包一并提供，许可证随 Wine 一同分发 |
+| 7-Zip 的 unRAR 代码 | unRAR 解压例程 | 受 unRAR license 限制；本项目不涉 RAR，不触发 |
+| Darling | 内部包含若干 GPL 组件 | 本项目仅评估其可行性，不分发、不链接 |
+| Rosetta 2 | 系统 AOT 翻译层 | 系统组件，本项目不分发 |
+| MSVC CRT | cargo-xwin 临时拉取的头文件与库 | 微软不允许再分发；本项目不缓存不分发 |
+
+---
+
+## 七、参考过的项目与资料
+
+以下资料只用于参考思路与规范，**未复制代码、未复制文档、未复制素材**。
+
+| 项目 / 资料 | 版权方 | 许可证 | 参考内容 |
+| --- | --- | --- | --- |
+| NSIS 官方文档 | NSIS 项目贡献者 | zlib/libpng | 安装脚本语法、`File /r` 行为、`MUI2` 界面 |
+| cargo-xwin 文档与 issue | rust-cross | Apache-2.0 / MIT | `XWIN_ARCH=x86` 的缓存缺口 |
+| PE/COFF 规范 | Microsoft Corporation | 规范文本，不受版权保护 | PE 头、COFF 机器类型、可选头子系统字段 |
+| Mach-O 文件格式文档 | Apple Inc. | 规范文本，不受版权保护 | Mach-O 头、`LC_*` 加载命令、fat 二进制布局 |
+| Apple Bundle Programming Guide | Apple Inc. | 规范文本 | `.app` 目录结构、`Info.plist` 必需键 |
+| Wine 官方文档与 Wiki | Wine 项目贡献者 | LGPL-2.1-or-later | Prefix 结构、`WINEPREFIX` 语义、静默安装参数 |
+| Darling 文档 | Darling 项目贡献者 | LGPL-2.1-or-later | 在 Linux 上提供 macOS 兼容层的可行边界 |
+| Server-Sent Events 规范（WHATWG） | WHATWG | 规范文本 | 事件流格式、`done` 后的关流语义 |
+| MCP 规范 2025-06-18 | Model Context Protocol 项目贡献者 | MIT | stdio 传输的换行分帧、`initialize` 握手与版本协商、`tools/call` 与 `notifications/cancelled`、工具注解语义 |
+| JSON-RPC 2.0 规范 | JSON-RPC 工作组 | 规范文本 | 请求 / 响应 / 通知的结构、标准错误码 |
+| ECMA-48 / ANSI 转义序列 | Ecma International | 规范文本 | CSI / OSC / 两字符序列的构成 |
+| ZIP APPNOTE | PKWARE, Inc. | 规范文本 | zip 中央目录、Unix mode 外部属性存放位置 |
+
+---
+
+## 八、本项目明确未使用的技术
+
+为避免误解，明确列出本仓库**没有**使用的东西：
+
+- 未使用任何 npm 或 PyPI 第三方包（含开发期依赖）
+- 未使用任何前端框架或 UI 组件库（控制台与看板均为原生 HTML / CSS / JS）
+- **未使用 MCP 官方 SDK（`@modelcontextprotocol/sdk`）**。协议层与传输层自研，见第二节
+- **未调用任何 LLM 接口**。`ai/` 层只把本仓库的能力暴露给外部 AI，本仓库自身不发起模型调用、不携带 API 密钥、不上传任何数据
+- 未使用 macFUSE 或任何文件系统驱动
+- 未使用内核扩展（kext）或系统扩展（system extension）
+- 未使用自研 PE 加载器
+- 未使用 FEX-Emu、QEMU 或其他 x86 模拟器
+- 未使用 API 语义映射层
+- 未使用任何闭源商业组件
+- 未使用任何 GPL 系（非 LGPL）代码
+- 未使用 PyYAML（配方与 `compat.yaml` 走手写的受限子集序列化）
+- 未使用 Yams（Swift launcher 自带约 130 行受限 YAML 解析器）
+- 未使用 WebSocket（进度推送走 SSE，见 README 5.8.4 的取舍理由）
+- 未使用任何统计、埋点或遥测组件
+- 未使用任何第三方代码签名服务
+- 未内嵌任何第三方图标库、网络字体或图片素材
+
+---
+
+## 九、字体与图标
+
+本仓库**不含任何字体文件或图标素材**。
+
+- **图标提取**：ExeOnMac 的图标提取功能从用户提供的 Windows 安装包中提取图标，提取结果
+  仅存放于该用户本地的 `.app` 内，不进入本仓库，也不随本项目分发。
+- **中文字体替身层**：需用户自行提供字体文件。本项目不附带任何商业字体，不提供字体下载。
+  若用户将微软雅黑、宋体等商业字体放入共享层，相关许可责任由用户承担。
+- **界面图形**：控制台与看板的全部视觉元素由 CSS 绘制，无位图素材、无 SVG 素材、无 icon font。
+- **Win2Mac 的 `--icon`**：接受用户自行提供的 `.icns`。未提供时不生成图标，产物仍合法可分发；
+  本项目不附带任何 `.icns`、`.ico` 或 `.png` 图标素材。
+
+---
+
+## 十、免责声明
+
+### 10.1 中文说明
+
+本软件按「现状」提供，不附带任何明示或暗示的担保，包括但不限于对适销性、特定用途适用性
+和非侵权性的担保。在任何情况下，作者或版权持有人均不对任何索赔、损害或其他责任负责，
+无论是在合同诉讼、侵权行为还是其他方面，由本软件或本软件的使用或其他交易引起、产生或
+与之相关。
+
+使用本软件运行 Windows 软件时，请自行确认该软件的许可协议允许在非 Windows 环境下运行。
+部分商业软件的许可条款限制跨平台使用，此类合规责任由用户承担。
+
+使用本软件打包生成的产物时，请自行确认纳入产物的第三方运行时的许可条款（见第五节）。
+
+本项目明确不支持反作弊、内核驱动、硬件狗类软件，拒绝理由是技术不可行且可能对用户造成
+账号风险，详见 [`README.md`](./README.md) 第 14.5 节。
+
+### 10.2 English original
+
+The following is the verbatim warranty disclaimer from the MIT License, retained in its
+original English form as required for legal texts:
+
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
+---
+
+## 十一、许可证原文索引
+
+| 许可证 | 全文位置 |
+| --- | --- |
+| MIT | 本仓库 [`LICENSE`](./LICENSE)；官方文本 <https://opensource.org/license/mit> |
+| GNU LGPL-2.1-or-later | <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html> |
+| zlib License | <https://opensource.org/license/zlib> |
+| unRAR license | <https://www.rarlab.com/license.htm> |
+| Apache-2.0 | <https://www.apache.org/licenses/LICENSE-2.0> |
+| Apache-2.0 with LLVM Exceptions | <https://llvm.org/LICENSE.txt> |
+| Apple macOS Software License Agreement | <https://www.apple.com/legal/sla/> |
+| Microsoft Software License Terms | <https://www.microsoft.com/licensing/> |
+
+若上述链接失效，请访问 <https://www.gnu.org/licenses/> 或各项目官方仓库获取。本仓库不
+缓存第三方许可证全文，因为许可证要求的是「可获取」，而链接到官方原文比复制一份可能过期
+的副本更可靠。
+
+---
+
+## 十二、新增第三方组件的流程
+
+1. 确认其许可证与本项目 MIT 兼容（或明确其只在本机运行、不进入产物）；
+2. 在本文件第三节或第四节的表格登记：**名称、版本、版权方、许可证类型、官方地址、在本
+   项目中的用途、是否修改及修改说明**；
+3. 若该组件会进入产物，同时更新第五节「被封装产物的许可义务」；
+4. 同步更新 [`README.md`](./README.md) 第 6 章与 [`README_EN.md`](./README_EN.md)
+   第 6 章的依赖清单（两版必须同时改，不允许只改一版）；
+5. 若该组件只服务于某个方向，在本文件第三节表格的「用途」列注明方向，不另建子目录
+   `NOTICE`——本仓库采用单文档制，合规信息只有这一份；
+6. 再提交代码。
+
+**无法确认许可证归属的组件，标注「待确认」并暂不合入，不得默认或编造。**
+
+---
+
+## 十三、报告合规问题
+
+| 渠道 | 地址 |
+| --- | --- |
+| 一般性问题 | <https://github.com/ntars/Wacmin/issues> |
+| 许可证或版权问题 | <https://github.com/ntars/Wacmin/issues>，标题注明 `[compliance]` |
+| 安全问题 | 请勿公开提交，通过 <https://github.com/ntars/Wacmin/security/advisories/new> 私下报告 |
+
+---
+
+Ntarstudio（星玖工作室）· <https://www.ntars.cn/>

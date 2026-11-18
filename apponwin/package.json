@@ -1,0 +1,38 @@
+{
+  "name": "apponwin",
+  "version": "0.2.0",
+  "description": "在 Windows 上运行 macOS 应用（兼容性评估阶段）| Running macOS apps on Windows (assessment phase)",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Ntarstudio（星玖工作室）",
+    "url": "https://www.ntars.cn/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ntars/Wacmin.git"
+  },
+  "homepage": "https://github.com/ntars/Wacmin/tree/main/apponwin",
+  "bin": {
+    "apponwin": "./bin/apponwin.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "start": "node ./bin/apponwin.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "keywords": [
+    "macos",
+    "windows",
+    "compatibility-layer",
+    "darling",
+    "wsl2",
+    "mach-o"
+  ]
+}

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wacmin 看板</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="frame">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="prompt">$</span>
+      <span class="name">wacmin</span>
+      <span class="cursor">_</span>
+    </div>
+    <div class="meta">
+      <span id="host-info" class="dim">检测中…</span>
+      <button id="btn-contract" class="btn" type="button">契约检查</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>方向</h2>
+        <span class="dim" id="dir-count"></span>
+      </div>
+      <div id="directions" class="dir-grid">
+        <div class="loading">正在读取方向状态…</div>
+      </div>
+    </section>
+
+    <section class="panel" id="contract-panel" hidden>
+      <div class="panel-head">
+        <h2>契约一致性</h2>
+        <button id="btn-contract-close" class="btn btn-ghost" type="button">关闭</button>
+      </div>
+      <div id="contract-body"></div>
+    </section>
+
+    <section class="panel" id="history-panel" hidden>
+      <div class="panel-head">
+        <h2>历史</h2>
+        <span class="dim" id="history-count"></span>
+      </div>
+      <div id="history-body" class="history"></div>
+    </section>
+
+    <section class="panel" id="job-panel" hidden>
+      <div class="panel-head">
+        <h2 id="job-title">任务</h2>
+        <span id="job-status" class="badge">等待</span>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+        <div class="progress-label">
+          <span id="progress-text" class="dim">未开始</span>
+          <span id="progress-time" class="dim"></span>
+        </div>
+      </div>
+
+      <div id="stages" class="stages"></div>
+
+      <details id="checks-wrap" class="checks-wrap" hidden>
+        <summary>校验项 <span id="checks-summary" class="dim"></span></summary>
+        <div id="checks" class="checks"></div>
+      </details>
+
+      <details id="log-wrap" class="log-wrap">
+        <summary>日志</summary>
+        <pre id="log" class="log"></pre>
+      </details>
+
+      <div id="result" class="result" hidden></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="dim">console 0.2.0 · 只绑 127.0.0.1</span>
+  </footer>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -20,7 +20,12 @@ Wacmin is a bidirectional interoperability suite between macOS and Windows: four
 
 ---
 
-## 1. Project Name and Positioning
+## 1. Name and Positioning
+
+> **仓库描述 / Description**：`Wacmin —— 打破 macOS 与 Windows 的架构限制，四个方向实现双向互通（mac2win / exeonmac / win2mac / apponwin） | Breaking the macOS-Windows architecture barrier: four directions for two-way interop, each usable on its own.`
+>
+> **话题标签 / Topics**（20 个，仅英文）：`apple-silicon`, `arm64`, `cross-compilation`, `cross-compile`, `developer-tools`, `electron`, `exe`, `ia32`, `interop`, `macos`, `nsis`, `nwjs`, `packaging`, `tauri`, `windows`, `windows-installer`, `wine`, `x86`, `cross-platform`, `app-migration`
+
 
 **Name**: Wacmin. Formed from the initials of **W**indows **a**nd **Mac** **in**terop.
 
@@ -48,7 +53,7 @@ This file is therefore organised into twenty chapters, each subdivided by direct
 
 ---
 
-## 2. Project Overview
+## 2. Overview
 
 ### 2.1 Background
 
@@ -339,7 +344,7 @@ All tests pass. The transport layer follows MCP 2025-06-18 stdio strictly: newli
 **Why six tools instead of twenty-plus**: the four directions expose over twenty subcommands in total. Flattening all of them into tools leaves an agent unable to choose — the differences between tool names are not visible to it, so it can only guess. Grouping by intent gives every tool a clear moment of use, and unmodelled options go through `wacmin_run`.
 
 ---
-## 4. Key Highlights
+## 4. Core Characteristics
 
 This chapter is organised by direction. Every entry follows the same structure: **highlight name / value / implementation / differentiation / evidence**. All evidence is measured; nothing is optimistic without basis.
 
@@ -564,7 +569,7 @@ This entry is not "what we got right" but "the checker itself can lie"—recorde
 - **Evidence**: Measured, the failure path returns `isError: true`, `exitCode: 2`, `error.code: M2W_1002` with a `hint`, while the success path omits `isError`; `wacmin` returns 5 when `wacmin run exeonmac doctor` returns 5, so exit codes pass through strictly.
 
 ---
-## 5. Design Details and Subtleties
+## 5. Design Details and Engineering Trade-offs
 
 This chapter records every non-obvious detail. Each entry corresponds to a real trap encountered or a deliberate trade-off, grouped by theme.
 
@@ -1081,7 +1086,7 @@ Exit codes and error codes are an external contract once published. New ones may
 
 ---
 
-## 6. Technology Stack and Dependency Inventory
+## 6. Technology Stack and Dependencies
 
 ### 6.1 Technology Stack by Direction
 
@@ -1972,7 +1977,7 @@ The transport layer follows MCP 2025-06-18 stdio: **newline-delimited JSON-RPC**
 **Tool annotations change client behaviour**: clients mostly skip the confirmation prompt for tools with `readOnlyHint: true`. So `wacmin_build` / `wacmin_run` must be marked non-read-only — marking build read-only would let an agent write to disk and run for minutes without the user knowing.
 
 ---
-## 11. Directory Structure
+## 11. Repository Layout
 
 ### 11.1 Repository Structure
 
@@ -2815,7 +2820,7 @@ git log --oneline -- console/
 
 ---
 
-## 19. Copyright and Licence
+## 19. Copyright and License
 
 Copyright (c) 2026 Ntarstudio (Xingjiu Studio)
 

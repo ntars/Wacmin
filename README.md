@@ -22,6 +22,11 @@ Wacmin is a bidirectional interoperability suite between macOS and Windows: four
 
 ## 一、项目名称与定位
 
+> **仓库描述 / Description**：`Wacmin —— 打破 macOS 与 Windows 的架构限制，四个方向实现双向互通（mac2win / exeonmac / win2mac / apponwin） | Breaking the macOS-Windows architecture barrier: four directions for two-way interop, each usable on its own.`
+>
+> **话题标签 / Topics**（20 个，仅英文）：`apple-silicon`, `arm64`, `cross-compilation`, `cross-compile`, `developer-tools`, `electron`, `exe`, `ia32`, `interop`, `macos`, `nsis`, `nwjs`, `packaging`, `tauri`, `windows`, `windows-installer`, `wine`, `x86`, `cross-platform`, `app-migration`
+
+
 **名称**：Wacmin。取自 **W**indows **a**nd **Mac** **in**terop 的首字母拼合。
 
 **一句话定位**：把「macOS 与 Windows 之间的应用互通」拆成四个方向，每个方向独立成立，但共用一层对外契约。
@@ -339,7 +344,7 @@ MSI 的回退流程是三步：7-Zip 解出内嵌 `cab`、展开每个 `cab`、�
 **为什么工具数只有六个而不是二十多个**：四个方向加起来二十多个子命令，全部摊平成工具会让 agent 无从选择 —— 工具名之间的差异它看不出来，只能靠猜。按意图分组后每个工具都有明确的使用时机，未建模的选项走 `wacmin_run` 透传。
 
 ---
-## 四、核心亮点
+## 四、核心特性
 
 本章按方向组织，每条采用统一结构：**亮点名称 / 价值 / 实现方式 / 差异化 / 证据**。证据全部来自实测，不做无根据的乐观承诺。
 
@@ -564,7 +569,7 @@ cargo xwin build --target i686-pc-windows-msvc --release
 - **证据**：实测失败路径返回 `isError: true`、`exitCode: 2`、`error.code: M2W_1002` 并附 `hint`，成功路径不带 `isError`；`wacmin run exeonmac doctor` 返回 5 时 `wacmin` 也返回 5，退出码严格透传。
 
 ---
-## 五、设计细节与小巧思
+## 五、设计细节与工程取舍
 
 本章记录所有非显而易见的细节。每一条都对应一个真实踩过的坑或一次刻意的取舍，按主题分组。
 
@@ -2738,7 +2743,7 @@ README 描述项目当前状态，发行版记录每次改了什么，两者不�
 
 ---
 
-## 十八、参与贡献方式
+## 十八、参与贡献
 
 ### 18.1 四条纪律
 

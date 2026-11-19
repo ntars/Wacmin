@@ -3396,6 +3396,55 @@ send(method, params = {}, sessionId) {
 
 **这条缺陷值得记住的地方**：它从 W-01 起就在，`npm test` 一直是绿的 —— 因为视口脚本**不在** `npm test` 里（要起真实 Chrome，太慢）。于是它成了「没人跑就没人知道」的脚本。W-07 的定时任务发现了它但没有修（当时任务范围是签名评估），本轮才补上。**凡是不进测试套件的脚本，都要有一条「它真的能跑完」的守卫**，否则绿着的测试套件会给它背书。
 
+### 15.13 干净 clone 的交付体检（2026-11-20 实测）
+
+体检方法：把仓库 `git clone` 到 `/tmp` 下一个全新目录，**在那里**按 18.2 逐条跑，不借用原工作区的任何产物。这是唯一能验出「本地一切正常、别人克隆下来跑不通」的方式 —— 原工作区有大量被 `.gitignore` 挡住的缓存与编译产物，它们会让缺失的文件看起来存在。
+
+**结论：第一遍没通过，且原因不在代码。** 详下。
+
+**① 曾有一整批成果只在工作区、从未入库。** W-01 到 W-08 的改动一直没提交，克隆出来是 9 轮之前的旧快照：
+
+| | 工作区 | 当初的 clone |
+|---|---|---|
+| 文件数 | 186 | 167 |
+| mac2win / win2mac / apponwin | 167 / 130 / 96 | 132 / 121 / 91 |
+| console | 230 | 215 |
+| contracts | 79 | 58（且 1 项**红**）|
+| exeonmac | 453 | 422 |
+
+那 1 项红是 `contracts/doc-counts.test.mjs` 里硬编码的 `合计 1150 项` 与实际 1165 对不上 —— 该缺陷在 W-01 已修，但修的那行没入库，所以旧快照里它又回来了。**「本机全绿」与「可交付」之间隔着一个 `git commit`**，这是本轮最该记住的一条。
+
+**② 18.2 的检查代码块照抄必失败。** 旧写法是：
+
+```bash
+cd mac2win  && npm test
+cd exeonmac && python3 -m unittest discover -s tests
+```
+
+第一行 `cd` 之后工作目录已在 `mac2win/` 里，第二行的 `cd exeonmac` 会按 `mac2win/exeonmac` 去找，实测报 `No such file or directory`，**整块退出码 1**。也就是说「按 README 一字不差地跑」这件事本身是跑不通的。已改为每行用子 shell 括起（`(cd mac2win && npm test)`），跑完自动回到仓库根目录；改后照抄实跑，六套测试与两条契约命令全部通过。
+
+**③ 附录 B.2 的核对清单有两处封闭断言与实际不符。** 第 3 项写「Markdown 只有 `README.md` 与 `README_EN.md`」，实际索引里有 5 个；第 4 项写「只有 `LICENSE` 与 `NOTICE`」，实际有 3 个（含 `LICENSE-MIT`）。多出的三个 md 是 `LICENSING.md`、`ai/experts/wacmin-expert.md`、`ai/skills/wacmin/SKILL.md`，**都是产品内容，不是文档冗余**。照旧清单核对的人会把它们当成「不该入库的文档」删掉。已改为列出具体文件名与用途。
+
+**④ 通过项（逐条实测，均可复核）**：
+
+| 检查 | 命令 | 实测结果 |
+|---|---|---|
+| 垃圾文件 | `find . -name '.DS_Store' -o -name '._*' -o -name '__MACOSX'` | 工作区与 clone **均 0 个** |
+| 索引内垃圾 | `git ls-files \| grep -E '\.DS_Store$\|/\._\|__MACOSX/'` | 无输出 |
+| 大文件 | `git ls-files \| 逐个 stat`，阈值 5 MB | 最大 311725 字节（`README_EN.md`），无超限项 |
+| clone 后仓库干净 | 跑完全部测试再 `git status --porcelain` | **0 条** —— 测试不污染仓库 |
+| `.gitignore` 覆盖 | 按 12 类真实产物路径逐个 `git check-ignore` | 全部命中（`dist-*/`、`*.app`、`node_modules/`、`.staging-*/`、`runtime/wine/`、`layers/*/root/`、`__pycache__/`、`*.log`、`.workbuddy/`） |
+| 三档视口 | `node console/scripts/viewport-check.mjs` | 375 / 768 / 1440 基线与压测均 0 处越界，退出码 0 |
+
+**⑤ 一个必须与仓库缺陷区分开的现象。** 整块执行 18.2 时，末尾的 `console ... contract` 有两次报 `9 / 10`，缺的那条是 `exeonmac doctor`「没有输出可解析的 JSON 报告（退出码 1）」；但单独重跑同一条命令稳定 `10 / 10`（连跑 5 次），`wepack doctor --report` 单独跑 12 次也稳定退 0。抓到 stderr 后才定性：
+
+```
+[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":10,"threshold":10,
+ "targets":["/Users/.../Application Support/wexe/.doctor-probe"]}
+```
+
+是**本轮执行环境的删除守卫**在累计删了 10 次之后拦住了 doctor 清理探测文件这一步，不是 `wepack` 的缺陷 —— 手动对同一路径做写+删均正常。**这类「环境拦截伪装成产品缺陷」的情况，判据是「同一条命令单独跑能否稳定复现」**：单独跑 12 次全绿、整块跑 2 次全红，差异只在执行环境，不在代码。写进这里是为了防止下一轮把它当 bug 去改 `wepack`。
+
 ---
 
 ## 十六、更新日志
@@ -3444,17 +3493,21 @@ README 描述项目当前状态，发行版记录每次改了什么，两者不�
 # 契约自检（必跑）
 node contracts/validate.mjs
 
-# 各方向自己的测试
-cd mac2win  && npm test
-cd exeonmac && python3 -m unittest discover -s tests
-cd win2mac  && npm test
-cd apponwin && npm test
-cd console  && npm test
-cd ai       && npm test
+# 各方向自己的测试。每行都用子 shell 括起来，跑完回到仓库根目录 ——
+# 否则第一行 cd 进 mac2win/ 之后，下一行 cd exeonmac 会按 mac2win/exeonmac
+# 去找，报 No such file or directory（2026-11-20 在干净 clone 里实测复现）。
+(cd mac2win  && npm test)
+(cd exeonmac && python3 -m unittest discover -s tests)
+(cd win2mac  && npm test)
+(cd apponwin && npm test)
+(cd console  && npm test)
+(cd ai       && npm test)
 
-# 契约合规的真实调用检查
+# 契约合规的真实调用检查（必须仍在仓库根目录执行）
 node console/bin/wacmin-console.mjs contract
 ```
+
+若在 `set -e` 的脚本里跑，子 shell 的失败会正常向上传递，无需额外处理；若只想跑某一方向，直接 `cd <方向> && npm test` 亦可。
 
 **`ai` 的测试必须在 ubuntu 上也能过**（CI 就是这么跑的）。若新增用例依赖 `darwin` 或某个外部工具，写条件跳过而不是让它变红——`ai` 层测的是「调度链路」与「协议正确性」，与具体平台的打包能力无关。
 
@@ -3711,11 +3764,13 @@ git ls-files | grep -E '(^|/)\.DS_Store$|(^|/)\._[^/]*$|(^|/)__MACOSX/' || echo 
 |---|---|---|
 | 1 | `git status --short` | 除本次有意改动的文件外，无其他条目 |
 | 2 | `git diff --name-status HEAD` | 删除项为 `D` 的，都是本次要删的文档；新增项为 `A` 的，都是本次要加的文件 |
-| 3 | `git ls-files` 中的 Markdown | 只有根目录 `README.md` 与 `README_EN.md` |
-| 4 | `git ls-files` 中的 LICENSE / NOTICE | 只有根目录 `LICENSE` 与 `NOTICE` |
+| 3 | `git ls-files '*.md'` | 恰好 5 个：根目录 `README.md` / `README_EN.md`，分层许可说明 `LICENSING.md`，以及 `ai/experts/wacmin-expert.md`、`ai/skills/wacmin/SKILL.md` 两个 Skill/专家包定义。**后三个是产品内容，不是文档冗余** |
+| 4 | `git ls-files` 中的许可证文件 | 恰好 3 个：`LICENSE`（Apache-2.0）、`LICENSE-MIT`、`NOTICE` |
 | 5 | 大文件扫描 | 无输出，或输出项均为可解释的测试固件 |
 | 6 | macOS 垃圾文件 | 「无垃圾文件」 |
 | 7 | `.gitignore` 覆盖范围 | `.DS_Store`、`node_modules/`、`dist*/`、`*.log` 均在其中 |
+
+第 3 项此前写的是「只有 `README.md` 与 `README_EN.md`」，第 4 项写的是「只有 `LICENSE` 与 `NOTICE`」——两处都与实际索引不符（2026-11-20 实测：md 共 5 个、许可证文件共 3 个）。照着旧清单核对的人会把三个正当文件当成「不该入库的文档」删掉。清单里写「只有 N 个」这种封闭断言时，必须先 `git ls-files` 数一遍再写。
 
 ### B.3 提交与推送
 

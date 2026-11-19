@@ -3376,6 +3376,55 @@ send(method, params = {}, sessionId) {
 
 **Why this one is worth remembering**: it had been there since W-01 and `npm test` stayed green throughout—because the viewport script is **not** part of `npm test` (it launches real Chrome, too slow). It became a script nobody runs and nobody knows about. The W-07 task found it but did not fix it (that round's scope was signature evaluation). **Any script outside the test suite needs a guard proving it actually finishes**, otherwise a green suite is vouching for something it never ran.
 
+### 15.13 Delivery check on a clean clone (measured 2026-11-20)
+
+Method: `git clone` the repository into a brand-new directory under `/tmp` and run section 18.2 **there**, borrowing nothing from the original working tree. This is the only way to catch "everything works locally, nothing works for anyone else"—the working tree holds caches and compiled artefacts that `.gitignore` hides, and their presence makes missing files look present.
+
+**Result: the first pass failed, and not because of the code.** Details below.
+
+**① An entire batch of work existed only in the working tree and had never been committed.** The W-01 to W-08 changes were uncommitted, so a clone produced a snapshot nine rounds old:
+
+| | Working tree | The clone then |
+|---|---|---|
+| Files | 186 | 167 |
+| mac2win / win2mac / apponwin | 167 / 130 / 96 | 132 / 121 / 91 |
+| console | 230 | 215 |
+| contracts | 79 | 58 (with 1 **red**) |
+| exeonmac | 453 | 422 |
+
+That one red was the hard-coded `total 1150` in `contracts/doc-counts.test.mjs` disagreeing with the actual 1165—a defect fixed in W-01, but the fix never landed, so the old snapshot brought it back. **"Green on my machine" and "shippable" are separated by a `git commit`.** That is the lesson of this round.
+
+**② The section 18.2 block could not be run verbatim.** The old form was:
+
+```bash
+cd mac2win  && npm test
+cd exeonmac && python3 -m unittest discover -s tests
+```
+
+After the first `cd` the working directory is already inside `mac2win/`, so the second line resolves `exeonmac` against `mac2win/exeonmac`, fails with `No such file or directory`, and the whole block exits 1. In other words, "follow the README exactly" did not work. Each line is now wrapped in a subshell (`(cd mac2win && npm test)`) which returns to the repository root; after the change the block was run verbatim and all six suites plus both contract commands passed.
+
+**③ Appendix B.2's checklist had two closed claims that disagreed with reality.** Item 3 said "only `README.md` and `README_EN.md`" while the index holds five Markdown files; item 4 said "only `LICENSE` and `NOTICE`" while there are three licence files (including `LICENSE-MIT`). The three extra Markdown files are `LICENSING.md`, `ai/experts/wacmin-expert.md` and `ai/skills/wacmin/SKILL.md`—**product content, not documentation clutter**. Anyone following the old checklist would delete them as "documents that should not be committed". The items now name the files and their purpose.
+
+**④ What passed (measured individually, all reproducible)**:
+
+| Check | Command | Result |
+|---|---|---|
+| Junk files | `find . -name '.DS_Store' -o -name '._*' -o -name '__MACOSX'` | **0** in both the working tree and the clone |
+| Junk in index | `git ls-files \| grep -E '\.DS_Store$\|/\._\|__MACOSX/'` | no output |
+| Large files | `git ls-files` then `stat` each, 5 MB threshold | largest is 311725 bytes (`README_EN.md`); none over |
+| Clone stays clean | full test run, then `git status --porcelain` | **0 entries** — tests do not dirty the tree |
+| `.gitignore` coverage | `git check-ignore` against 12 real artefact paths | all covered (`dist-*/`, `*.app`, `node_modules/`, `.staging-*/`, `runtime/wine/`, `layers/*/root/`, `__pycache__/`, `*.log`, `.workbuddy/`) |
+| Three viewports | `node console/scripts/viewport-check.mjs` | 375 / 768 / 1440, baseline and stress, 0 offenders, exit 0 |
+
+**⑤ One phenomenon that must be told apart from a product defect.** Running the 18.2 block end to end, the final `console ... contract` reported `9 / 10` twice; the missing one was `exeonmac doctor` — "no parseable JSON report (exit code 1)". Yet running that same command alone was a stable `10 / 10` (five consecutive runs), and `wepack doctor --report` alone exited 0 twelve times in a row. Only stderr revealed the cause:
+
+```
+[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":10,"threshold":10,
+ "targets":["/Users/.../Application Support/wexe/.doctor-probe"]}
+```
+
+The **execution environment's delete guard** blocked doctor's probe-file cleanup once the turn's cumulative deletes reached ten. It is not a `wepack` defect—writing and deleting the same path manually worked fine. **The test for "environment interception masquerading as a product defect" is whether the command alone reproduces it**: twelve green alone, two red end to end, with the only difference being the surrounding environment. This is recorded here so a later round does not go and "fix" `wepack`.
+
 ---
 
 ## 16. Changelog
@@ -3424,17 +3473,23 @@ Ordered by determinism; each item presupposes the one before it.
 # Contract self-check (mandatory)
 node contracts/validate.mjs
 
-# Each direction's own tests
-cd mac2win  && npm test
-cd exeonmac && python3 -m unittest discover -s tests
-cd win2mac  && npm test
-cd apponwin && npm test
-cd console  && npm test
-cd ai       && npm test
+# Each direction's own tests. Every line is wrapped in a subshell so the working
+# directory returns to the repository root afterwards — otherwise, after the
+# first line cds into mac2win/, the next `cd exeonmac` resolves against
+# mac2win/exeonmac and fails with No such file or directory (reproduced in a
+# clean clone on 2026-11-20).
+(cd mac2win  && npm test)
+(cd exeonmac && python3 -m unittest discover -s tests)
+(cd win2mac  && npm test)
+(cd apponwin && npm test)
+(cd console  && npm test)
+(cd ai       && npm test)
 
-# Real-invocation contract compliance check
+# Real-invocation contract compliance check (must still run from the repo root)
 node console/bin/wacmin-console.mjs contract
 ```
+
+Under `set -e` the subshell failures propagate normally, so no extra handling is needed. To run a single direction, `cd <direction> && npm test` works as before.
 
 **The `ai` tests must also pass on ubuntu** (that is how CI runs them). If a new case depends on `darwin` or on an external tool, skip it conditionally rather than letting it turn red—the `ai` layer tests the dispatch path and protocol correctness, not any platform's packaging capability.
 
@@ -3691,11 +3746,13 @@ git ls-files | grep -E '(^|/)\.DS_Store$|(^|/)\._[^/]*$|(^|/)__MACOSX/' || echo 
 |---|---|---|
 | 1 | `git status --short` | Only this change's intentional files, nothing else |
 | 2 | `git diff --name-status HEAD` | Every `D` entry is a document this change deletes; every `A` entry is a file this change adds |
-| 3 | Markdown files in `git ls-files` | Only `README.md` and `README_EN.md` at the root |
-| 4 | LICENSE / NOTICE in `git ls-files` | Only the root `LICENSE` and `NOTICE` |
+| 3 | `git ls-files '*.md'` | Exactly 5: root `README.md` / `README_EN.md`, the layered-licensing note `LICENSING.md`, and two Skill / expert-pack definitions at `ai/experts/wacmin-expert.md` and `ai/skills/wacmin/SKILL.md`. **The last three are product content, not documentation clutter** |
+| 4 | Licence files in `git ls-files` | Exactly 3: `LICENSE` (Apache-2.0), `LICENSE-MIT`, `NOTICE` |
 | 5 | Large-file scan | No output, or only explainable test fixtures |
 | 6 | macOS junk files | "no junk files" |
 | 7 | `.gitignore` coverage | `.DS_Store`, `node_modules/`, `dist*/`, `*.log` all present |
+
+Items 3 and 4 previously said "only `README.md` and `README_EN.md`" and "only `LICENSE` and `NOTICE`" — both disagreed with the actual index (measured 2026-11-20: 5 Markdown files, 3 licence files). Anyone following the old checklist would have deleted three legitimate files as "documents that should not be committed". Whenever a checklist states a closed claim like "only N files", count it with `git ls-files` first and then write the number.
 
 ### B.3 Commit and Push
 

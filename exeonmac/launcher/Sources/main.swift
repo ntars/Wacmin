@@ -426,10 +426,24 @@ struct ExeOnMacLauncher {
             // 信号处理：用户按 Ctrl-C 或系统要求退出时，把信号转给 wine，
             // 让它有机会保存配置并关掉 wineserver。直接 _exit 会留下僵尸进程，
             // 下次启动会看到"另一个实例正在运行"。
+            //
+            // ## 为什么信号源不能挂在 `.main` 队列上
+            //
+            // `.main` 队列的 handler 由 **main run loop** 调度，而下方
+            // `WineRunner.run` 用 `Thread.sleep` 轮询子进程、全程不跑 run loop，
+            // 主线程从启动 wine 到退出都在这个循环里。两者叠加的后果是：
+            // 信号源注册成功、`signal(sig, SIG_IGN)` 又把默认处置吃掉，
+            // 于是 SIGTERM 既不会终止进程，也不会触发 handler ——
+            // launcher 对外表现为"杀不掉"，只能 SIGKILL。
+            //
+            // 实测（sigprobe 最小复现）：同样结构下 `.main` 队列的 handler
+            // 8 秒内一次都没执行，换独立串行队列立刻收到。因此这里必须用
+            // 自己的队列，不能依赖主线程有空转。
+            let signalQueue = DispatchQueue(label: "com.wexe.launcher.signal")
             let signals: [Int32] = [SIGINT, SIGTERM, SIGHUP]
             for sig in signals {
                 signal(sig, SIG_IGN)
-                let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+                let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
                 source.setEventHandler {
                     LauncherLog.write("收到信号 \(sig)，正在停止 wine", to: logTarget)
                     WineRunner.current?.terminate()

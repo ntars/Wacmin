@@ -96,6 +96,49 @@ describe('parseCountTable', () => {
     assert.equal(rows.size, 7)
   })
 
+  test('只读 12.1 那一节，不被正文里同样形状的旁证表覆盖', () => {
+    /*
+     * ## 这个用例守的是一个真实缺陷
+     *
+     * 初版扫描整份 README 的所有表格行，同名的行后写覆盖先写。平时没事，
+     * 因为 12.1 只此一张；15.13 加了一张「工作区 / 当初的 clone」历史对照
+     * 表，里面也有 `| contracts | 79 | 58 |` 这种行 —— 它排在 12.1 之后，
+     * 于是 `--check` 读到的 contracts 是 79，而 12.1 明明写着 111。
+     *
+     * 隐蔽之处在于：合计与分项都出自同一份错读，加总仍自洽，所以只有
+     * 改动真值时才会暴露。
+     */
+    const doc = [
+      '### 12.1 关键指标',
+      '',
+      zhTable({ ...BASE, contracts: 111 }, BASE_TOTAL + 32).trimEnd(),
+      '',
+      '**测试规模与耗时**。',
+      '',
+      '### 12.2 一次真实的两小时 → 一分钟',
+      '',
+      '| | 工作区 | 当初的 clone |',
+      '|---|---|---|',
+      '| contracts | 43 | 40 |',
+      '',
+    ].join('\n')
+
+    const { rows, total } = parseCountTable(doc)
+    assert.equal(rows.get('contracts'), 111, '应读 12.1 的 111，而不是 12.2 之后的 43')
+    assert.equal(rows.get('mac2win'), 132)
+    assert.equal(total, BASE_TOTAL + 32)
+  })
+
+  test('章节标题找不到时退回全文，而不是返回空表', () => {
+    /*
+     * 返回空表会让报错变成「表格缺 7 个模块」，掩盖真因（标题被改了名）。
+     * 退回全文虽不完美，但报错指向正确。
+     */
+    const doc = zhTable(BASE, BASE_TOTAL)
+    const { rows } = parseCountTable(doc)
+    assert.equal(rows.size, 7)
+  })
+
   test('缺合计行时 total 为 null，而不是 0', () => {
     const { total } = parseCountTable(zhTable(BASE))
     assert.equal(total, null)
@@ -109,7 +152,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable(BASE, BASE_TOTAL),
     })
     try {
-      const { status, stdout } = run(['--check'], root)
+      const { status, stdout } = run(['--check-counts'], root)
       assert.equal(status, 0)
       assert.match(stdout, /合计 1150 项/)
     } finally {
@@ -125,7 +168,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable(wrong, BASE_TOTAL),
     })
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       assert.match(stderr, /合计写 1150/)
       assert.match(stderr, /分项之和是 1147/)
@@ -141,7 +184,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable({ ...BASE, mac2win: 131 }, BASE_TOTAL),
     })
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       assert.match(stderr, /两版不一致：mac2win 中文版 132，英文版 131/)
     } finally {
@@ -155,7 +198,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable(BASE, 1149),
     })
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       assert.match(stderr, /合计两版不一致/)
     } finally {
@@ -171,7 +214,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable(missing, BASE_TOTAL),
     })
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       assert.match(stderr, /缺 apponwin 一行/)
     } finally {
@@ -185,7 +228,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable(BASE),
     })
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       assert.match(stderr, /缺合计行/)
     } finally {
@@ -199,7 +242,7 @@ describe('--check 能抓到每一类分叉', () => {
       'README_EN.md': enTable({ ...BASE, mac2win: 131 }, BASE_TOTAL),
     })
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       // 合计不符与两版不一致应同时出现在输出里
       assert.match(stderr, /分项之和是 1147/)
@@ -242,7 +285,7 @@ describe('--min 供 CI 取基线', () => {
   test('文档不存在时报错而不是静默通过', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-counts-empty-'))
     try {
-      const { status, stderr } = run(['--check'], root)
+      const { status, stderr } = run(['--check-counts'], root)
       assert.equal(status, 1)
       assert.match(stderr, /找不到文档/)
     } finally {

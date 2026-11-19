@@ -2161,8 +2161,10 @@ Wacmin/
 │   ├── run-report.schema.json --report / --json output structure
 │   ├── validate.mjs           Contract self-check + report validation
 │   ├── validate.test.mjs      Tests for the checker itself
-│   ├── doc-counts.mjs         Sole reader of the 12.1 test-count table (--check / --min / --list)
-│   └── doc-counts.test.mjs    Guard keeping the table and both READMEs consistent
+│   ├── doc-counts.mjs         Single check entry for the 12.1 table and Appendix C (--check / --min / --list)
+│   ├── doc-counts.test.mjs    Guard keeping the table and both READMEs consistent
+│   ├── appendix-guard.mjs     Machine guard for the 8 numbers in Appendix C (read from code constants and document structure)
+│   └── appendix-guard.test.mjs Regression lock tampering with each of the 8 numbers one at a time
 ├── mac2win/                   Direction 1 · Produce Windows installers on macOS
 │   ├── bin/mac2win.mjs        Single command entry
 │   ├── src/                   Core implementation
@@ -2400,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 453 | about 4 minutes | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
+| exeonmac | 454 | about 2m20s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 230 | about 19 seconds | |
 | ai | 132 | about 9 seconds | |
-| contracts | 79 | about 2 seconds | Includes documentation-count and exit-code pairing self-checks |
-| **Total** | **1287** | — | See "0 skipped repository-wide" below |
+| contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
+| **Total** | **1322** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -2901,6 +2903,41 @@ The three cases above were found by accident. On 2026-11-19 a **mechanical** aud
 
 **The lesson from this audit itself**: 4 of the 9 (#5 #6 #7 #8) were **numbers and references**, not prose. A stale number is invisible because it reads perfectly well—which is the same issue as 12.1's "one write point per number", seen from the other side. Appendix C's self-check list has no machine guard, so it drifts. **The next step should fold it into the checks in `contracts/doc-counts.mjs`**, so these numbers are read out by a script instead of being counted by a human.
 
+#### 15.3.2 Appendix C Gets a Machine Guard (2026-11-20, optimisation round 1)
+
+The to-do left by the previous section is now closed. Appendix C contains eight hand-counted numbers, and **nothing was checking any of them**.
+
+**The blindness was measured, not assumed**: change the Chinese version's "37 个配置项全表（9.2）" to `32` and "二十五条亮点" to "二十条亮点", then run `node contracts/doc-counts.mjs --check` — the output was still `✓ 12.1 计数一致：7 个模块合计 1287 项`, exit code 0. The guard did not exist in any meaningful sense.
+
+**The fix**: a new `contracts/appendix-guard.mjs` reads all eight numbers **from their real sources at check time**, memorising none of them:
+
+| What Appendix C claims | Real source | How it is read |
+|---|---|---|
+| 37 configuration keys (9.2) | `DEFAULTS` in `mac2win/src/core/config.mjs` | `import` and count keys, **cross-checked** against the row count of the first 9.2 table |
+| 13 environment variables (9.3) | the 9.3 table | count data rows |
+| 18 external tools (6.2) | the 6.2 table | count data rows, **cross-checked** against `NOTICE` chapter 3 |
+| 6 subcommand families (10.1) | the first 10.1 table | count data rows |
+| twenty-five highlights | `#### 亮点` headings | count headings |
+| 11 sections in chapter 5 | `### 5.` headings | count headings |
+| 13 `NOTICE` chapters | top-level numbered chapters | count `## 一、`… and verify numbering is contiguous from 1 |
+| 11 artifact checks (15.6) | the 15.6 table | count data rows |
+
+**Why cross-checking is mandatory**: configuration keys live in two places (37 keys in `DEFAULTS`, 37 rows in the 9.2 table) and external tools in two (`6.2` and `NOTICE` chapter 3). Comparing Appendix C against only one side leaves the other free to drift. Measured: with the cross-check disabled, adding a key to `DEFAULTS` while leaving the 9.2 table untouched reports only "Appendix C says 37, actual 38" — it **never tells you the 9.2 table is stale too**.
+
+**One entry point only**: `contracts/doc-counts.mjs --check` now runs both 12.1 and Appendix C. `ci.yml` and the 18.2 check block already invoke that command, so no workflow change is needed and no new command can be forgotten. Two half-entry points, `--check-counts` and `--check-appendix`, exist purely for test fixtures — the 12.1 fixtures build two READMEs, while the Appendix C fixtures also need `NOTICE` and `config.mjs`; merging them would force both sets to construct unrelated files.
+
+**Negative verification (9 cases, all effective)**: each of the eight numbers was corrupted once, and each was named with a uniform message — `附录 C 写 32 配置项数，实际 37（config.mjs 的 DEFAULTS 键数）`. A further group changes the **source** while leaving Appendix C untouched: one extra row in 9.3, one extra key in `DEFAULTS`, one extra row in `NOTICE` chapter 3, one deleted highlight heading — all four caught. **Re-injecting the old implementation** (dropping the `checkAppendix` call) turns **9 cases red immediately** in `appendix-guard.test.mjs`; restoring it gives 32/32 green.
+
+**This and 12.1 are two symptoms of one disease**: 12.1 guards test counts, Appendix C guards document facts, and both shared the same root cause — **a number counted by a human with no path to recompute it**. Any number stored in two places without a script to reconcile them will diverge eventually; the only question is whether a maintainer or a user notices first.
+
+**A longer-latent defect surfaced along the way (in `doc-counts.mjs`, not in the new code)**: `parseCountTable` claimed to read "the 12.1 table" but actually scanned **every** table row in the whole README, with later rows overwriting earlier ones. Ordinarily harmless, because 12.1 is the only such table; but 15.13's delivery-audit section added a historical comparison table containing `| contracts | 79 | 58 (with 1 red) |` — it sits after 12.1, so `--check` read contracts as **79** while 12.1 plainly said 111.
+
+How it was found is worth recording: this round changed 12.1's contracts from 79 to 111 and the total from 1287 to 1319, and `--check` reported "total says 1319 but the parts sum to 1287". An arithmetic mistake is the natural first suspect, but 167+453+130+96+230+132+111=1319 is correct. The real cause was that the calculation read a historical table 300 lines away. **This defect never produces a false alarm** — total and parts come from the same misread, so the sum stays self-consistent — which is exactly why it can hide for so long: it only shows up when a real value changes.
+
+The fix: crop to the `### 12.1` section before parsing (falling back to the whole document when the heading is missing rather than returning an empty table, which would turn the error into "the table is missing 7 modules" and hide the real cause). Two guards were added: a corroborating table placed after 12.1 with a same-named `contracts` row must not affect the reading, and a missing heading must fall back rather than yield an empty table. **Negative verification**: re-injecting the whole-document scan turns 2 cases red; restoring gives 17/17 green.
+
+The historical table in 15.13 also gained a note marking it as a snapshot that does not track the code and is never read by `doc-counts.mjs` — otherwise the next person to see `contracts | 79` there would conclude 12.1 was out of date.
+
 ### 15.4 The Time the Verifier Lied
 
 This section stands alone because it is the **most dangerous** class of defect encountered so far: the program did not crash, the tests were all green, the conclusion was explicit, and the conclusion was false.
@@ -3001,6 +3038,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | `contracts/validate.mjs` splits a range into two endpoints | A report with `exitCode: 6` and `M2W_4002` is rejected as "exit code and error code disagree", yet 4002 is perfectly legal | `errorSegment` was parsed with `split(/[/-]/)`: `"4001-5002"` becomes `['4001','5002']`, so a mid-range code equals neither bound. It went unnoticed because real reports mostly hit the endpoints (4001 / 5002), which are exactly the split results | Extracted `segmentAllows()` to handle `-` and `/` separately. Tests do not just cover 4002: `4001/4002/4003/5001/5002` and `6001/6002/6003` are all exercised—testing only the endpoints tests nothing |
 | `win2mac --strict-host` produces a self-contradictory report | `--strict-host` exits 2 with `W2M_1001`, but none of the contract's 13 exit codes declares 1001 | It threw `HOST_UNSUPPORTED` (1001) and `exitCodeFor` fell back to 2 by segment. The user reads "bad argument" and hunts for a path typo, while the real cause is "this machine cannot do this" | Throw `UNSUPPORTED` (1005 → exit code 4, explicitly unsupported). `doctor`'s failure code changed for the same reason to `TOOL_OUTDATED` (2002 → exit code 5; the only way doctor fails is an old Node). The same defect in `apponwin doctor` was fixed too |
 | Contract lacks an exit-code declaration for segment `3000` (runtime) | `M2W_3001/3002/3003` map to exit code 5 in code while contract `exit 5` only declares `2001/2002` | The contract file lags behind the implementation: all three directions reserve runtime codes and mac2win genuinely uses them (Electron/NW.js download and architecture checks), but nobody came back to update the contract | The contract was **not** changed this round (changing it alters an external promise and needs human sign-off); tracked in 15.9 |
+| launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); both were negatively verified |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -3392,6 +3430,8 @@ Method: `git clone` the repository into a brand-new directory under `/tmp` and r
 | contracts | 79 | 58 (with 1 **red**) |
 | exeonmac | 453 | 422 |
 
+(This is a **historical snapshot**: it records the numbers at the time and is not kept in sync with the code; current values live in 12.1. Both `contracts` figures, 79 and 58, are old — after the Appendix C guard landed on 2026-11-20 it is 111. `doc-counts.mjs` reads only the 12.1 section and never this table.)
+
 That one red was the hard-coded `total 1150` in `contracts/doc-counts.test.mjs` disagreeing with the actual 1165—a defect fixed in W-01, but the fix never landed, so the old snapshot brought it back. **"Green on my machine" and "shippable" are separated by a `git commit`.** That is the lesson of this round.
 
 **② The section 18.2 block could not be run verbatim.** The old form was:
@@ -3424,6 +3464,63 @@ After the first `cd` the working directory is already inside `mac2win/`, so the 
 ```
 
 The **execution environment's delete guard** blocked doctor's probe-file cleanup once the turn's cumulative deletes reached ten. It is not a `wepack` defect—writing and deleting the same path manually worked fine. **The test for "environment interception masquerading as a product defect" is whether the command alone reproduces it**: twelve green alone, two red end to end, with the only difference being the surrounding environment. This is recorded here so a later round does not go and "fix" `wepack`.
+
+### 15.14 The launcher's signal handling: a "tests green, product broken" case (measured 2026-11-20)
+
+**This section records a defect where every test passed, the logs looked healthy, and the artefact could not actually be closed.** It was found by entering the optimisation loop through the *performance* dimension: `exeonmac`'s 454 tests take over two minutes, so the duration distribution was measured first. The slowest was `test_launcher_starts_wine` at **63.3 s** when run alone, of which only about 3 s was actual verification.
+
+**① First separate "the product is slow" from "the test is waiting for nothing".** Roughly 60 of the 63 seconds came from the test's fallback timeout: `process.terminate()` followed by `wait(timeout=60)`, falling back to `kill()`. So the question became how long the gap was between `terminate` and `kill`, which points at the launcher itself. Reproduced with a probe (real base layer + real wine + the real launcher): `wine 已启动` appeared at 2.28 s, then **the process was still alive 90 seconds after SIGTERM** and needed SIGKILL. `launcher.log` contained **no** "signal received" line at all, so this was not "slow to exit" but "the handler never ran".
+
+**② The root cause is a scheduling-model conflict, not a timeout setting.** Three pieces have to line up to be fatal:
+
+| Piece | Behaviour |
+|---|---|
+| `signal(sig, SIG_IGN)` | Turns off SIGTERM's default disposition (immediate termination) |
+| `DispatchSource.makeSignalSource(signal: sig, queue: .main)` | Queues the handler on `.main`, which is dispatched by the **main run loop** |
+| `WineRunner.run`'s wait loop | `while process.isRunning { Thread.sleep(0.2) }` — occupies the main thread end to end and **never runs the run loop** |
+
+Net effect: the default disposition is disabled and the handler is never scheduled, so SIGTERM becomes a signal that is "received but does nothing".
+
+**③ Isolate the "queue" variable with a minimal reproduction.** A 60-line Swift program reproduces the same structure (`SIG_IGN` + `DispatchSource` + a `Thread.sleep` loop), changing only the queue:
+
+| Queue | Handler ran within 8 s | Marker file |
+|---|---|---|
+| `DispatchQueue.main` | No | Not written |
+| Dedicated serial queue | Yes | `收到 SIGTERM via custom` |
+
+This step matters: reading the code only yields a hypothesis, and "suspected `.main` is the cause" must be recorded separately from "measured `.main` is the cause".
+
+**④ Fix and measurements.** The signal sources moved to `DispatchQueue(label: "com.wexe.launcher.signal")`; nothing else changed. Re-running the same probe:
+
+| | Before | After |
+|---|---|---|
+| Exit after SIGTERM | Still alive at 90 s, needed SIGKILL | **0.19 s**, `rc=15` |
+| Log | No "signal received" | `收到信号 15，正在停止 wine` → `wine 退出 status=15` |
+| That test case | 63.3 s | **3.1 s** |
+| `exeonmac` full suite | 193.5 s | **137.5 s** |
+
+**⑤ Why this stayed hidden so long — the fallback swallowed the defect.** The original test was:
+
+```python
+process.terminate()
+try:
+    process.wait(timeout=60)
+except subprocess.TimeoutExpired:
+    process.kill()          # ← the defect is eaten here
+```
+
+`kill()` guarantees the case can always finish, so "SIGKILL is the only way out" never turned red — it only cost 60 seconds of waiting. This is the classic **fallback masking a defect** shape: the fallback itself is reasonable (the suite must not hang), but it must also **treat "the fallback was taken" as a failure**, otherwise the fallback becomes a silencer.
+
+**⑥ Two guards, one for each half, both negatively verified.**
+
+| Guard | Location | What it protects | Negative verification (re-inject `.main`) |
+|---|---|---|---|
+| Static | `tests/test_phase0.py::test_signal_source_not_on_main_queue` | The registered queue is not `.main` | **1 case red**, 5/5 green after restore |
+| Behavioural | `tests/test_phase3.py::TestRealLaunch` | The log contains "signal received" **and** the process exits within 20 s | **1 case red** (`'收到信号' not found`), 6/6 green after restore |
+
+The behavioural test alone would catch it too, but only after waiting out the 20-second timeout; the static test alone would not stop some other spelling that is equally broken. Both together are fast and complete.
+
+**⑦ Still unverified**: this section proves only that "SIGTERM is forwarded to wine and the launcher exits". All three signals share the same code path but only SIGTERM was exercised. **Whether wine writes every window's state back into the prefix on SIGTERM** (`wineserver`'s shutdown completeness) is unverified — the local probe used `notepad.exe`, which has no state to save; stateful commercial software needs a real-machine check.
 
 ---
 
@@ -3472,6 +3569,15 @@ Ordered by determinism; each item presupposes the one before it.
 ```bash
 # Contract self-check (mandatory)
 node contracts/validate.mjs
+
+# Documentation-number self-check (mandatory). One command guards two things:
+# the 12.1 test counts, and the eight hand-counted numbers in Appendix C
+# (37 configuration keys, 13 environment variables, 18 external tools,
+# 6 subcommand families, 25 highlights, 11 sections in chapter 5, 13 NOTICE
+# chapters, 11 artifact checks). The latter had no guard at all before
+# 2026-11-20 — changing "37 configuration keys" to 32 still printed
+# "✓ counts consistent" under the old version.
+node contracts/doc-counts.mjs --check
 
 # Each direction's own tests. Every line is wrapped in a subshell so the working
 # directory returns to the repository root afterwards — otherwise, after the

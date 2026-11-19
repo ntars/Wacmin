@@ -41,6 +41,11 @@ import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { checkAppendix } from './appendix-guard.mjs'
+
+/** 附录 C 里被守着的数字个数，用于通过信息里报数（与 FACT_KEYS 同长）。 */
+const FACT_COUNT = 8
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = join(HERE, '..')
 
@@ -53,13 +58,29 @@ const MODULES = ['mac2win', 'exeonmac', 'win2mac', 'apponwin', 'console', 'ai', 
  * 中文版写 `132 项`，英文版写 `132`。两者都接受，因为这里要的是数字。
  * 合计行中文是 `**合计**`，英文是 `**Total**`，同样两种都认。
  *
+ * ## 为什么必须限定在 12.1 那一节里
+ *
+ * 初版是扫描**整份** README 的所有表格行，同名的行后写覆盖先写。平时没事，
+ * 因为 12.1 只此一张；但 15.13 记交付体检时加了一张历史对照表，里面也有
+ * `| contracts | 79 | 58（且 1 项**红**）|` 这种行 —— 它排在 12.1 之后，
+ * 于是 `--check` 读到的 contracts 是 **79**，而 12.1 明明写着 111。
+ *
+ * 实测复现：把 12.1 的 contracts 改成 111、合计算对，`--check` 仍报
+ * 「合计写 1319，但分项之和是 1287」——**它读的是 300 行之外那张历史表**。
+ * 这个缺陷本身不会误报（合计与分项都用同一份错读，加总仍然自洽），
+ * 只有在改了真值时才会暴露，所以它能潜伏很久。
+ *
+ * 修法是先裁到 12.1 一节再解析。`--min` 也跟着受益：CI 的基线不该被
+ * 正文里任何一张旁证表影响。
+ *
+ * @param {string} text 整份 README
  * @returns {{ rows: Map<string, number>, total: number|null }}
  */
 export function parseCountTable(text) {
   const rows = new Map()
   let total = null
 
-  for (const line of text.split('\n')) {
+  for (const line of countTableSection(text).split('\n')) {
     if (!line.startsWith('|')) continue
 
     // 拆列并去掉首尾空串：`| a | b |` → ['a','b']
@@ -81,6 +102,28 @@ export function parseCountTable(text) {
   }
 
   return { rows, total }
+}
+
+/**
+ * 裁出 12.1 那一节的正文。
+ *
+ * 找不到这一节时返回**全文**而不是空串：返回空串会让所有模块「缺行」，
+ * 报错指向「表格缺 7 个模块」，掩盖真因「章节标题改了名」。返回全文时
+ * 行为退回旧版（能跑，只是可能读到旁证表），比直接崩更好排查。
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function countTableSection(text) {
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => /^### 12\.1 /u.test(line))
+  if (start === -1) return text
+  const body = []
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^#{2,3} /u.test(lines[i])) break
+    body.push(lines[i])
+  }
+  return body.join('\n')
 }
 
 /** 读 README 全文。路径由调用方给，测试用它指向临时文件。 */
@@ -150,14 +193,49 @@ function usage(message) {
   process.stderr.write(
     `${message}\n\n` +
       `用法：\n` +
-      `  node contracts/doc-counts.mjs --check\n` +
+      `  node contracts/doc-counts.mjs --check            # 12.1 计数 + 附录 C，CI 与 18.2 用这个\n` +
+      `  node contracts/doc-counts.mjs --check-counts     # 只查 12.1（给夹具测试用）\n` +
+      `  node contracts/doc-counts.mjs --check-appendix    # 只查附录 C\n` +
       `  node contracts/doc-counts.mjs --min <${MODULES.join('|')}>\n` +
       `  node contracts/doc-counts.mjs --list\n`,
   )
   process.exit(2)
 }
 
-function main(argv) {
+/** 跑 12.1 表格检查，返回问题清单。 */
+function checkCounts(root) {
+  return check(root)
+}
+
+/**
+ * 打印问题并退出，或打印两行通过信息。
+ *
+ * @param {string[]} problems
+ * @param {{counts: boolean, appendix: boolean, root: string}} options
+ */
+function report(problems, options) {
+  if (problems.length > 0) {
+    process.stderr.write(`✗ 文档计数不一致（${problems.length} 处）\n`)
+    for (const problem of problems) {
+      process.stderr.write(`  · ${problem}\n`)
+    }
+    process.exit(1)
+  }
+  if (options.counts) {
+    const { rows } = parseCountTable(readDoc(join(options.root, 'README.md')))
+    const sum = [...rows.values()].reduce((acc, value) => acc + value, 0)
+    process.stdout.write(
+      `✓ 12.1 计数一致：${MODULES.length} 个模块合计 ${sum} 项，两版逐项相同\n`,
+    )
+  }
+  if (options.appendix) {
+    process.stdout.write(
+      `✓ 附录 C 自检清单：${FACT_COUNT} 个数字与代码常量、文档结构逐项相符，两版相同\n`,
+    )
+  }
+}
+
+async function main(argv) {
   const rootIndex = argv.indexOf('--root')
   const root = rootIndex >= 0 ? argv[rootIndex + 1] : REPO_ROOT
 
@@ -181,26 +259,35 @@ function main(argv) {
     return
   }
 
-  if (argv.includes('--check')) {
-    const problems = check(root)
-    if (problems.length > 0) {
-      process.stderr.write(`✗ 12.1 测试计数不一致（${problems.length} 处）\n`)
-      for (const problem of problems) {
-        process.stderr.write(`  · ${problem}\n`)
-      }
-      process.exit(1)
-    }
-    const { rows, total } = parseCountTable(readDoc(join(root, 'README.md')))
-    const sum = [...rows.values()].reduce((acc, value) => acc + value, 0)
-    process.stdout.write(
-      `✓ 12.1 计数一致：${MODULES.length} 个模块合计 ${sum} 项，两版逐项相同\n`,
-    )
+  /*
+   * `--check` 一把跑完两件事：12.1 的测试计数，与附录 C 的 8 个文档事实。
+   *
+   * 附录 C 那 8 个数字全是人手数出来的，2026-11-19 的 W-03 巡检里 9 处
+   * 文档缺陷有 4 处正是这一类。实测过：把「37 个配置项」改成 32、
+   * 「二十五条亮点」改成二十，加上这层守卫之前的 `--check` 照样输出
+   * 「✓ 计数一致」—— 等于没守。
+   *
+   * 放进同一个命令而不是另开一个，是因为 CI 与 18.2 检查块已经在跑
+   * `--check`；加一个需要人记得去跑的新命令，等于给它一个被遗忘的机会。
+   *
+   * 另两个只跑一半的入口是给测试用的：12.1 的夹具只造两份 README，
+   * 附录 C 的夹具还要 `NOTICE` 与 `config.mjs`，混在一起会让两边都
+   * 被迫造一堆与本用例无关的文件，测试意图反而看不清。
+   */
+  const wantCounts = argv.includes('--check') || argv.includes('--check-counts')
+  const wantAppendix = argv.includes('--check') || argv.includes('--check-appendix')
+
+  if (wantCounts || wantAppendix) {
+    const problems = []
+    if (wantCounts) problems.push(...checkCounts(root))
+    if (wantAppendix) problems.push(...await checkAppendix(root))
+    report(problems, { counts: wantCounts, appendix: wantAppendix, root })
     return
   }
 
-  usage('需要 --check / --min / --list 之一')
+  usage('需要 --check / --check-counts / --check-appendix / --min / --list 之一')
 }
 
 if (process.argv[1] !== undefined && process.argv[1].endsWith('doc-counts.mjs')) {
-  main(process.argv.slice(2))
+  await main(process.argv.slice(2))
 }

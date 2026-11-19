@@ -55,6 +55,13 @@ import fixtures  # noqa: E402
 SAMPLE_NSIS = os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or "")
 REAL_WINE = fixtures.wine_available()
 
+#: launcher 收到 SIGTERM 后允许的最长退出时间（秒）。
+#:
+#: 实测修复后为 0.19 秒（wine 直接把信号转给子进程，无需等 wineserver 收树）。
+#: 留 20 秒余量是因为真机上 wine 进程树更复杂；超过这个数就说明信号路径又断了，
+#: 此时测试**失败**而不是静默 kill —— 一个停不下来的进程是产品缺陷，不是测试问题。
+SIGTERM_STOP_SECONDS = 20
+
 
 # --------------------------------------------------------------------------
 # 脚手架
@@ -811,27 +818,46 @@ class TestRealLaunch(unittest.TestCase):
                 while time.monotonic() < deadline:
                     if log.is_file() and "wine 已启动" in log.read_text(encoding="utf-8"):
                         break
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                 text = log.read_text(encoding="utf-8") if log.is_file() else ""
                 self.assertIn("wine 已启动", text)
-            finally:
-                # ## 收尾要留够时间，还要有兜底
+
+                # ## SIGTERM 必须真的停得下来，这是产品契约不是测试便利
                 #
-                # launcher 捕获 SIGTERM 后**先让 wine 自己收尾**再退出
-                # （wineserver 关闭进程树要几秒到几十秒）。给 30 秒会超时，
-                # 而超时会让整个测试套件挂在 wait() 上。
+                # 早先这里只写 `terminate()` 然后 `wait(timeout=60)`，超时就
+                # `kill()` 兜底 —— 于是「launcher 收不到信号、只能 SIGKILL」
+                # 这个真实缺陷被兜底逻辑整个吞掉了：测试一直是绿的，代价是
+                # 每个用例白等 60 秒（单跑实测 63.3 秒，而其中真正验证的部分
+                # 只有约 3 秒）。
                 #
-                # 所以：先 terminate 等 60 秒，仍在就 kill，再等 10 秒。
-                # 拿不到干净退出就如实失败 —— 但不能把套件拖死。
+                # 根因在 `DispatchSource.makeSignalSource(queue: .main)`：main
+                # 队列的 handler 由 main run loop 调度，而 `WineRunner.run` 用
+                # `Thread.sleep` 轮询子进程、全程不跑 run loop，两者叠加后
+                # 信号既不触发 handler（已被 `signal(sig, SIG_IGN)` 吃掉默认
+                # 处置）、也不终止进程。
+                #
+                # 所以这里必须**断言**两件事，缺一不可：
+                #   1. 日志里出现「收到信号」，证明 handler 真的执行过
+                #   2. 进程在 SIGTERM_STOP_SECONDS 内退出，证明不是靠 kill 兜底
                 process.terminate()
+                stopped = True
                 try:
-                    process.wait(timeout=60)
+                    process.wait(timeout=SIGTERM_STOP_SECONDS)
                 except subprocess.TimeoutExpired:
+                    stopped = False
                     process.kill()
                     try:
                         process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         pass
+                text = log.read_text(encoding="utf-8") if log.is_file() else ""
+                self.assertIn("收到信号", text,
+                              f"launcher 没处理 SIGTERM，日志尾部：{text[-500:]}")
+                self.assertTrue(
+                    stopped,
+                    f"SIGTERM 后 {SIGTERM_STOP_SECONDS} 秒仍未退出，"
+                    f"只能靠 SIGKILL 收尾。日志尾部：{text[-500:]}")
+            finally:
                 # ## 管道必须显式关闭
                 #
                 # wait() 只回收进程，**不关** stdout/stderr —— 这两个

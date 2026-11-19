@@ -245,6 +245,26 @@ class TestLauncherSkeleton(unittest.TestCase):
         self.assertTrue((REPO / "launcher" / "Sources" / "main.swift").is_file())
         self.assertTrue((REPO / "launcher" / "build.sh").is_file())
 
+    def test_signal_source_not_on_main_queue(self) -> None:
+        """信号源不许挂在 `.main` 队列上。
+
+        ## 为什么这条必须静态守
+
+        `.main` 队列的 handler 由 main run loop 调度，而 `WineRunner.run`
+        用 `Thread.sleep` 轮询子进程、从不跑 run loop。两者叠加后 SIGTERM
+        既不触发 handler 也不终止进程 —— launcher 变成 `kill -9` 才停得下来的
+        进程（实测 90 秒未退出）。这种缺陷在正常运行路径上完全看不见，
+        只有「想关掉它」时才暴露，靠集成测试发现要求每次都等满超时。
+
+        静态守的是**注册位置**，集成测试守的是**实际行为**，两者互补：
+        前者一眼定位，后者防其他写法引入同样问题。
+        """
+        source = (REPO / "launcher" / "Sources" / "main.swift").read_text(encoding="utf-8")
+        self.assertIn("makeSignalSource(signal: sig, queue: signalQueue)", source,
+                      "信号源必须跑在自己的串行队列上，不能挂 .main")
+        self.assertNotIn("makeSignalSource(signal: sig, queue: .main)", source,
+                         "`.main` 队列的信号 handler 在 Thread.sleep 期间不会被执行")
+
     @unittest.skipUnless(shutil.which("swiftc"), "需要 swiftc")
     def test_launcher_compiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

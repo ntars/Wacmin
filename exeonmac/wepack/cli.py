@@ -225,8 +225,20 @@ def build_parser() -> argparse.ArgumentParser:
     # -- build -------------------------------------------------------------
     p = sub.add_parser(
         "build",
-        help="一键流程：detect → extract → install → package",
-        description="把四个阶段串起来的便捷入口。任一环节失败即中止，不产出半成品 .app。",
+        help="一键流程：detect → install → package（不含 extract）",
+        description=(
+            "一键流程：detect → install → package。任一环节失败即中止，"
+            "不产出半成品 .app。\n\n"
+            "不含 extract：静态解包是为「先看看里面有什么」准备的独立能力，"
+            "install 直接跑安装器即可，不需要先解包。需要查看文件树时单独跑 "
+            "wepack extract。\n\n"
+            "--json 输出一份汇总结果，同时含安装（entry / layers / disk / "
+            "verify）与装配（bundle_id / checks / registered）两半，"
+            "stdout 只有这一段 JSON。"
+        ),
+        # 上面那段有多行结构，默认的 HelpFormatter 会把换行压成空格，
+        # 读起来糊成一坨。保留原样排版。
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_installer_arg(p, "安装包路径")
     p.add_argument("-o", "--out-dir", type=Path, default=Path("~/Applications").expanduser(), metavar="DIR",
@@ -255,10 +267,23 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(q)
     q.set_defaults(func=cmd_layers_mount)
 
-    q = lsub.add_parser("build", help="构建层（当前仅支持 base）")
-    q.add_argument("name", metavar="LAYER", help="层名，目前只支持 base")
+    q = lsub.add_parser(
+        "build",
+        help="构建层（base / dotnet / fonts-cn 可自动构建）",
+        description=(
+            "base：跑 wineboot 得到干净 prefix。\n"
+            "dotnet：把运行时自带的 wine-mono MSI 静默装入。\n"
+            "fonts-cn：把 --font 指定的字体文件装进 prefix，让字体随产物分发、\n"
+            "          不再依赖宿主（中文在 base 上本来就能显示）。\n"
+            "mfc / vcpp 无法自动构建，原因见报错提示。"
+        ),
+    )
+    q.add_argument("name", metavar="LAYER",
+                   help="层名：base / dotnet / fonts-cn（mfc / vcpp 不可自动构建）")
+    q.add_argument("--font", action="append", type=Path, metavar="FILE",
+                   help="fonts-cn 层用的字体文件，可重复。须为你有权再分发的文件")
     q.add_argument("--timeout", type=int, default=600, metavar="SEC",
-                   help="wineboot 超时秒数，默认 600")
+                   help="单步超时秒数，默认 600")
     _add_common(q)
     q.set_defaults(func=cmd_layers_build)
 
@@ -1116,286 +1141,15 @@ def _clean_installer_stem(stem: str) -> str:
     return name.strip() or stem
 
 
-def _name_tokens(name: str) -> list[str]:
-    """把名字切成小写词序列，只保留字母数字。
-
-    `7-Zip 24.08` → `['7', 'zip', '24', '08']`，`Notepad++` → `['notepad']`，
-    `Node.js` → `['node', 'js']`。用于按**词**而不是按字符比对名字。
-    """
-    return [t for t in re.split(r"[^0-9a-z]+", name.lower()) if t]
-
-
-def _contains_token_run(haystack: list[str], needle: list[str]) -> bool:
-    """needle 是否作为**连续子序列**出现在 haystack 里。
-
-    不是字符串子串 —— `['mode']` 不出现在 `['modem']` 里，因为词已经切
-    开了。这正是要的效果：`Modem` 这个目录名不该被产品名 `mode` 认领。
-    """
-    span = len(needle)
-    if span == 0 or span > len(haystack):
-        return False
-    return any(haystack[i:i + span] == needle
-               for i in range(len(haystack) - span + 1))
-
-
-def _names_relate(name: str, keywords: set[str]) -> bool:
-    """目录名与任一个关键词是否**按词**相关，双向包含。
-
-    ## 为什么不能直接用字符串子串
-
-    原来这一层是 `k in name.lower() or name.lower() in k`。字符串子串没有
-    词边界，短词会啃进长词中间：
-
-        `modem`.lower() 含 `mode`       → 目录 Modem      被产品名 mode 认领
-        `downloads`     含 `load`       → 目录 Downloads  被产品名 load 认领
-        `appdata`       含 `app`        → 目录 appdata    被产品名 App 认领
-
-    这些目录下都可能有 exe，路径 ① 一旦认领错目录，`best_candidate` 会
-    立刻返回里面的 exe —— 用户装 App，入口指向 appdata 里的某个东西。
-
-    ## 为什么必须双向
-
-    产品名常常比目录名长（目录是作者自己起的短名）：
-
-        目录 Ondra    产品名 Ondra 1.2.3          →  正向命中
-        目录 App      产品名 App Installer         →  正向命中
-        目录 Code     产品名 Visual Studio Code    →  反向命中
-
-    只要一个方向就够了，但两个方向都得留着 —— 去掉反向，`Visual Studio
-    Code` 装出来的 `Code/` 目录就认不出来，路径 ① 全废。
-
-    ## 反向方向也有同样的词边界问题
-
-    未被修掉的一例：目录 `nt` 配产品名 `Windows NT` 会命中（`['nt']` 确实
-    是 `['windows','nt']` 的连续子段）。这个认领是**正确**的 —— 那两步
-    就是同一个词。字符串子串在这里也一样命中，所以词边界没让它变差。
-    真正的把关在下一步：`best_candidate` 要在该目录里选出主程序，而
-    `Windows NT/Accessories/` 下的东西会被兜底闸门与排除规则筛掉。
-    """
-    dir_tokens = _name_tokens(name)
-    if not dir_tokens:
-        return False
-    for keyword in keywords:
-        key_tokens = _name_tokens(keyword)
-        if not key_tokens:
-            continue
-        if (_contains_token_run(dir_tokens, key_tokens)
-                or _contains_token_run(key_tokens, dir_tokens)):
-            return True
-    return False
-
-
-def _filename_relates_to_product(relpath: str, product: str) -> bool:
-    """文件名（去后缀）是否与产品名有关。无关时兜底不该认它。
-
-    ## 为什么兜底需要这道闸
-
-    `rank_candidates` 的产品名匹配只值 +35 分。整层扫描时「在 Program
-    Files 下 +25」「GUI +20」「有图标 +10」加起来就 55 分，足以让一个
-    毫不相关的残留程序排到第一。实测在 base 层的 `Program Files/` 下分别
-    搜 `Notepad`、`TotallyDifferentApp`、`Zzzz`，三次返回的都是同一个
-    `Windows NT/Accessories/wordpad.exe` —— 产品名对兜底结果毫无影响。
-
-    ## 判据复用 candidates 的归一化
-
-    `_normalize` 去分隔符与数字（`PDF24` → `pdf`），`_squash` 只去分隔符
-    （`7-Zip` → `7zip`）。两种形式都比，避免 `7z` ↔ `7zip` 这类错位。
-
-    ## 只认「相等 / 前缀 / 后缀」，不认任意子串
-
-    任意子串会把 `Pa` 匹配到 `wordpad`（`pa` 出现在中间）。要求前后缀
-    之后这类误判消失，而真实场景都还能过：
-
-        notepad  ↔ notepad    相等
-        7z       ↔ 7zfm       前缀
-        net      ↔ dotnet     后缀（产品名 "Microsoft .NET Runtime"）
-        code     ↔ code       相等（产品名 "Microsoft Visual Studio Code"）
-
-    ## 前后缀还要留够余量
-
-    只要求「前缀或后缀」仍然太松：多出来的那一个字符足以把无关名字粘
-    上来。`mode` 是 `modem` 的前缀，只差 1 个字符 —— 于是产品名 `mode`
-    会认领 `Modem.exe`。实测这条真的漏过去了：路径 ① 已经被词边界判据
-    挡住（`Modem` 目录不被 `mode` 认领），兜底这一层却把它放了回来，
-    端到端结果照样是错的。
-
-    所以要求被比较的两边**长度差至少 2**：
-
-        modem  ↔ mode     差 1 → 拒绝
-        appx   ↔ app      差 1 → 拒绝
-        7zfm   ↔ 7z       差 2 → 接受
-        dotnet ↔ net      差 3 → 接受
-
-    相等永远接受，不受此限。这条不影响现有的任何一个真实用例（逐项验过：
-    `App`/`MyApp`/`node`/`chromium`/`notepad++`/`Code`/`firefox`/`dotnet`/
-    `7z`/`7zFM` 全部照旧通过）。
-
-    ## 与打分器保持一致的边界
-
-    `7zFM.exe` 配产品名 `7-Zip` 时**过不了这道闸** —— 因为归一化后是
-    `zfm` vs `zip`/`7zip`，打分器本身也不认为它们相关（上一轮确认过：
-    `7zFM` 是靠 GUI 加分胜出的，不是靠产品名匹配）。这里不另立标准：
-    闸门比打分器宽，兜底就会返回打分器都觉得不像的东西。
-
-    实际 7-Zip 安装包走的是路径 ①（产品名匹配子目录 `7-Zip/`），不经过
-    兜底，所以这条边界不影响真实使用。
-
-    产品名为空时**放行**：调用方没给名字，就没有依据筛，此时返回排名第一
-    与旧行为一致（也多亏这条，既有调用点不会因为新闸门全部失配）。
-    """
-    if not product:
-        return True
-
-    from .extract.candidates import _normalize, _product_words, _squash
-
-    stem = relpath.rsplit("/", 1)[-1]
-    if stem.lower().endswith(".exe"):
-        stem = stem[:-4]
-    forms = tuple(f for f in (_normalize(stem), _squash(stem)) if len(f) >= 2)
-    if not forms:
-        return False
-
-    for word in _product_words(product):
-        # 分词保留原样，`.NET` 这种会带着前导点进来（`_product_words` 只在
-        # `-` / `_` 处切分，不切 `.`）。这里再归一化一次，让 `.net` → `net`
-        # 能对上 `dotnet` 的后缀。改 `_product_words` 会牵动打分器，不在
-        # 这个提交里做。
-        word = _squash(word) if len(word) >= 2 else ""
-        if len(word) < 2:
-            continue
-        for form in forms:
-            if word == form:
-                return True
-            # 前后缀匹配要求长度差 ≥ 2。只差 1 个字符时，「前缀」和「拼写
-            # 相近的另一个词」无法区分 —— `mode` 是 `modem` 的前缀，但
-            # Modem.exe 显然不是产品名 mode 的程序。
-            if form.startswith(word) or form.endswith(word):
-                if len(form) - len(word) >= 2:
-                    return True
-            if word.startswith(form) or word.endswith(form):
-                if len(word) - len(form) >= 2:
-                    return True
-    return False
-
-
-def _find_installed_entry(private_dir: Path, detection, app_name: str) -> str | None:
-    """在安装后的 prefix 里找主 exe，返回相对 private_dir 的路径。
-
-    搜索顺序（按"最可能是安装目标"排序）：
-      0. `C:\\Wacmin` 下的产品目录 —— 本工具的默认安装位置（见 install.default_install_dir）
-      1. Program Files / Program Files (x86) 下的产品目录
-      2. AppData/Local 下的产品目录 —— Electron/Squirrel 类安装器会忽略
-         NSIS 的 /D=，把应用装到 AppData/Local/<产品名>（实测空谷 Ondra 如此）
-      3. Program Files 全盘兜底
-      4. AppData/Local 全盘兜底
-
-    ## 为什么 C:\\Wacmin 排第一
-
-    默认安装目录之所以不是 Program Files，是因为 NSIS 的 `/D=` 在含空格
-    路径上必然失效（详见 install.silent_args_for 的说明）。既然默认装到
-    `C:\\Wacmin\\<App>`，这里就必须先搜那里 —— 否则会出现「装成功了但
-    找不到入口」这种自相矛盾的结果。
-
-    排在 Program Files 之前还有一层理由：那是本工具自己写的位置，命中
-    即可确定是本次安装的产物；Program Files 里可能残留 base 层自带的
-    系统组件。
-
-    都不命中时返回 None，由调用方提示用户手动指定。
-    """
-    from .extract.candidates import best_candidate, rank_candidates
-
-    drive_c = private_dir / "drive_c"
-    if not drive_c.is_dir():
-        return None
-
-    product = (detection.product_name or app_name or "").strip()
-    keywords = {app_name.lower()} if app_name else set()
-    if product:
-        keywords.add(product.lower())
-    keywords = {k for k in keywords if k}
-
-    def matches(name: str) -> bool:
-        return _names_relate(name, keywords)
-
-    # 候选搜索根，按优先级排列。
-    #
-    # 这里原本是 `list[tuple[Path, bool]]`，第二项在两处遍历里都被 `_`
-    # 丢弃 —— 是「曾经打算区分某种状态、后来没用上」的残留。留着它会让
-    # 读代码的人以为那个 bool 有意义（比如「是否递归」），进而照着它写
-    # 新逻辑。直接退回成路径列表。
-    search_roots: list[Path] = [
-        drive_c / "Wacmin",
-        drive_c / "Program Files",
-        drive_c / "Program Files (x86)",
-    ]
-    # AppData/Local 是每个用户的，遍历所有用户目录
-    users_dir = drive_c / "users"
-    if users_dir.is_dir():
-        for user_home in users_dir.iterdir():
-            if not user_home.is_dir():
-                continue
-            local = user_home / "AppData" / "Local"
-            if local.is_dir():
-                search_roots.append(local)
-
-    # ① 先按产品名匹配子目录
-    for root in search_roots:
-        if not root.is_dir():
-            continue
-        try:
-            children = [c for c in root.iterdir() if c.is_dir()]
-        except OSError:
-            continue
-        for candidate_dir in children:
-            if not matches(candidate_dir.name):
-                continue
-            candidate = best_candidate(candidate_dir, product_name=product)
-            if candidate is not None:
-                absolute = candidate_dir / candidate.relpath
-                try:
-                    return absolute.relative_to(private_dir).as_posix()
-                except ValueError:
-                    continue
-
-    # ② 全盘兜底：排除系统目录
-    #
-    # ## 这里必须校验「与产品名有关」，否则返回的是纯排名第一
-    #
-    # `rank_candidates(root, product_name=product)` 里产品名只占 +35 分。
-    # 在 Program Files 这种整层扫描里，一份没装成功的残留程序照样能靠
-    # 「在 Program Files 下 +25」「GUI +20」「有图标 +10」拿到 60 分以上，
-    # 把产品名那 35 分淹掉 —— 于是不管搜哪个产品名，返回值都一样。
-    #
-    # 实测（base 层真实内容，`Program Files/` 下搜三个毫不相关的名字）：
-    # 产品名 Notepad / TotallyDifferentApp / Zzzz，返回的都是同一个
-    # `Windows NT/Accessories/wordpad.exe`。用户装 Notepad，得到写字板。
-    #
-    # 兜底的本意是「产品名匹配不到子目录时，再从整层里找找」，不是
-    # 「随便给一个能双击的 exe」。所以要求文件名与产品名有关系 ——
-    # 判据复用 candidates 里的归一化，比在这里另写一套更不容易漂移。
-    excluded_prefixes = (
-        "drive_c/windows/",
-        "drive_c/Program Files/Common Files/",
-        "drive_c/Program Files/Windows ",
-        "drive_c/Program Files/Internet Explorer/",
-    )
-    for root in search_roots:
-        if not root.is_dir():
-            continue
-        ranked = rank_candidates(root, product_name=product, limit=10)
-        for candidate in ranked:
-            if not _filename_relates_to_product(candidate.relpath, product):
-                continue
-            absolute = root / candidate.relpath
-            try:
-                relative = absolute.relative_to(private_dir).as_posix()
-            except ValueError:
-                continue
-            if any(relative.startswith(prefix) for prefix in excluded_prefixes):
-                continue
-            return relative
-
-    return None
+#: 入口探测的判据已整体搬到 `wepack/entry.py`。这里保留同名别名，
+#: 是为了让既有测试与外部调用点不用跟着改，同时保证**只有一份实现**。
+from .entry import (  # noqa: E402 - 放在实现段落之后便于阅读上下文
+    contains_token_run as _contains_token_run,
+    filename_relates_to_product as _filename_relates_to_product,
+    find_installed_entry as _find_installed_entry,
+    name_tokens as _name_tokens,
+    names_relate as _names_relate,
+)
 
 
 def cmd_package(args: argparse.Namespace) -> int:
@@ -1452,6 +1206,11 @@ def cmd_package(args: argparse.Namespace) -> int:
         "warnings": report.warnings,
     }
     _emit(payload, args.json)
+
+    # 挂到 args 上供 cmd_build 汇总。build 把两段结果合成一份输出，
+    # 不能靠 stdout 拼——那会让 `--json` 产生两段 JSON，`json.load` 抛
+    # `Extra data`。README 10.1 的契约是 stdout 只有一段 JSON。
+    args.package_result = payload
 
     if not args.json:
         print(f"应用包    {report.app_dir}")
@@ -1522,15 +1281,27 @@ def cmd_build(args: argparse.Namespace) -> int:
         _trash(app_dir)
 
     # ① 安装。构造一份与 install 子命令等价的参数对象，直接复用其实现。
+    #
+    # json 必须置 False：`install` 的 payload 由 build 汇总后统一输出。
+    # 早先这里传的是 `args.json`，于是 `wepack build --json` 往 stdout 写了
+    # **两段** JSON（install 一份、package 一份），`json.load` 直接抛
+    # `Extra data: line 50` —— 而 README 10.1 的契约是「stdout 只有 JSON」，
+    # 管道能直接交给 jq。现在只由 build 自己写一段。
     install_args = argparse.Namespace(
         installer=path, out=app_dir, app_name=app_name,
         timeout=getattr(args, "timeout", 1800),
         interactive=False, silent_args=None,
         no_layers=getattr(args, "no_layers", False),
         no_recipe=getattr(args, "no_recipe", False),
-        json=args.json, report=False, verbose=getattr(args, "verbose", False),
+        json=False, report=False, verbose=getattr(args, "verbose", False),
     )
-    code = cmd_install(install_args)
+    # 子命令的人类可读输出一律改道到 stderr。
+    # `--json` 时 stdout 必须只有 build 自己那一段 JSON（README 10.1）；
+    # 不加这一层，install 与 package 会把各自的表格也印到 stdout，
+    # `wepack build --json | jq` 直接解析失败。
+    # 非 --json 时两者都落到终端，视觉上没有差别。
+    with _StdoutToStderr(sys.stdout):
+        code = cmd_install(install_args)
     if code != ExitCode.OK:
         return code
 
@@ -1541,13 +1312,62 @@ def cmd_build(args: argparse.Namespace) -> int:
         f"{detection.vendor or 'app'}.{app_name}".lower(), seed=app_name)
     package_args = argparse.Namespace(
         app=app_dir, icon=None, badge="w", badge_color=None,
-        no_register=False, json=args.json, report=False,
+        no_register=False, json=False, report=False,
         entry=installed.get("entry"),
         app_name=app_name,
         layers=installed.get("layers"),
         verbose=getattr(args, "verbose", False),
     )
-    return cmd_package(package_args)
+    with _StdoutToStderr(sys.stdout):
+        code = cmd_package(package_args)
+    if code != ExitCode.OK:
+        return code
+
+    # ③ 汇总输出。build 是对外的一层门面，输出格式要自洽：
+    #    一份 JSON，同时含安装结果（entry / layers / disk）与装配结果
+    #    （bundle_id / checks / registered），调用方不必拼两段。
+    package_result = getattr(package_args, "package_result", {}) or {}
+    summary = {
+        "ok": True,
+        "app": str(app_dir),
+        "app_name": app_name,
+        "kind": str(detection.kind),
+        "entry": package_result.get("entry") or installed.get("entry"),
+        "layers": installed.get("layers") or ["base"],
+        "bundle_id": package_result.get("bundle_id"),
+        "install": {
+            "returncode": installed.get("returncode"),
+            "duration": installed.get("duration"),
+            "disk": installed.get("disk"),
+            "verify": installed.get("verify"),
+            "log": installed.get("log"),
+            "recipe": installed.get("recipe"),
+        },
+        "package": {
+            "plist": package_result.get("plist"),
+            "icon": package_result.get("icon"),
+            "launcher": package_result.get("launcher"),
+            "compat": package_result.get("compat"),
+            "registered": package_result.get("registered"),
+            "checks": package_result.get("checks", []),
+        },
+        "warnings": list(installed.get("warnings") or [])
+                    + list(package_result.get("warnings") or []),
+    }
+    _emit(summary, args.json)
+
+    if not args.json:
+        print(f"应用包    {app_dir}")
+        print(f"Bundle ID {summary['bundle_id']}")
+        print(f"入口程序  {summary['entry']}")
+        print(f"校验      {sum(1 for c in summary['package']['checks'] if c['ok'])}"
+              f" / {len(summary['package']['checks'])} 项通过")
+        if summary["package"]["registered"]:
+            print("已注册到 LaunchServices")
+        for warning in summary["warnings"]:
+            print(f"  注意：{warning}")
+
+    return ExitCode.OK
 
 
 def _tree_size(root: Path) -> int:
@@ -1699,16 +1519,10 @@ def cmd_layers_mount(args: argparse.Namespace) -> int:
 
 
 def cmd_layers_build(args: argparse.Namespace) -> int:
-    from .layers import build_base_layer
+    from .layers import build_layer
 
-    if args.name != "base":
-        raise UsageError(
-            f"层 {args.name} 需要用户提供安装包，无法自动构建",
-            hint=("当前只支持自动构建 base。vcpp / dotnet / fonts-cn "
-                  "需手动把安装结果放进 layers/<name>/"),
-        )
-
-    info = build_base_layer(timeout=args.timeout)
+    info = build_layer(args.name, timeout=args.timeout,
+                       font_files=args.font)
     payload = {"ok": info.ok, "layer": info.name, "path": str(info.path),
                "files": info.files, "bytes": info.bytes,
                "problems": info.problems}
@@ -1716,10 +1530,10 @@ def cmd_layers_build(args: argparse.Namespace) -> int:
 
     if not args.json:
         if info.ok:
-            print(f"base 层已构建：{info.path}")
+            print(f"{info.name} 层已构建：{info.path}")
             print(f"  {info.files} 个文件，{_human_size(info.bytes)}")
         else:
-            print("构建未完成：")
+            print("构建完成但层不完整：")
             for problem in info.problems:
                 print(f"  · {problem}")
     return ExitCode.OK if info.ok else ExitCode.VERIFY_FAILED

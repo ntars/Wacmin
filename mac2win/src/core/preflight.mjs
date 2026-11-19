@@ -80,10 +80,17 @@ export class PreflightReport {
  * 环境不对时给的不是「不支持」四个字，而是**说明为什么这个组合才成立**——
  * 用户往往是在错误的机器上跑（比如 Intel mac 或 Linux），
  * 知道原因才能选对机器。
+ *
+ * `currentPlatform` / `currentArch` 可注入，默认取本机。
+ * 理由与 `wexezip.resolveMode` 相同：这两条分支在本机永远走不到
+ * （本机是 darwin + arm64），不注入就只能靠 CI 上的另一台机器验证。
+ *
+ * @param {PreflightReport} report
+ * @param {{platform?: string, arch?: string}} [host] 仅供测试注入。
  */
-function checkHost(report) {
-  const currentPlatform = platform()
-  const currentArch = arch()
+export function checkHost(report, host = {}) {
+  const currentPlatform = host.platform ?? platform()
+  const currentArch = host.arch ?? arch()
 
   if (currentPlatform !== 'darwin') {
     report.add(new Check(
@@ -422,18 +429,38 @@ function checkFramework(report, config) {
     ))
   }
 
-  // 原生窗口：Tauri 打不出壳，这条必须明确告知。
+  /*
+   * 原生窗口：Tauri 默认打不出壳，要明确告知 —— 但**理由必须是真的**。
+   *
+   * 这里此前写的是「Tauri 的 Rust 壳需要 i686-pc-windows-msvc 工具链，
+   * macOS 上没有。要原生窗口请在 Windows 机器上跑 tauri build」。
+   * 这句话有两处与实测相反（2026-11-19）：
+   *
+   * 1. **i686 工具链在 macOS 上是有的**：rustup 的 `i686-pc-windows-msvc`
+   *    目标 + cargo-xwin + 它自建的 clang-cl / lld-link shim，
+   *    实测能编出 `PE32 / i386 / windows-gui`（探针 92160 字节）。
+   * 2. **所以「去 Windows 机器上跑」不是必要条件**。真正缺的是 `llvm-rc`
+   *    （`tauri-winres` 编 Windows 资源节要用），它在 Xcode 的 LLVM 里没有、
+   *    cargo-xwin 也不提供。装上它这条路就通，不必换机器。
+   *
+   * 更进一步：`buildRustShell: true` 时预检已经会单独报 `rust-env`，
+   * 这里再说一遍「做不到」只会让用户以为这条路被封死。
+   */
   if (!framework.nativeShell) {
+    const isTauri = detected.id === 'tauri'
+    const wantsShell = config.buildRustShell === true
     report.add(new Check(
       'framework-shell',
       '原生窗口',
-      detected.id === 'tauri' ? 'warn' : 'pass',
-      detected.id === 'tauri'
-        ? '不含 Rust 壳，界面将通过系统默认浏览器打开'
+      isTauri ? 'warn' : 'pass',
+      isTauri
+        ? (wantsShell
+          ? '要编 Rust 壳，但本次未包含（详见上面 Rust 交叉编译环境一项）'
+          : '不含 Rust 壳，界面将通过系统默认浏览器打开')
         : '这类项目本身没有原生壳，属预期行为',
-      detected.id === 'tauri'
-        ? 'Tauri 的 Rust 壳需要 i686-pc-windows-msvc 工具链，macOS 上没有。'
-          + '要原生窗口请在 Windows 机器上跑 tauri build'
+      isTauri && !wantsShell
+        ? '要原生窗口：在 mac2win.config.json 里设 "buildRustShell": true，'
+          + '并补齐 llvm-rc（brew install llvm）；交叉编译链本身在 macOS 上可用'
         : undefined,
     ))
   } else {

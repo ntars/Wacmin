@@ -35,6 +35,7 @@ import { execFile } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseAppBundle } from './assess.mjs'
+import { BuildError, ErrorCode } from './errors.mjs'
 
 /** 门槛状态常量。 */
 export const GATE_STATUS = {
@@ -159,6 +160,34 @@ export async function probeDarling() {
  * @returns {Promise<object>}
  */
 export async function gateCommandLine(samplePath) {
+  /*
+   * 先验样本路径，再探环境。
+   *
+   * 顺序不能反：路径写错是**参数问题**，任何机器上都该报出来；环境缺失
+   * 是这台机器的状态。反过来先探环境，用户就永远看不到「你的 --sample
+   * 路径写错了」这条最该先看到的提示 —— 环境再全也白搭。
+   */
+  if (samplePath !== null) {
+    const exists = await stat(samplePath).then((s) => s.isFile()).catch(() => false)
+    if (!exists) {
+      /*
+       * 样本不存在 → `blocked`，不是 `fail`。
+       *
+       * `fail` 的语义是「实测执行并失败」——那需要先真的跑一次。样本根本
+       * 不存在时，这条门槛**没有被执行过**，只能是「无法验证」。早先这里
+       * 判 `fail`，后果是拼错路径的用户会看到「AppOnWin 方向不成立」。
+       */
+      return {
+        id: 1,
+        name: '命令行 Mach-O',
+        status: GATE_STATUS.BLOCKED,
+        reason: `Mach-O 样本不存在：${samplePath}`,
+        hint: '确认 --sample 指向一个真实存在的命令行 Mach-O 文件。',
+        invalidInput: true,
+      }
+    }
+  }
+
   const darling = await probeDarling()
   if (!darling.available) {
     return {
@@ -177,16 +206,6 @@ export async function gateCommandLine(samplePath) {
       status: GATE_STATUS.BLOCKED,
       reason: 'Darling 可用，但未提供 Mach-O 样本（--sample）。',
       hint: '传一个已知可用的命令行 Mach-O，例如 /bin/echo 的副本。',
-    }
-  }
-
-  const exists = await stat(samplePath).then((s) => s.isFile()).catch(() => false)
-  if (!exists) {
-    return {
-      id: 1,
-      name: '命令行 Mach-O',
-      status: GATE_STATUS.FAIL,
-      reason: `样本不存在：${samplePath}`,
     }
   }
 
@@ -342,11 +361,37 @@ export async function gatePlistParse(appPath) {
       },
     }
   } catch (error) {
+    /*
+     * 输入路径本身不合法（不存在 / 不是 .app）→ `blocked`，不是 `fail`。
+     *
+     * 这是本轮实测抓到的一处真缺陷：`spike --app /nope.app` 早先把
+     * `AOW_1002 路径不存在` 记成门槛 3 的 `fail`，于是一份整体结论变成
+     * `rejected`（「本方向按设计降级为兼容性评估工具」），退出码 1。
+     * 而同一个路径喂给 `assess` 得到的是退出码 2（参数与输入错误）。
+     *
+     * 两处判据不一致的后果不是措辞问题：CI 里看到 `spike` 退出码 1 会
+     * 认定「AppOnWin 方向被证伪」并据此降级整条主线，而真实原因只是
+     * 用户少敲了一个字母。**协议错误绝不能升级成产品结论。**
+     *
+     * 分界线在于「这条门槛有没有被执行过」：
+     *   - 路径不存在 → 没进入解析，无从判定 → blocked（我不知道）
+     *   - 进了解析但 plist 坏 / 缺 CFBundleExecutable → 真的失败了 → fail
+     */
+    if (error instanceof BuildError && error.code === ErrorCode.INPUT_NOT_FOUND) {
+      return {
+        id: 3,
+        name: 'Info.plist 解析',
+        status: GATE_STATUS.BLOCKED,
+        reason: `${error.message}（输入路径不合法，门槛未执行）`,
+        hint: error.hint ?? null,
+        invalidInput: true,
+      }
+    }
     return {
       id: 3,
       name: 'Info.plist 解析',
       status: GATE_STATUS.FAIL,
-      reason: String(error),
+      reason: error instanceof Error ? error.message : String(error),
     }
   }
 }
@@ -378,6 +423,17 @@ export async function runSpike(input = {}) {
   const anyFail = gates.some((gate) => gate.status === GATE_STATUS.FAIL)
   const anyBlocked = gates.some((gate) => gate.status === GATE_STATUS.BLOCKED)
 
+  /*
+   * 输入路径不合法要单独拎出来。
+   *
+   * 它既不是「方向不成立」，也不是「环境不具备」——是我把路径写错了。
+   * 混进任何一种都会误导：前者会让用户放弃一个可能成立的方向，后者
+   * 会让用户去装 WSL2 而实际只需改一个字母。
+   */
+  const inputErrors = gates
+    .filter((gate) => gate.invalidInput === true)
+    .map((gate) => gate.reason)
+
   let conclusion
   if (anyFail) {
     conclusion = 'rejected'
@@ -388,6 +444,11 @@ export async function runSpike(input = {}) {
   }
 
   const notes = []
+  if (inputErrors.length > 0) {
+    notes.push(
+      `${String(inputErrors.length)} 条门槛因**输入路径不合法**而未执行（不是方向不成立）。` +
+      '先改正路径再重跑。')
+  }
   if (conclusion === 'unverified') {
     const blocked = gates.filter((gate) => gate.status === GATE_STATUS.BLOCKED)
     notes.push(
@@ -410,6 +471,8 @@ export async function runSpike(input = {}) {
     gates,
     conclusion,
     notes,
+    /** 输入路径不合法的门槛描述；非空时调用方应报「参数与输入错误」。 */
+    inputErrors,
     /*
      * 门槛 2 是决定性的，单独标出来。
      * 前端可以据此把它的状态放在最显眼位置。

@@ -964,9 +964,56 @@ def kill_prefix_processes(prefix: Path, *, timeout: int = 5,
     return True
 
 
+def run_in_prefix(prefix: Path, argv: list[str], *, timeout: int = 300,
+                  extra_env: dict[str, str] | None = None) -> InstallRun:
+    """在 prefix 内跑一条 wine 命令，返回结构化结果（不抛异常）。
+
+    这是 `wineboot_init` 的泛化版本：后者写死了 `wineboot -u`。层的
+    构建（装 wine-mono 的 msi、跑 fontreg）都需要「在指定 prefix 里
+    执行任意命令」，硬编码第二条会变成复制粘贴。
+
+    ## 参数是否已经在 wine 里
+
+    `argv` 里的**宿主路径必须自己先用 `_host_to_wine_path()` 转好**。
+    这里不做自动转换：命令里既有路径也有开关（`/qn`、`/i`），自动判断
+    「哪个参数是路径」必然误伤 —— 把 `/qn` 转成 `Z:\\qn` 这类错误不会
+    报错，只会静默失败。
+
+    @param prefix 目标 prefix（必须已存在）
+    @param argv 传给 wine 的参数，不含 wine 二进制本身
+    @param timeout 超时秒数，超时返回 `timed_out=True` 而不是抛异常
+    """
+    prefix = Path(prefix)
+    if not prefix.is_dir():
+        raise UsageError(f"prefix 不存在：{prefix}")
+
+    wine = wine_binary()
+    env = _wine_env(prefix, extra_env)
+    started = time.monotonic()
+    command = [str(wine), *argv]
+    try:
+        result = subprocess.run(command, capture_output=True, **TEXT_MODE,
+                                timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return InstallRun(returncode=-1, timed_out=True, command=command,
+                          duration=time.monotonic() - started)
+    return InstallRun(
+        returncode=result.returncode,
+        command=command,
+        duration=time.monotonic() - started,
+        stdout_tail=(result.stdout or "")[-2000:],
+        stderr_tail=(result.stderr or "")[-2000:],
+    )
+
+
 __all__ = [
     "BASE_WINE_ENV", "DEFAULT_TIMEOUT", "InstallRun",
     "silent_args_for", "default_install_dir", "run_install",
     "write_install_log", "suppress_restart", "wine_binary",
-    "wineboot_init", "kill_prefix_processes",
+    "wineboot_init", "kill_prefix_processes", "run_in_prefix",
+    "host_to_wine_path",
 ]
+
+#: 公开别名。**同一个对象**，不是副本 —— 两套判据必然漂移，
+#: 本项目已因同类问题出过事故（见 README 5.3 红线）。
+host_to_wine_path = _host_to_wine_path

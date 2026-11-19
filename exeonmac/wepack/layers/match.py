@@ -26,16 +26,22 @@ vcpp 层，除了多占磁盘、多花 clonefile 时间，没有任何作用。
 | VC++ 2005–2022 运行库 | ✅ 全部提供 | wine 内置 28 个文件 |
 | ATL | ✅ 提供 | `atl.dll` 等 6 个 |
 | **MFC** | ❌ **缺失** | 只有 `mfc140u` 之类才需要，且要用户自备 |
-| **.NET Framework** | ❌ 只有 `mscoree.dll` stub | 真跑 .NET 程序需要装 |
-| **中文字体** | ❌ `Fonts/` 为空 | wine 不带 Windows 字体 |
+| **.NET Framework** | ❌ 只有 `mscoree.dll` stub | 真跑 .NET 程序需要装（dotnet 层可自动构建，见下） |
+| 中文字体 | ⚠️ 渲染不缺，**依赖宿主** | `Fonts/` 为空，但 wineboot 已把宿主 882 条登记进注册表，其中 878 条指向 `Z:` 盘 —— 能显示，但产物换台机器就丢 |
 
 所以层定义要按**真实缺口**重写，而不是照抄「常见的 Windows 运行库清单」。
 
+**「中文字体是缺口」这条旧结论已于 2026-11-19 推翻**：`Fonts/` 目录为空是事实，
+但据此推断「中文渲染不出来」不成立。fonts-cn 层的真实定位是**固化字体、摆脱宿主
+依赖**（分发问题），不是「补上缺失的中文字体」（显示问题）。完整实测与那个「两段
+Fonts 相加得双倍」的计数陷阱见 `README.md` 4.2.1。
+
 ## 层的来源
 
-`vcpp` / `mfc` / `dotnet` / `fonts-cn` 都需要用户提供安装包或文件，
-本工具不代下载（离线原则，见 README 第十三节）。层目录不存在时
-匹配结果会明确标注 `missing`，由用户决定是补层还是接受降级。
+五个层里 `base` / `dotnet` / `fonts-cn` 可自动构建（离线原则下也不联网：
+dotnet 用运行时自带的 wine-mono MSI，fonts-cn 用用户指定的本地字体文件）；
+`mfc` / `vcpp` 不可自动构建 —— 前者无合法来源，后者 base 已内置。
+层目录不存在时匹配结果会明确标注 `missing`，由用户决定是补层还是接受降级。
 """
 
 from __future__ import annotations
@@ -145,27 +151,53 @@ class MatchResult:
 
 
 # --------------------------------------------------------------------------
-# base 层索引
+# 层内 DLL 索引
 # --------------------------------------------------------------------------
 
 
+def _windows_dll_stems(root: Path) -> set[str]:
+    """扫层内 `drive_c/windows` 下所有 DLL 名（小写、无后缀）。
+
+    **为什么是递归扫整个 `windows` 目录，而不是只看 `system32`**：
+    这里踩过两次坑，两次的后果都是「明明有，却报没有」：
+
+    1. **`syswow64` 被漏掉**。实测 base 层 `system32` 有 577 个 DLL、
+       `syswow64` 有 636 个，其中 **64 个只在 `syswow64` 里**（`d3d8`、
+       `commdlg`、`avifile`、`ctl3d` 等 32 位专用实现）。只扫 `system32`
+       时，一个 32 位程序的这些导入会被判成「无层可补」，而它其实就在层里。
+    2. **`Microsoft.NET/` 被漏掉**。dotnet 层的 `mscorlib.dll` 在
+       `drive_c/windows/Microsoft.NET/Framework/v*/` 下，不在 `system32`。
+       只扫 `system32` 时，一个引用 `mscorlib` 的 .NET 程序会被报成
+       「无层可补」，而 dotnet 层装了却等于没认。
+
+    `winsxs/` 也一并覆盖：实测 base 的 winsxs 里 13 个 DLL 全都同时存在于
+    `system32` 或 `syswow64`（独有 0 个），所以纳入不会改变任何判定结果，
+    但省掉「winsxs 会不会漏」这个需要反复复查的疑问。
+
+    @param root 层的根目录（含 `drive_c/windows`）；目录不存在返回空集
+    """
+    windows = Path(root) / "drive_c" / "windows"
+    if not windows.is_dir():
+        return set()
+    names: set[str] = set()
+    try:
+        for path in windows.rglob("*"):
+            if path.is_file() and path.suffix.lower() == ".dll":
+                names.add(path.stem.lower())
+    except OSError:
+        # 半途读不动（权限/坏链接）就返回已收集的部分。这是给人看的判据，
+        # 为个别读不到的文件让整个匹配失败，比少几个名字更糟。
+        return names
+    return names
+
+
 def base_dll_index() -> set[str]:
-    """base 层 `system32` 里已有的 DLL 名（小写、无后缀）。
+    """base 层已有的 DLL 名（小写、无后缀）。
 
     这是「已有什么」的唯一判据。不去查 wine 的 lib 目录，因为层才是
     真正会被挂进包里的东西 —— 判断依据必须和实际产物一致。
     """
-    system32 = layer_path("base") / "drive_c" / "windows" / "system32"
-    if not system32.is_dir():
-        return set()
-    names: set[str] = set()
-    try:
-        for child in system32.iterdir():
-            if child.is_file() and child.suffix.lower() == ".dll":
-                names.add(child.stem.lower())
-    except OSError:
-        return names
-    return names
+    return _windows_dll_stems(layer_path("base"))
 
 
 def _layer_dll_index(name: str) -> set[str]:
@@ -174,18 +206,7 @@ def _layer_dll_index(name: str) -> set[str]:
     优先读层内的实际文件；层未安装时退回 `BUILTIN_LAYERS` 的声明，
     这样「缺层」也能给出准确的 missing 提示，而不是含糊的「未知」。
     """
-    root = layer_path(name)
-    names: set[str] = set()
-    for sub in ("drive_c/windows/system32", "drive_c/windows"):
-        directory = root / sub
-        if not directory.is_dir():
-            continue
-        try:
-            for child in directory.iterdir():
-                if child.is_file() and child.suffix.lower() == ".dll":
-                    names.add(child.stem.lower())
-        except OSError:
-            continue
+    names = _windows_dll_stems(layer_path(name))
     if names:
         return names
     return {d.lower() for d in BUILTIN_LAYERS.get(name, {}).get("dlls", [])}

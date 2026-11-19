@@ -146,7 +146,7 @@ macOS 与 Windows 之间的应用互通，长期靠三类方案：虚拟机（Pa
 |---|---|---|---|
 | A · 预编译二进制重打包 | 下载框架官方 x86 预编译包，把用户项目塞进去，改名，NSIS 封装 | 原生窗口 | 已端到端实测：Electron 43、NW.js 0.90 |
 | B · Node 运行时 + 自建启动器 | 用 Node 官方 `win-x86` 承载逻辑，自写零依赖启动器拉起宿主、托管静态文件、开浏览器 | 浏览器界面 | 已端到端实测：空谷 Ondra（Tauri 项目） |
-| C · cargo-xwin 编译 Rust 壳 | `cargo xwin build --target i686-pc-windows-msvc` 在 mac 上编出真 Tauri 壳 | 原生窗口 | 代码就绪，本机因沙箱限制未跑通 |
+| C · cargo-xwin 编译 Rust 壳 | `cargo xwin build --target i686-pc-windows-msvc` 在 mac 上编出真 Tauri 壳 | 原生窗口 | 依赖树已验证可链接成 PE32/i386；完整项目卡在 `llvm-rc`（本机未装），见 15.10 |
 | D · 未走的路 | Wine 跑 makensis、Zig 交叉编译、Docker Windows 容器、自研 PE 链接器、换系统 WebView2 | — | 逐条记录了不走的理由 |
 
 **八阶段编排**：`preflight` → `project-build` → `runtime` → `collect` → `stage` → `manifest` → `package` → `verify`，任一阶段失败即停，后续阶段标 `skipped`。
@@ -276,15 +276,31 @@ MSI 的回退流程是三步：7-Zip 解出内嵌 `cab`、展开每个 `cab`、�
 | 结构解析 | 读 `.app` 目录、`Info.plist`、Mach-O 头 | 完成 |
 | 框架判定 | 从二进制与框架依赖推断技术栈 | 完成 |
 | 可移植性评估 | 三级结论 `likely` / `unlikely` / `unknown` | 完成 |
-| 可行性验证 | spike 三态：`pass` / `fail` / `blocked` | 完成（本机为 `blocked`） |
-| 命令行程序运行 | 加载与执行 | 待验证 |
-| GUI 程序运行 | AppKit 窗口 | 待验证（决定性门槛） |
+| 可行性验证 | spike 三态：`pass` / `fail` / `blocked` | 完成（本机结论：环境不具备） |
+| 命令行程序运行 | 加载与执行 | 未验证（门槛 1 `blocked`） |
+| GUI 程序运行 | AppKit 窗口 | 未验证（决定性门槛 2 `blocked`） |
 
 测试全部通过。`assess` 与 `parse` 是纯读操作，**任何平台都能跑**；只有 `spike` 需要真实的 Windows + WSL2 + Darling 环境。
 
 **spike 的门槛与结论语义**：三条门槛全过才继续。第 2 条（能加载最简 AppKit 窗口）是决定性的——不通过则 AppOnWin 降级为「兼容性评估工具」（只报能不能跑，不做运行），不再占主线顺位。环境不具备时结果是 `blocked` 而非 `pass`，**`blocked` 不等于 `pass`**，这一点在数据结构上就分开。
 
 **实测样本**：`Calculator.app` 的评估结果为 2 个二进制、21 个框架依赖、3 个 Darling 明确不支持。清单里没有的框架一律 `unknown`，不假设可用。
+
+**可行性结论（2026-11-19 实测）：环境不具备。**
+
+三位结论里落在第三档，既不是「成立」也不是「不成立」。依据是一次完整 `spike --app /System/Applications/Calculator.app --json` 的逐门槛状态：
+
+| 门槛 | 状态 | 出处 |
+|---|---|---|
+| 1 命令行 Mach-O | `blocked` | `probeWsl()` 返回 `available:false`，`reason` = 「宿主是 darwin，不是 Windows。WSL2 只在 Windows 上可用。」 |
+| 2 AppKit 窗口（决定性） | `blocked` | 同上门槛，未进入 `darling` 探测 |
+| 3 Info.plist 解析 | `pass` | 真实 `.app` 解析成功，定位到 `Calculator` 主二进制 |
+
+整体 `conclusion = unverified`，进程退出码 **5**。契约里 `5` = 「缺少外部依赖」，配对错误码 `AOW_2001`（`errorSegment: 2001/2002`），与 `exit-codes.json` 逐项一致。
+
+**为什么不写成「待定」。** 「待定」是一个没有信息量的状态：它不区分「试了但不行」和「没法试」。这两者对下一步动作的指向完全相反——前者应放弃或降级，后者只需换一台装有 Windows + WSL2 的机器。本机结论是后者，因此写作「环境不具备」。同理，**不能因为门槛 3 通过就写成「部分成立」**：门槛 3 只证明解析能力可用（`assess` / `parse` 本来就交付这个），它不依赖 Darling，对「能不能跑」没有证明力；三条门槛全过才算成立，缺一条就是未验证。
+
+**要变成「成立」还需什么**：一台 Windows 10+ 机器、启用 WSL2 并装一个发行版、在发行版内构建安装 Darling、准备一个可执行 Mach-O 样本（`--sample`）。四条缺一不可，详见 5.1.2。
 
 ### 3.5 共享契约层
 
@@ -308,6 +324,7 @@ MSI 的回退流程是三步：7-Zip 解出内嵌 `cab`、展开每个 `cab`、�
 | 汇总自检 | `doctor` 并行跑四个方向的 `doctor` | 完成 |
 | 契约检查 | `contract` 真实调用各方向，验证报告合规 | 完成 |
 | Web 看板 | 本地服务 + SSE 进度推送 + 历史落盘 | 完成 |
+| 视口实测 | `scripts/viewport-check.mjs` 起真实 Chrome 量三档视口（375 / 768 / 1440） | 完成 |
 
 测试全部通过。职责边界只有三件事：找到某方向的 CLI 起子进程调用、读回 `--report` 的 JSON 渲染、检查四个方向是否真的遵守契约。其中 17 项专门守「本模块的契约检查器与 `contracts/validate.mjs` 对同一份报告必须结论一致」—— 两个校验器各写一份实现，必然分叉，只是时间问题。
 
@@ -427,7 +444,9 @@ cargo xwin build --target i686-pc-windows-msvc --release
 → rsprobe.exe  92 KB  PE32 / i386 / windows-gui  入口点 69304  校验 ok
 ```
 
-**一个必须知道的坑**：`cargo xwin cache xwin` 只下载 `x86_64` 与 `aarch64` 的 CRT/SDK，不含 x86。直接 build 会报 `could not open 'user32.lib'`，而缓存里已有 `DONE` 标记导致重跑不补下。解法是设 `XWIN_ARCH=x86`——mac2win 已内置这个设置。
+**一个必须知道的坑**：`cargo xwin cache xwin` 只下载 `x86_64` 与 `aarch64` 的 CRT/SDK，不含 x86。直接 build 会报 `could not open 'user32.lib'`。
+
+设 `XWIN_ARCH=x86` **还不够**。这个变量只决定「该下载什么」，而 cargo-xwin 的缓存判据只看 `xwin/DONE` 的首行文本，从不校验文件是否真在磁盘上 —— 于是存在「`DONE` 写着 `x86`、`crt/lib/` 里只有 `x86_64`」的状态，此时重跑同一个命令仍然报同样的错。mac2win 的处理是两件事都做：build 时设 `XWIN_ARCH=x86`，预检时用 `x86-libs` 一项直接查磁盘（`crt/lib/x86`、`sdk/lib/um/x86`），不一致就在编译**前**报出来。详见 15.10.4。
 
 #### 亮点九：Electron 的 x86 上限用实测确定，不靠猜
 
@@ -486,6 +505,109 @@ cargo xwin build --target i686-pc-windows-msvc --release
 - **差异化**：多数工具直接取文件名或直接取版本资源。前者产生不可读路径，后者在版本资源缺失时无兜底。
 - **证据**：`Ondra-1.1.7-alpha-windows-x64-setup` → `Ondra`，`npp.8.6.9.Installer.x64` → `npp`，`MS-Office-setup` → `MS Office`。
 
+#### 亮点十五之二：入口判据只允许一份，`install` 与 `package` 必须给出同一个 exe
+
+- **价值**：`install` 找对了入口，`package` 又找一遍，两处判据不同 —— 结果就是**装什么软件，打包出来都指向同一个系统自带程序**。这类缺陷不会报错，`.app` 能双击、能启动、Dock 里有图标，只是打开的不是用户装的那个软件。
+- **实现方式**：判据整体收进 `wepack/entry.py` 一个模块，`cli._find_installed_entry` 与 `package._guess_entry` 都是它的别名或调用者。搜索顺序按「最可能是本次安装产物」排：`C:\Wacmin\<产品目录>` → `Program Files\<产品目录>` → `Program Files (x86)\<产品目录>` → `AppData\Local\<产品目录>` → 四者全盘兜底（兜底必须过文件名相关性闸门）。
+- **差异化**：`package` 早先的实现在 `Program Files*` 下取打分最高的 exe 就返回。打分器给「在 Program Files 下 +25」「GUI 子系统 +20」「有图标 +10」，base 层自带的 `wordpad.exe` 稳定拿 55 分，永远是第一名；而用户程序根本不在这两个目录里，压根不参与竞争。
+- **证据**：同一份 prefix（W02Probe 装到 `C:\Wacmin\w02\`）实测 — 修复前 `install` 得 `drive_c/Wacmin/w02/W02Probe.exe`、`package` 得 `drive_c/Program Files/Windows NT/Accessories/wordpad.exe`；修复后两者一致为前者，`node` 侧 6 项回归锁全部通过，且把旧实现注回去后立刻有 2 项变红。
+
+#### 亮点十五之三：`build --json` 只写一段 JSON，两半结果合成一份
+
+- **价值**：`build` 串联 `install` 与 `package`，两者各有一份 payload。早先直接把 `--json` 透传下去，stdout 上出现**两段**拼接的 JSON，`json.load` 抛 `Extra data: line 50 column 1` —— 读取方拿不到任何结果。
+- **实现方式**：子命令一律以 `json=False` 调用，它们的人类可读输出经 `_StdoutToStderr` 改道到 stderr；`build` 自己输出一份汇总，顶层含 `entry` / `layers` / `bundle_id`，`install` 与 `package` 两个子对象分装各自字段。
+- **差异化**：常见的处理是「`--json` 时每个子命令都输出、调用方自己拼」。这在 shell 里勉强能用（`jq -s`），但违背了 README 10.1「stdout 只有 JSON」的契约，也让 `--report` 的语义变模糊。
+- **证据**：`wepack build setup.exe -o out --json | jq -r .entry` 直接可得入口路径；单段性由 `raw_decode` 判段数的测试守住，多出第二段即红。
+
+#### 4.2.1 层的自动构建：五个层里三个能自动做，两个不能
+
+**结论表**（实测于 wine 11.21 / macOS arm64，2026-11-19）：
+
+| 层 | 自动构建 | 来源 | 卡点或说明 |
+|---|---|---|---|
+| `base` | ✅ | 跑一次 `wineboot -u` | — |
+| `dotnet` | ✅ | 运行时自带 `wine-mono-*/support/winemono-support.msi` | 装的是 wine-mono，**不是**微软 .NET Framework 本体 |
+| `fonts-cn` | ✅ | 用户指定的本地字体文件 | 见下文「一层被推翻的旧结论」 |
+| `mfc` | ❌ | — | wine 不实现 MFC，运行时内无任何 MFC 二进制，也无合法获取途径 |
+| `vcpp` | ❌ | — | base 的 `system32` 已含全部 28 个 VC++ 运行库，通常不需要 |
+
+**dotnet 层实测数据**：`wepack layers build dotnet` → 1851 文件 / 332.6 MB / 36 秒，`inspect_layer` 返回 `ok=True, problems=[]`。产物含 `Microsoft.NET/Framework/{v1.1.4322,v2.0.50727,v4.0.30319}/mscorlib.dll` 与 `Framework64` 对应版本。相对 base 的增量是 **61 个独有文件，其中 60 个在 `Microsoft.NET/` 下（5.4 MB）**。
+
+**这里有个容易写错的细节**：装完 MSI 后 `mscoree.dll` 与 base **完全相同**（md5 均为 `3f9d890657e3829cecf67735d9dade16`，大小均 196608 字节）。即 MSI **没有替换** wine 的 stub，真正的增量只有 `Microsoft.NET/` 目录。把 dotnet 层描述成「升级了 mscoree」是错的。
+
+**两条防线，防的都是同一类假成功**：
+
+1. `msiexec` 返回 0 之后，**必须验证** `Microsoft.NET/Framework` 目录存在且有 `*/mscorlib.dll`，否则抛 `VerifyFailed`。退出码 0 但什么都没装，在本项目已经出现过多次。
+2. 层已存在时**拒绝重建**（`UsageError`），不自动删除。用户可能往层里手工补过文件，静默覆盖等于毁掉他的劳动。
+
+**一层被推翻的旧结论：中文字体不是缺口**
+
+代码注释里原本写着「中文字体是真缺口：base 的 `Fonts/` 是空目录」。`Fonts/` 确实是空目录（实测 0 个文件），但**这个推理是错的** —— wine 并不只看那个目录：
+
+- `wineboot` 会把宿主系统字体以 `Z:\System\Library\Fonts\...` 的形式**自动登记**进 `system.reg` 的 Fonts 段。实测 base 层该段 **883 条**（去 `#time` 元数据为 882 条），其中 878 条指向 Z: 盘宿主路径；中文族按单段计 **PingFang 48 / Hiragino 22 / Songti 16 / Kaiti 14 / Heiti 10**。所以「中文渲染不出来」不成立。
+- **这里有一个必须点明的计数陷阱**：`system.reg` 里同时存在 `[Software\Microsoft\Windows\CurrentVersion\Fonts]` 与 `[Software\Microsoft\Windows NT\CurrentVersion\Fonts]` 两段，**实测两段键集合完全相同**（各 883 条，互不独有）。它们是同一份数据的两种写法，**不是两份字体**。把两段相加会得到「恰好翻倍」的假数字 —— 早前版本写下「PingFang 96 条、中文字体合计 254 条」正是这个算术，比真实值大一倍。只认 `Windows NT` 那一段。
+- 真正的缺口是**按 Windows 字体名查找**：`SimSun`、`Microsoft YaHei`、`SimHei`、`DengXian`、`MingLiU` 的精确名在 base 里**一条都没有**（实测全为 0）；`FontSubstitutes` 的 21 条（去 `#time` 后）里也没有任何中文映射。
+- `FontLink\SystemLink` 把 `Tahoma`（`MS Shell Dlg` 的替身）的后备链写成了 `SIMSUN.TTC` / `MSYH.TTC` 这些 Windows 文件名，而它们在层内不存在 —— 这条链在 base 上是断的。
+
+**所以 `fonts-cn` 层的定位是「固化字体、摆脱宿主依赖」，不是「补上缺失的中文字体」**。它把用户给的字体文件放进 `Fonts/` 随产物分发，让产物拷到另一台 Mac 上仍有字体。装进去的字体按自己的 family 名被识别，**不会**自动变成 SimSun —— 要把 `SimSun` 这类名字映射过去，靠的是另一条独立的链路（见下）。
+
+**补充：「按 Windows 名查找」这一问题已经有解，但不在本层**
+
+上面说的 `SimSun` 找不到，由 launcher 侧的字体替换解决，与 `fonts-cn` 层是两件事：
+
+| 环节 | 机制 | 位置 |
+|---|---|---|
+| 声明映射 | `compat.yaml` 的 `font_map`：`微软雅黑: PingFang SC`、`宋体: Songti SC` | 配方 |
+| 生成注册表 | 写 `Contents/Resources/Private/fontsub.reg`，往 `FontSubstitutes` 段加条目 | `launcher/Sources/main.swift:280-333` |
+| 生效 | 启动前跑 `wine regedit /S fontsub.reg`；失败只 WARN 不阻断启动 | 同上 |
+
+也就是说：`font_map` 解决「软件写死微软雅黑」的显示问题，`fonts-cn` 层解决「产物的字体不依赖宿主」的分发问题。两者互不替代，别指望装个层就自动有了名字映射。
+
+**同时纠正一个我自己写错的事实**：上一轮记录说「`fontreg` 注册了 4 条」，这是误读。`fontreg` 在 wine 11.21 里**根本不存在**：
+
+```
+$ wine fontreg
+Application could not be started, or no application associated with the specified file.
+ShellExecuteEx failed: File not found.        # 退出码 1
+```
+
+wine 是在启动时**直接扫目录**的，`WINEDEBUG=+font` 可直接佐证：
+
+```
+trace:font:unix_face_create unix_name .../drive_c/windows/fonts/WacminProbeCN.ttc, face_index 0..7
+trace:font:insert_face_in_family_list Original font L"\\??\\C:\\windows\\fonts\\Songti.ttc" is newer ...
+```
+
+一个 ttc 里的 8 个 face 全被枚举，`is newer so skipping` 证明层内字体真被加载。因此现在的实现**不跑任何注册命令**，只保证文件落地且可读 —— 少一个外部工具依赖，也少一处「退出码 0 但什么都没做」的假成功。
+
+**mfc / vcpp 的报错语义**（退出码按 `contracts/exit-codes.json`）：
+
+| 命令 | 异常 | 退出码 |
+|---|---|---|
+| `layers build mfc` | `MissingDependency`，附手工复制路径 | 5 |
+| `layers build vcpp` | `UsageError`，说明 base 已内置 28 个 | 2 |
+| `layers build 未知层` | `UsageError` | 2 |
+| `layers build fonts-cn`（无 `--font`） | `UsageError` | 2 |
+
+**测试**：`tests/test_phase7_layers.py` 共 **31 项**，其中 4 项真跑 wine（2 项端到端构建：dotnet 装 MSI、fonts-cn 落文件并校验 0644 权限；2 项对真实层跑匹配）。其余不需要 wine。四条替换为「注回缺陷即变红」已验证的用例：把 `host_to_wine_path` 从别名改成包装函数 → 别名同一性测试失败；把版本排序从元组改回字符串 → `11.3.0` 与 `9.10.0` 的排序测试失败（`'9' > '1'`，字符串排序会选错版本）；把 Fonts 段解析器改成「接受任意 Fonts 段」→ `TestFontsSectionCounting` 报 `888 != 883` 变红；把层 DLL 索引改回「只扫 `system32`」→ `TestLayerDllIndexCoverage` 与 `TestMatchAgainstRealLayers` 共 **5 项**变红，报 `['commdlg', 'd3d8'] != []`。
+
+**顺带修掉一个既有缺陷：层 DLL 索引漏了 `syswow64` 与 `Microsoft.NET/`**
+
+`match_layers` 判断「某个依赖有没有层能补」，靠的是扫层目录里实际有哪些 DLL。原实现只扫 `drive_c/windows/system32` 与 `drive_c/windows` 两层、且都不递归，于是漏掉两类真实存在的文件：
+
+| 漏掉的目录 | 实测规模 | 后果 |
+|---|---|---|
+| `drive_c/windows/syswow64` | 636 个 DLL，其中 **64 个只在 `syswow64`**（`d3d8` / `commdlg` / `avifile` / `ctl3d` …） | 32 位程序导入这些 → 报 `unsolved`「无层可补」，而它们就在 base 里 |
+| `drive_c/windows/Microsoft.NET/Framework/v*/` | `mscorlib.dll` 等 5 个 | 装了 dotnet 层，`mscorlib` 仍被判「无层可补」 |
+
+后果不是崩溃，是**误导**：`unsolved` 是让人去换方案、找替代品的信号，而实际上什么都不缺。实测修前：导入 `d3d8`+`commdlg` → `unsolved=['commdlg','d3d8']`；导入 `mscorlib` → `unsolved=['mscorlib']`。修后分别为 `[]` 与 `[]`（`mscorlib` 同时让 `layers` 从 `['base']` 变为 `['base','dotnet']`）。
+
+判据收进单个 `_windows_dll_stems(root)`，`base_dll_index()` 与 `_layer_dll_index()` 都调它 —— 不再各写一套（README 5.3 红线）。改递归扫 `windows/` 整棵树的代价实测 **23 ms**（dotnet 层 1294 个 DLL），可以忽略。
+
+一个必须如实记的边界：`system.dll` 在 base 与 dotnet 里**都不存在**（实测 `rglob('system.dll')` 两边均 0 个），所以引用它的程序仍报 `unsolved` —— 这是诚实的结论，不是缺陷。wine-mono 把大部分 BCL 打成单个 `mscorlib`，独立 `System.dll` 属微软原版布局。
+
+**2026-11-19 复核时抓到的文档错误（已修，记在这里防复发）**：本节原先写「中文字体合计 254 条（PingFang 96 / Songti 28 / Kaiti 28 / Heiti 20 / Hiragino 44）」，逐项实测后发现**每一项都恰好是真实值的两倍**。根因不是抄错数，而是把 `system.reg` 里那两个键集完全相同的 Fonts 段**相加**了。真实单段值：PingFang 48 / Hiragino 22 / Songti 16 / Kaiti 14 / Heiti 10。这类错误的危险在于「数字更大、列得更细，看起来更可信」，反而比明显的错更容易被接受。为此加了 3 项结构不变量测试（两段键集必须相同、解析器只取一段、中文字体条数不得等于各段之和），不背具体条数——宿主字体随系统版本变化，写死就会再漂。
+
 ### 4.3 Win2Mac
 
 #### 亮点十六：自研 zip 写入器，Unix 权限位越过 Windows 不丢
@@ -541,6 +663,26 @@ cargo xwin build --target i686-pc-windows-msvc --release
 | 前缀正则写成 `[A-Z]{2,4}` | 不认 `M2W` / `W2M` 里的数字 2 | 手写正则而非从契约读 |
 | 白名单漏了 `checks` | 合规报告被判为含未知字段 | 手写白名单与 schema 不同步 |
 | 白名单多了 `config` / `nextSteps` | 不合规报告被判为合规 | 同上 |
+
+#### 视口实测：一个曾经空转的检查脚本
+
+`style.css` 里有一段注释，说「注入 139 字符路径后，三档视口分别有 N 处溢出，加完这两条归零」。这句话最早**没有复现路径** —— 量出它的脚本没进仓库，等于没有证据。补 `console/scripts/viewport-check.mjs` 时才暴露出两个更根本的问题。
+
+**脚本本身不会说「我没测到」。** 它起真实 Chrome、渲染真实页面、注入长串、量矩形，然后退出 0。第一版跑出来是「三档全部 0 处溢出」—— 看起来完美。做负向验证（把 `overflow-wrap` 整组摘掉再跑）才发现**还是 0 处**：压测注入写的是「把页面上已有的 `.stage-msg` 文字改成长串」，而那些容器在页面刚加载时**全是空的**，阶段行要等用户点一次构建才会由 `app.js` 拼出来。对空集合赋值等于什么都没做。
+
+修法是不改文字、按 `app.js` 的真实 DOM 结构造节点，塞进真实容器。
+
+**只量元素外框会漏掉一半。** 修完注入后负向验证有了反应，但只有 375 档报溢出，768 与 1440 都报 0 —— 而宽屏下固定列更多、本该更糟。原因是 `.check` 的列宽被钉死 `grid-template-columns: 16px 200px 1fr`：塞一个 139 字符路径进去，**列宽一分不变，文字直接盖到相邻列上**，元素外框量出来完全正常。所以每条文本节点还要用 `Range.getClientRects()` 量**实际渲染的字形框**，那才是用户眼睛看到的边界。
+
+| 视口 | 基线 | 压测（规则在位） | 压测（规则摘掉） |
+|---|---|---|---|
+| 375 | 0 处 | 0 处 | 10 处 |
+| 768 | 0 处 | 0 处 | 1 处 |
+| 1440 | 0 处 | 0 处 | 1 处 |
+
+复现：`node console/scripts/viewport-check.mjs`（人读表格）、`--json`（stdout 只有 JSON）。退出码 `0` 无溢出 / `1` 有溢出 / `2` 找不到 Chrome —— 分开是因为这两种情况的处置完全不同，混成一个码会让人把环境问题当代码缺陷去查。
+
+这个脚本要跑十几秒、依赖本机装浏览器，不适合进 `npm test`。于是加 `console/test/viewport-check.test.mjs` 静态守三件最容易坏的事：压测串仍是 139 字符、测量同时覆盖外框与字形框、`style.css` 那组类仍带 `min-width: 0` 与 `overflow-wrap: anywhere`。第三条是真价值 —— 谁哪天顺手删了这两行，`npm test` 立刻红，而不是等用户在窄屏上发现路径被裁掉。
 
 ### 4.5 ai
 
@@ -605,6 +747,15 @@ Mac2Win  →  ExeOnMac  →  Win2Mac  →  AppOnWin
 
 **三态而非两态**：spike 的结果是 `pass`（实测通过）/ `fail`（实测失败）/ `blocked`（环境不具备，无法执行）。`blocked` **不等于** `pass`——把「没验」写成「通过」是这个项目最想避免的一类错误。
 
+**`blocked` 内部还要再分一层**（2026-11-19 补）：`blocked` 有两种成因，对用户的意义完全不同，因此 spike 额外输出 `inputErrors` 把它们分开。
+
+| 成因 | 例子 | 整体结论 | 退出码 |
+|---|---|---|---|
+| 环境不具备 | 宿主不是 Windows / 无 WSL2 / 无 Darling | `unverified` | 5 |
+| 参数写错 | `--app /nope.app` 路径不存在、`--sample` 指向不存在的文件 | `unverified` + 非空 `inputErrors` | **2** |
+
+分界线是「这条门槛有没有被执行过」：路径不存在时门槛根本没进入解析，谈不上失败；`fail` 的语义必须留给「真的跑了一次并失败」。早先这里把路径错误记成 `fail`，整体结论因此变 `rejected`，措辞是「本方向按设计降级为兼容性评估工具」——**用户只是少敲了一个字母，却被告诉方向被证伪了**；而同一个路径喂给 `assess` 得到的是退出码 2。同一份输入在两条子命令上给出两种含义，脚本无法据退出码分流。凡是「输入路径不合法」一律归退出码 2（配对 `AOW_1002`），与 `assess` / `parse` 保持一致。
+
 ### 5.2 契约层的设计
 
 #### 5.2.1 退出码的九种语义
@@ -630,11 +781,14 @@ Mac2Win  →  ExeOnMac  →  Win2Mac  →  AppOnWin
 | 1000 | 1001–1999 | 环境与输入 |
 | 2000 | 2001–2999 | 外部工具 |
 | 3000 | 3001–3999 | 运行时 |
-| 4000 | 4001–4999 | 构建与装配 |
-| 5000 | 5001–5999 | 打包 |
+| 4000 | 4001–4999 | 输入物处理 |
+| 5000 | 5001–5999 | 产物生成 |
 | 6000 | 6001–6999 | 产物校验 |
 | 7000 | 7001–7999 | 能力未实现 |
-| 9000 | 9001–9999 | 流程控制与内部错误 |
+| 9000 | 9001–9998 | 流程控制 |
+| 9999 | 9999 | 内部错误 |
+
+**九个段位，不是八个。** 这张表必须与 `contracts/error-prefixes.json` 的 `segments` 逐项一致——`9000` 的 `range` 止于 `9998`，`9999` 是独立一段。早先本文把两者合写成「`9000` / `9001–9999` 流程控制与内部错误」，而代码里 `9999` 是单独一段：后果是 `validate.mjs` 的 `segmentOf()` 按 `range` 实际区间判归属，文档却让人以为 `9999` 属于 `9000` 段，读文档去查校验器行为必然对不上。
 
 各方向在自己的 errors 模块里定义具体码，但**段位不可越界**。`4xxx` 永远是输入物处理，不会因为某个方向的特殊需要变成别的含义。
 
@@ -1058,7 +1212,7 @@ Server-Sent Events 是单向流，三个边界情况必须处理：
 
 三件事都要成立：help 写的选项解析器都认、解析器认的选项 help 都写了、拼错的子命令明确报错而不是被当成路径。
 
-每条都有测试守着（各方向的 `test/help.test.mjs`），因为这类偏差不会崩溃——只会让人白花时间。已踩过的实例见 18.5。
+每条都有测试守着（三个 Node 方向是 `test/help.test.mjs`，ExeOnMac 在 `tests/test_phase0.py` 的 `TestCLIContract` 与 `test_phase6.py` 里），因为这类偏差不会崩溃——只会让人白花时间。已踩过的实例见 15.3。
 
 **顺带修掉的一处行为缺陷**：`win2mac biuld ./proj` 与 `apponwin asseess` 早先都不识别为「未知子命令」——前者报「项目目录不存在」把人引去查路径，后者更糟，打印一大段帮助后以**退出码 0** 结束，脚本里 `|| exit 1` 完全拦不住。
 
@@ -1163,7 +1317,7 @@ Mac2Win 在打包时会把目标框架的 **Windows x86 预编译运行时**纳�
 
 ### 6.4 间接依赖与传递依赖
 
-**本项目自身不存在传递依赖**——仓库内七个模块（五个方向、`console`、`ai`、`contracts`）均不引入 npm / PyPI 包，因此没有「A 依赖 B、B 依赖 C」的链条。
+**本项目自身不存在传递依赖**——仓库内七个模块（四个方向、`console`、`ai`、`contracts`）均不引入 npm / PyPI 包，因此没有「A 依赖 B、B 依赖 C」的链条。
 
 **运行时层面存在间接依赖**，由上游构建方打包，本项目不拆分、不修改。逐项说明见 [`NOTICE`](./NOTICE) 第六章，此处不复述。需要提前知道的一点：Electron / NW.js / Node.js 内含 Chromium / V8 / libuv，Wine 内含 FreeType / libpng / MoltenVK，这些组件的许可证随上游包分发，本项目不修改它们。
 
@@ -1185,7 +1339,7 @@ Mac2Win 在打包时会把目标框架的 **Windows x86 预编译运行时**纳�
 **结论：本仓库不含任何字体文件，也不含任何图标素材。** 逐项权责归属见 [`NOTICE`](./NOTICE) 第九章，此处只说三件最容易被误解的事：
 
 - **ExeOnMac 会提取图标，但图标不进仓库**。提取对象是用户提供的 Windows 安装包，结果只写进该用户本地的 `.app`，不随本项目分发。
-- **中文字体要用户自己放**。本项目不附带商业字体、不提供字体下载；用户若把微软雅黑、宋体放进共享层，许可责任在用户。
+- **中文字体要用户自己放**。本项目不附带商业字体、不提供字体下载；用户若把微软雅黑、宋体放进共享层，许可责任在用户。注意这只是为了**让产物不依赖宿主字体**——中文在 base 上本来就能显示，`wineboot` 已把宿主的中文族字体（PingFang / Hiragino / Songti / Kaiti / Heiti 等，单段计 110 条）登记进注册表（[4.2.1](#421-层的自动构建五个层里三个能自动做两个不能)）。要让软件写死的「微软雅黑」正确显示，靠的是 `font_map` 而非字体文件。
 - **Win2Mac 不生成图标是合法状态**。`--icon` 接受用户提供的 `.icns`，不给就不生成，产物仍可正常分发。
 
 控制台与看板的全部视觉元素由 CSS 绘制，没有位图、没有 SVG 素材、没有 icon font。
@@ -1405,9 +1559,11 @@ python3 -m wepack.cli extract ~/Downloads/setup.exe -o /tmp/out
 # ④ 安装并产出 .app
 python3 -m wepack.cli install ~/Downloads/setup.exe -o "~/Applications/MyApp (Win).app"
 
-# ⑤ 查看结果
-open "~/Applications/MyApp (Win).app"
+# ⑤ 查看结果（引号里的 ~ 不会被 shell 展开，因此这里写 $HOME）
+open "$HOME/Applications/MyApp (Win).app"
 ```
+
+`install` 的 `-o` 由 wepack 自己 `expanduser()`，所以上面 ④ 的 `"~/Applications/..."` 能被正确解析；但 `open` 是 shell 内建之外的独立进程，引号里的 `~` 原样传过去，实测报 `~/Applications/... does not exist`。
 
 `install` 命令完成后会输出：
 
@@ -1531,7 +1687,7 @@ node ai/bin/wacmin.mjs contract                      # 四方向契约合规检�
 | 文件 | 内容 | 改动规则 |
 |---|---|---|
 | `contracts/exit-codes.json` | 九种退出码的语义与每个码允许的错误码段 | **只追加，不改含义**。已发布的码值一旦改动，所有依赖它的脚本都会失效 |
-| `contracts/error-prefixes.json` | 四个方向的错误码前缀（`M2W` / `EOM` / `AOW` / `W2M`）与七段位分配 | 段位不可越界；新增方向须先在此登记前缀。`WAC`、`CNT` 保留 |
+| `contracts/error-prefixes.json` | 四个方向的错误码前缀（`M2W` / `EOM` / `AOW` / `W2M`）与九段位分配 | 段位不可越界；新增方向须先在此登记前缀。`WAC`、`CNT` 保留 |
 | `contracts/run-report.schema.json` | `--report` / `--json` 的输出结构 | 破坏性变更须升 `schemaVersion`，`console` 据此分支 |
 
 `contracts/validate.mjs` 是这三个文件的自检器，同时校验契约本身与单份报告：
@@ -1681,7 +1837,7 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 │   ├── vcpp/            # VC++ 运行库（可选，仅用于覆盖成微软原版）
 │   ├── mfc/             # MFC 运行库（base 不含，需用户提供）
 │   ├── dotnet/          # .NET Framework（需用户提供）
-│   └── fonts-cn/        # 中文字体（base 的 Fonts 为空，需用户提供）
+│   └── fonts-cn/        # 固化用户字体，脱离宿主依赖（中文渲染本身不缺口）
 ├── runtime/
 │   └── wine/            # Wine 运行时（x86_64）
 └── logs/
@@ -1785,9 +1941,22 @@ wepack recipe rm <key>                # 删除配方（移到废纸篓，可恢�
 | 统一入口 | `wacmin-console` | `list` / `run` / `doctor` / `contract` / `web` |
 | AI 统一入口 | `wacmin` | `list` / `status` / `run` / `doctor` / `contract` / `mcp` / `skill` |
 
-**通用选项**（四个方向一致）：`--json` 输出机器可读结果、`--report` 输出统一运行报告、`--verbose` 输出调试级日志、`-h/--help`、`-v/--version`。
+**通用选项**（四个方向一致）：`--json` 输出机器可读结果、`--report` 输出统一运行报告、`--verbose` 输出调试级日志、`-h/--help`、`--version` 输出版本。
+
+**`-v` 的语义在四个方向上并不一致，这一条不能当成通用选项**：`mac2win` / `win2mac` / `apponwin` 的 `-v` 是 `--version` 的短名，`wepack` 的 `-v` 是 `--verbose` 的短名（`--version` 只有长名，且是顶层参数，不能跟在子命令后）。所以脚本里要取版本请统一写 `--version`；写 `-v` 时在 `wepack` 上会打开调试日志、在其余三个上会打印版本号。这条差异来自各自解析器（Node 侧手写 argv vs Python 的 `argparse`），本文件不强行统一，只要求**别用 `-v` 取版本**。
 
 **`--json` 与 `--report` 的关系**：`--report` 的输出即 `contracts/run-report.schema.json` 定义的结构；`--json` 在部分方向上是它的别名或子集。两者的共同约束是 **stdout 只有 JSON，日志一律走 stderr**，因此管道可以直接把 stdout 交给 `jq`。
+
+**`apponwin spike` 的退出码有四档，比通用四档多一档退出码 2 的输入错误分支**：
+
+| 退出码 | 触发条件 | 配对错误码 |
+|---|---|---|
+| 0 | 三条门槛全部 `pass`（`accepted`） | — |
+| 1 | 至少一条门槛 `fail`（`rejected`，方向不成立） | `AOW_9999` |
+| 2 | `--sample` / `--app` 指向不存在的路径（门槛未执行，`inputErrors` 非空） | `AOW_1002` |
+| 5 | 环境不具备导致 `blocked`（`unverified`） | `AOW_2001` |
+
+`2` 与 `5` 必须分开：前者是用户改一个路径就能继续，后者是得换机器。混成同一码会让 CI 把「路径打错」记成「缺依赖」，进而触发一次毫无意义的 WSL2 安装。
 
 **ExeOnMac 的失败输出格式**：
 
@@ -1846,7 +2015,9 @@ wepack recipe rm <key>                # 删除配方（移到废纸篓，可恢�
 
 **权重为什么不平均**：进度条若按阶段数平均，打包（占总耗时一半以上）只占 1/8，用户会看到进度条卡在 87% 不动。按预期耗时加权后，进度曲线与实际耗时大致同形。
 
-**ExeOnMac 的八阶段**：`detect` → `mkdir` → `prefix` → `install` → `scan` → `package` → `register` → `write`。与 Mac2Win 的八阶段同构，区别在于第 3 步是建 Wine prefix 而非准备 Node 运行时。
+**ExeOnMac 的八阶段**（与 `wepack/report.py` 的 `STAGES` 逐一对应）：`preflight` → `detect` → `extract` → `prefix` → `install` → `scan` → `package` → `verify`。与 Mac2Win 的八阶段同构，区别在于第 2 步识别的是安装器而非项目、第 4 步建的是 Wine prefix 而非准备 Node 运行时。
+
+**同一子命令不跑全部八阶段，其余阶段标 `skipped`**。`detect` 只跑 `preflight` 与 `detect`；`extract` 跑到 `extract` 为止（install 之后的阶段与它无关）；`install` 跳过 `extract`（安装不需要先解包）与 `package` / `verify`；`package` 跳过前六个，只跑 `package` 与 `verify`。报告里不出现「全灰」的假象，也不把没跑的阶段算进耗时。
 
 ### 10.4 本地 HTTP 接口
 
@@ -1989,7 +2160,9 @@ Wacmin/
 │   ├── error-prefixes.json    错误码前缀与段位分配
 │   ├── run-report.schema.json --report / --json 输出结构
 │   ├── validate.mjs           契约自检 + 报告校验
-│   └── validate.test.mjs      校验器自身的测试
+│   ├── validate.test.mjs      校验器自身的测试
+│   ├── doc-counts.mjs         12.1 测试计数表的唯一读取点（--check / --min / --list）
+│   └── doc-counts.test.mjs    计数表与两版 README 的一致性守卫
 ├── mac2win/                   方向一 · 在 macOS 上产出 Windows 安装包
 │   ├── bin/mac2win.mjs        单命令入口
 │   ├── src/                   核心实现
@@ -2013,6 +2186,8 @@ Wacmin/
 │   │   ├── layers/            层构建与导入表匹配
 │   │   ├── package/           .app 装配、图标、launcher 编译、校验
 │   │   ├── recipes/           compat.yaml 读写与配方库
+│   │   ├── entry.py           主程序入口判据（install 与 package 共用的唯一一处）
+│   │   ├── report.py          统一运行报告与八阶段记录
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher（AppKit + Foundation）
 │   ├── tools/badge.swift      图标角标合成
@@ -2032,6 +2207,7 @@ Wacmin/
 │   └── package.json
 ├── console/                   四方向统一入口（CLI + Web 看板）
 │   ├── bin/wacmin-console.mjs 可执行入口（薄壳，只解析 argv 与打印）
+│   ├── scripts/               viewport-check.mjs（三档视口实测）
 │   ├── src/                    directions.mjs / server.mjs / contract-check.mjs
 │   ├── web/
 │   ├── test/
@@ -2222,14 +2398,14 @@ $INSTDIR/
 
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
-| mac2win | 132 项 | 约 30 秒 | |
-| exeonmac | 416 项 | 约 5 分钟 | 含现场编译 NSIS / Inno 样本与 3 项真实 wine 安装 |
-| win2mac | 121 项 | 约 2 秒 | |
-| apponwin | 91 项 | 约 0.5 秒 | |
-| console | 215 项 | 约 11 秒 | |
+| mac2win | 167 项 | 约 28 秒 | |
+| exeonmac | 453 项 | 约 4 分钟 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
+| win2mac | 130 项 | 约 2 秒 | |
+| apponwin | 96 项 | 约 0.5 秒 | |
+| console | 230 项 | 约 19 秒 | |
 | ai | 132 项 | 约 9 秒 | |
-| contracts | 58 项 | 约 2 秒 | 含 15 项文档计数自检 |
-| **合计** | **1165 项** | — | 见下文「全仓 0 跳过」|
+| contracts | 79 项 | 约 2 秒 | 含 15 项文档计数自检 |
+| **合计** | **1287 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -2421,8 +2597,8 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 | 项目 | 状态 | 原因 |
 |---|---|---|
-| 产物代码签名 | 未实现 | 需 Windows EV 证书与 `signtool`，在 macOS 上无法完成 |
-| 产物公证（notarization） | 未实现 | Win2Mac 产物未签名，公证以签名为前提 |
+| 产物代码签名 | 未实现 | 缺证书，不缺工具。瓶颈是 CA/B Forum 要求私钥必须存于 FIPS 140-2 L2+ 硬件且不可导出——与操作系统无关，换 Windows 也一样。`osslsigncode` 可在 macOS 本地签 `.exe`。见 15.11 |
+| 产物公证（notarization） | 未实现 | 需 Apple Developer ID（$99/年）与 `notarytool`，后者确为 macOS 独占。**ExeOnMac 另有架构级障碍**：wine prefix 位于 bundle 内且被原地读写，签名会破坏资源封印。见 15.11.3 |
 | 本地服务鉴权 | 未实现 | 只绑回环地址 + `Origin` 校验已覆盖威胁模型；加鉴权会让命令行触发变复杂而无实际收益 |
 | 传输层加密 | 未实现 | 本地回环通信，加密无意义 |
 | 供应链签名验证 | 仅 Node.js 有 | 见 13.2，其余上游不提供可用清单 |
@@ -2485,7 +2661,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 限制 | 原因 | 有无绕过方案 |
 |---|---|---|
 | Mac2Win 的 Electron x86 只到 v43 | 官方从 v44 起不再发布 `win32-ia32` 预编译包 | 无。要更高版本只能放弃 x86 目标 |
-| Mac2Win 产物无代码签名 | 需 Windows EV 证书与 `signtool`，两者都不能在 macOS 上完成 | 可在 CI 侧用 Windows runner 补签 |
+| Mac2Win 产物无代码签名 | 缺证书（私钥须存于 FIPS 140-2 L2+ 硬件，与 OS 无关），不缺签名工具 | 可用 `osslsigncode` 在 macOS 本地签，或 CI 侧用 Windows runner 的 `signtool`。见 15.11 |
 | Mac2Win 不支持原生模块（`.node`） | 编译好的机器码与 OS/CPU 绑定 | 换纯 JS 替代包；mac2win 会在依赖收集阶段拦下并指出是哪个包 |
 | Mac2Win 不能在 mac 上打 macOS 包给 Windows 用 | 平台二进制格式不同（Mach-O vs PE），且需对应平台 SDK | 无。用对应平台构建 |
 | Mac2Win 不能在 mac 上打 Linux 包 | 需要 Linux 的 glibc 与 ELF 工具链 | 可用 Docker，但不在本项目范围 |
@@ -2554,9 +2730,9 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 **Mac2Win**
 
 1. **Electron 版本上限是 43**。这是官方发布策略决定的硬边界，不是本项目能绕过的。
-2. **产物无代码签名**。`.exe` 会触发 SmartScreen 警告，只能建议用户点「更多信息 → 仍要运行」。签名需 Windows EV 证书与 `signtool`，无法在 macOS 上完成。
+2. **产物无代码签名**。`.exe` 会触发 SmartScreen 警告，只能建议用户点「更多信息 → 仍要运行」。签名缺的是证书而非工具——`osslsigncode` 在 macOS 上可直接签 PE，`brew install osslsigncode` 即可。证书侧受 CA/B Forum 硬件密钥要求约束（与 OS 无关）。见 15.11。
 3. **原生模块不支持**。`.node` 文件是编译好的机器码，与 OS/CPU 绑定。依赖收集阶段会拦下并指出是哪个包。
-4. **Tauri Rust 壳端到端未经本机实测**。代码已实现（`src/core/rust-shell.mjs`），预检与配置已接通，但本机因沙箱限制未能完成 LLVM 安装。`rsprobe.exe` 的编译验证证明「arm64 macOS 能产出 Windows x86 原生 GUI 程序」，但完整的 Tauri 项目未经端到端验证。
+4. **Tauri Rust 壳的链路已验证到「依赖树能链接成 PE」，但完整项目仍卡在 `llvm-rc`**。代码已实现（`src/core/rust-shell.mjs`），预检与配置已接通。2026-11-19 实测修正了此前两处错误归因：卡点**不是**「沙箱限制装不上 LLVM」，也**不是**「arm64 mac 编不了 i686」。真实情况是 —— Rust 链与 tauri 2.12.7 的整棵依赖树在 arm64 macOS 上都能编成 `PE32/i386`（实测 `linkprobe.exe` 1096192 字节）；完整项目卡在 `tauri-winres` 要 `llvm-rc` 编资源节，而**本机未装**该组件（属改变开发环境的操作，未自动执行）。详见 15.10。
 5. **x64 目标是后加的**。三处写死 x86 的地方（运行时文件名、缓存目录、架构断言）已修正，但 x64 路径的实测覆盖面小于 x86。
 6. **`--target x64` 的产物外壳仍是 i386 桩程序**。这不是缺陷：NSIS 编译出的 exe 永远是 32 位安装器，能在所有 Windows 上运行。校验规则已按此区分「外壳」与「载荷」。
 
@@ -2570,7 +2746,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 6. **静默安装失败后不自动回退交互模式**。`--interactive` 需用户显式指定。理由：自动回退会弹出窗口打断批处理，且用户可能不在机器前。
 7. **重启拦截是「假装成功」**。真正需要重启才生效的安装（罕见）会表现为「装完了但跑不起来」，需人工排查。
 8. **运行时下载不校验签名**，只校验下载完整性。安全敏感场景用 `--archive`。
-9. **只有 base 层能自动构建**。mfc / dotnet / fonts-cn 需用户自备文件。
+9. **base / dotnet / fonts-cn 三层都能自动构建**。mfc 与 vcpp 仍不可（前者无合法来源，后者 base 已内置）。详见 [4.2.1](#421-层的自动构建五个层里三个能自动做两个不能)。
 10. **层匹配只看静态导入表**。`LoadLibrary` 动态加载的 DLL（插件架构、延迟加载）扫不到，这类程序需手动加层。
 11. **未处理多显示器 / HiDPI 缩放下 Wine 窗口的坐标映射**。
 12. **无图标资源时用占位图**（蓝底白 W）。产物合法可分发，但外观不还原。
@@ -2587,15 +2763,89 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 **AppOnWin**
 
 1. **是最大不确定项**。Darling 官方仅支持 Linux，Windows 需经 WSL2，GUI 支持被上游标注为实验性。若 spike 第 2 条不通过，将降级为兼容性评估工具。
-2. **当前宿主不是 Windows + WSL2 时，spike 三条门槛报「未验证」而非「通过」**，结论不能据此认为方向可行。
+2. **本机结论是「环境不具备」，不是「不成立」**（2026-11-19 实测，见 3.4）。门槛 1 与 2 因宿主非 Windows 而 `blocked`，门槛 3 通过；整体 `unverified`、退出码 5。这个结论既不能当成通过，也不能当成证伪——它只说明本机没法验。
 3. **框架清单不完整**。清单里没有的框架一律 `unknown`，不假设可用。
+4. **`spike` 的 `blocked` 分为两种成因**：环境不具备（退出码 5）与输入路径写错（退出码 2，`inputErrors` 非空）。两者不可混用；混用会让「路径打错」升级成「方向被证伪」。
 
 **console**
 
 1. **Web 看板只绑 `127.0.0.1`**，不提供远程访问。这是刻意的安全取舍。
 2. **历史只保留最近 20 次**，不提供归档与导出。
 
-### 15.2 文档与实现的三次偏离
+### 15.2 真机运行链路的实测结论（2026-11-19）
+
+这一节回答一个只能靠跑才能回答的问题：**没有 wine 时会怎样，有 wine 时能不能真的把 Windows 程序跑起来**。两者都必须有实测，不能靠推断。
+
+**环境事实**：本机装有 `wine-11.21`（x86_64，经 Rosetta 2），来自 `wepack runtime install --archive`。`which wine wine64` 在系统 PATH 里查不到 —— 这不是缺陷，运行时由 `wepack` 自己托管在 `~/Library/Application Support/wexe/runtime/wine/`，不污染系统 PATH。
+
+**① 无 wine 分支（降级路径）**
+
+`wine_binary()` 依序找托管运行时 → PATH，两处都没有才抛 `MissingDependency`。CLI 层捕获后退出码 5（`contracts/exit-codes.json` 的「缺少外部依赖」），错误段位 `EOM_2001`（2xxx「外部工具」）。测试覆盖在 `tests/test_phase2.py::test_install_without_wine_fails_clearly`（断言退出码恰为 5 且 payload 的 `error` 含 `wine`）与 `test_phase0.py::test_install_requires_wine_runtime`。三条路径（install / build / layers match）共用这一个判据，不各写一套。
+
+**② 有 wine 时的一次端到端封装（本机实测，非推断）**
+
+样本现场编译：`makensis` 编一个 NSIS 安装包，载荷 15 个文件 / 2.2 MB（含一个真实的 `PE32+ GUI x86-64` 主程序）。走 `wepack build` 一键流程：
+
+| 阶段 | 实测结果 |
+|---|---|
+| 识别 | `kind=nsis`，置信度落在 NSIS 分支 |
+| prefix 创建 | clonefile 复制 base 层 1858 个文件，亚秒级 |
+| wineboot | `code=0`，11.5 秒 |
+| 静默安装 | `code=0`，6.6 秒，净增 12 个文件 / 2.1 MB |
+| 入口探测 | `drive_c/Wacmin/<app>/<App>.exe` |
+| 装配校验 | 10 / 10 项通过，`lsregister` 注册成功 |
+| **启动** | launcher → wine → 主 exe 进程存活（`pgrep` 可见 pid），`wine-<app>.log` 只剩 MoltenVK 图形层日志，无 `ShellExecuteEx failed` |
+
+启动这一步是本轮唯一的**新证据**：早先只验到「产物结构合法」，没验到「双击能起进程」。第一次用自制的最小 PE（只有 DOS 头 + 可选头，无节表）时 wine 报了 `Application could not be started / ShellExecuteEx failed: Bad format` —— **这是样本的问题，不是工具的问题**：那个 PE 缺节表，Windows 加载器同样会拒绝。换成 wine 自带的真实 `notepad.exe` 作载荷后一次通过。这条经验值记下来：**验证运行链路时，载荷必须是真实可执行的 PE，最小 PE 头只能验「文件格式被识别」，验不了「能不能跑」**。
+
+**③ 修掉的两个真实缺陷**
+
+这次实测暴露了两个此前所有测试都没抓到的缺陷，都不是本轮引入的：
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `package` 阶段的 `_guess_entry` 与 `install` 的 `_find_installed_entry` 是**两套判据** | 装任何软件，打包出来都指向 base 层自带的 `wordpad.exe` —— `.app` 能双击、能起进程，只是打开的不是用户装的东西 | 判据收进 `wepack/entry.py` 一处，两处都调它（README 5.3 的红线） |
+| 2 | `build --json` 把 `--json` 透传给 `install` 与 `package`，两者各写一份 payload | stdout 上是两段拼接 JSON，`json.load` 抛 `Extra data` —— 调用方拿不到任何结果 | 子命令一律 `json=False`，人类可读输出改道 stderr；`build` 自己输出一份汇总 |
+
+两个缺陷的共同点值得记：**它们都不报错**。缺陷 1 的产物能启动，缺陷 2 在终端里看着像正常输出。这类「静默地做错事」只能靠端到端实测抓，单元测试各自绿着也发现不了 —— 因为每一段单独看都是对的。
+
+**④ 仍未验证的部分**
+
+- **`wine` 不在系统 PATH 时 `runtime status` 的提示语气**：已在测试里覆盖，但没人工读过措辞是否足够可操作。
+- **不同 Wine 版本的行为差异**：只测了 11.21。README 14.2 的版本要求来自上游文档，不是本机矩阵实测。
+- **图形窗口的实际渲染**：本机是无人值守运行，只验证了进程存活与日志无错，没有人工确认窗口内容。这是本轮的诚实边界，不写成「已验证」。
+
+### 15.2.1 AppOnWin 可行性结论的实测记录（2026-11-19）
+
+3.4 给的是结论，这里给的是**跑出结论的那一次**，以及它顺带暴露的一个缺陷。
+
+**实跑命令与输出**（本机为 macOS arm64，无 WSL2）：
+
+| 命令 | 结论 | 退出码 |
+|---|---|---|
+| `node apponwin/bin/apponwin.mjs spike --json`（无样本） | `unverified`，3 条门槛全 `blocked` | 5 |
+| `node apponwin/bin/apponwin.mjs spike --app /System/Applications/Calculator.app --json` | `unverified`，门槛 1/2 `blocked`、门槛 3 `pass` | 5 |
+| `node apponwin/bin/apponwin.mjs assess /System/Applications/Calculator.app` | `较不可能运行`：2 个二进制 / 21 个框架 / 3 个 Darling 明确不支持 / 12 个 `unknown` | 0 |
+
+门槛 3 通过这件事本身值得单独说：它证明的是**解析能力**（`assess` / `parse` 本来就交付这个），而它不依赖 Darling，所以对「能不能跑」零证明力。**三条门槛全过才算成立，缺一条就是未验证** —— 「过去两条中一条」不构成「部分成立」，这个中间态不存在。
+
+**顺带抓到的缺陷：`spike` 把「路径打错」判成「方向被证伪」**
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `spike --app /nope.app` 结论 | `rejected` | `unverified` + `inputErrors` 非空 |
+| 该门槛状态 | `fail` | `blocked` + `invalidInput: true` |
+| 退出码 | **1** | **2** |
+| 用户看到的措辞 | 「本方向按设计降级为兼容性评估工具」 | 「1 条门槛因输入路径不合法而未执行（不是方向不成立）。先改正路径再重跑。」 |
+| 同一路径喂 `assess` | 退出码 2（`AOW_1002`） | 退出码 2（不变） |
+
+根因是门槛 3 的 `catch` 把 `BuildError(INPUT_NOT_FOUND)` 和真正的解析失败一起记成 `fail`，而 `fail` 一旦出现，整体结论就必然是 `rejected`。**`fail` 的语义必须留给「真的跑了一次并失败」**；路径不存在时门槛压根没进入解析，那是「我不知道」，属 `blocked`。
+
+修的时候还发现第二层：门槛 1 原来先探环境再验样本路径，于是环境缺失时（本机就是）用户永远看不到「你的 `--sample` 写错了」这条最该先看到的提示。已把路径校验提到环境探测之前 —— **参数错误在任何机器上都该报出来，与这台机器装没装 WSL2 无关**。
+
+回归锁在 `apponwin/test/spike.test.mjs`：新增「输入路径不存在时整体结论是 unverified 且标出 inputErrors」「Mach-O 样本路径不存在时该门槛是 blocked 而不是 fail」「输入路径正确但命中环境缺失时不算 inputError」三条，另把原「路径不存在时 fail」这条**错误断言**改为断言 `blocked`。负向验证：把旧实现注回 `spike.mjs` → 2 项立刻变红（`not ok 26` / `not ok 27`）；还原后 94/94 全绿。
+
+### 15.3 文档与实现的三次偏离
 
 这一节记录三处真实发生过的「文档说的和代码做的不一样」。写下来不是为了追责，是因为这三处都属于**不会崩、只会让人白花时间**的那一类，最容易被一次次放过。
 
@@ -2611,9 +2861,67 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 另外三个方向的帮助里都有「`--report` 输出统一运行报告」。统一报告契约是四个方向共用的核心机制，唯独一个方向没在帮助里露出。
 
-除了「漏写」，还有一类反向问题——**help 承诺了但代码没实现**（早先 `--no-package` 就是这样）。两个方向都要守，所以各方向的 `test/help.test.mjs` 是双向断言的。
+#### 15.3.1 文档侧的系统性巡检（2026-11-19）
 
-### 15.3 校验器说谎的那一次
+上面三处是「撞见才发现」的。2026-11-19 做了一次**机械化**的巡检：把 README 里 42 个 shell 代码块中的 267 行命令抽出来，去重得 31 条可执行的唯一命令；对其中**只读与自检类**逐条实跑，对**需要真实产物或 Windows 宿主**的只核对 help 与代码路径（两类清单见本节末，不混为一谈）；表格里的数字一律与代码里的常量逐项对账。
+
+**结果：9 处文档与实现不一致，全部已修。** 这些都属于「读文档的人会照着做，但做不成或看到的东西不一样」的类型。此外还有 4 处目录树漏项与 1 处失效锚点，一并修正，见本节末。
+
+| # | 位置 | 原文 | 实测 | 性质 |
+|---|---|---|---|---|
+| 1 | 5.2.2 段位表 | 8 行，`9000` 写 `9001–9999`、含义写「流程控制与内部错误」 | `error-prefixes.json` 有 **9 个段位**：`9000` 是 `9001–9998`（流程控制），`9999` 是独立的 `9999`（内部错误） | 数量与区间都错。`validate.mjs` 的 `segmentOf()` 按 `range` 判归属，照文档理解必然对不上 |
+| 2 | 9.1 契约文件表 | 「七段位分配」 | 同上是 9 个 | 与 #1 同源 |
+| 3 | 8.2 快速开始 | `open "~/Applications/MyApp (Win).app"` | 引号里的 `~` 不会被 shell 展开，`open` 报 `~/Applications/... does not exist`。**这条照抄必然失败** | 命令不可执行。注意上一行 `install -o "~/..."` 是对的——`wepack` 自己 `expanduser()`，差别在 `open` 是外部进程 |
+| 4 | 6.4 间接依赖 | 「七个模块（**五个**方向、`console`、`ai`、`contracts`）」 | 方向只有 4 个（`mac2win`/`exeonmac`/`win2mac`/`apponwin`），7 = 4 + 3 | 括号内的加法不成立 |
+| 5 | 附录 C 第 2 项 | 32 个配置项 / 14 项外部工具 / 10 个子命令族 | 9.2 表 **37** 行（与 `config.mjs` 的 `DEFAULTS` 37 键一致）、6.2 表 **18** 行（`NOTICE` 第三章同为 18 行）、10.1 表 **6** 行 | 三个数字全过期 |
+| 6 | 附录 C 第 3 项 | 二十条亮点 | 实际 **25** 个（含「亮点十五之二」「之三」） | 漏数 |
+| 7 | 5.10.4 与 18.1 | 「已踩过的实例见 18.5」/「见 15.2」 | 实例在 **15.3**（«文档与实现的三次偏离»）；15.2 是 exeonmac 真机实测、18.5 是文档同步要求 | 交叉引用指错两处 |
+| 8 | 附录 C 第 6 项 | 测试规模（**16**）、校验项数（**15.5**） | 测试计数表在 **12.1**（16 是更新日志）；校验项数在 **15.6** | 引用指错两处 |
+| 9 | 10.1 通用选项 | 「`-v/--version`」四方向一致 | `mac2win`/`win2mac`/`apponwin` 的 `-v` 是 version 短名；`wepack` 的 `-v` 是 **verbose** 短名，`--version` 只有长名且为顶层参数 | 语义不一致，脚本用 `-v` 取版本会拿到日志 |
+
+**同时补了四处目录树漏项**：`contracts/doc-counts.mjs` 与 `doc-counts.test.mjs` 在 README 正文被引用（12.1 明写「基线从这张表读」）却不在 11.1 树里；`wepack/entry.py` 与 `wepack/report.py` 同理（5.3 与 10.3 都点名了它们）。
+
+**另修一处失效链接**：英文版顶部「Dependencies」徽章指向 `#6-technology-stack-and-dependency-inventory`，而实际标题是 `## 6. Technology Stack and Dependencies`，锚点应为 `#6-technology-stack-and-dependencies`。点进去是 404 锚点而不是章节。两版内部锚点现已全部校验为 0 无效。
+
+**核对通过的部分也留档**，避免下一轮重复劳动。**注意这里区分「本轮实跑」与「本轮未跑」**，不把未验证的写成通过：
+
+**本轮实跑过的命令**（只读与自检类，逐条列出而不写汇总数字——本轮已经出现过一次「自己数错自己跑了几条」，所以这一栏只给清单）。另对各方向执行了 `--help` 以核对选项清单：
+
+- `node contracts/validate.mjs` → `✓ 契约自洽`（13 条退出码、9 段位、4 前缀）
+- `node contracts/doc-counts.mjs --check` → 合计与 12.1 表一致、两版逐项相同（当时为 1177 项，现以 12.1 为准）
+- `node console/bin/wacmin-console.mjs list` / `doctor` / `contract` → 4 / 4 / 10-10
+- `node ai/bin/wacmin.mjs list` / `status --human` / `mcp` / `skill` → 与 8.6 描述一致
+- `node mac2win/bin/mac2win.mjs doctor` → 5 项全 OK
+- `python3 -m wepack.cli doctor` / `version` / `recipe list` / `layers list` / `runtime status`
+- `node apponwin/bin/apponwin.mjs spike`（含 `--json`）→ 退出码 5、结论 `unverified`
+- `node console/bin/wacmin-console.mjs run exeonmac version` → 归一化报告，八阶段全 `skipped`
+- `node mac2win/bin/mac2win.mjs build /tmp/w03proj --dry-run` → 预检 14 项全通过、列出八步计划、退出码 0（**用临时最小 Node 项目实测，不是真构建**）
+- `node console/bin/wacmin-console.mjs run mac2win build /tmp/w03proj --dry-run` → 同上，经统一入口透传，退出码 0
+- `node contracts/validate.mjs --report <报告> --exit-code 0` → 校验一份真实 `console run mac2win doctor` 产出的报告，`✓ 契约自洽`
+- `node ai/bin/wacmin.mjs doctor mac2win --report` → 统一报告结构
+- `node console/scripts/viewport-check.mjs` → 三档 0 处越界
+
+**本轮未跑、只做了静态核对的**（不得视为已验证）：
+
+- `mac2win build`（**去掉 `--dry-run` 的真构建**）与 `verify`（需要完整构建产物，本轮未做。`--dry-run` 分支已实跑）
+- `wepack install` / `build` / `extract`（需要安装包样本；`install`/`build` 的端到端已在 run-20261119-0753 验过，本轮未复跑）
+- `win2mac build` / `verify`、`apponwin assess` / `parse`（需 Windows 宿主或 `.app` 样本）
+- `console web`（会常驻监听端口，无人值守环境不适合）
+- README 中的 `--dry-run`、`--keep-staging`、`--framework` 等示例参数**只核对了 help 里存在该项**，未逐个跑通
+
+**静态核对通过的项目**：
+
+- HTTP 端点：`mac2win` 8 个（`state`/`preflight`/`build`/`cancel`/`verify`/`probe`/`reveal`/`events`）、`console` 4 个（`history`/`status`/`contract`/`run`），与 10.4 表逐项一致；
+- 阶段划分：Mac2Win 八阶段与 `builder.mjs` 的 `STAGES` 及权重（1/3/4/2/4/2/5/3）完全一致；ExeOnMac 八阶段与 `report.py` 的 `STAGES` 完全一致；
+- 测试计数：七套全部 0 skipped；**具体数字以 12.1 为准，此处不再抄写**（本轮初稿曾在此处硬编码一份合计，随后 apponwin 增加 3 项测试，这行立刻过期——正是本节所批评的「同一数字存多处必然漂移」）；
+- 环境变量 13 个全部在代码中被真实读取（逐个 grep 到非测试文件）；
+- MCP 工具 6 个，与 `ai/src/tools.mjs` 一致。
+
+**这轮巡检本身的教训**：9 处里有 4 处（#5 #6 #7 #8）是**数字与引用**，不是文字。数字过了期不会有人发现，因为它读起来毫无破绽——这与 12.1 记的「同一个数字只许有一个写入点」是同一件事的两面。附录 C 的自检清单本身没有机器守卫，所以它会漂。**下一步应把它也纳入 `contracts/doc-counts.mjs` 的检查范围**，让这类数字由脚本读出来，而不是靠人去数。
+
+除了「漏写」，还有一类反向问题——**help 承诺了但代码没实现**（早先 `--no-package` 就是这样）。两个方向都要守，所以每个方向的 help 测试都是双向断言的（Node 侧 `test/help.test.mjs`，`wepack` 侧 `tests/test_phase0.py` + `test_phase6.py`）。
+
+### 15.4 校验器说谎的那一次
 
 这一节单独写，因为它是目前遇到过的**最危险**的一类缺陷：程序没崩、测试全绿、结论明确，但结论是假的。
 
@@ -2634,7 +2942,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 `MAC2WIN_NO_7ZIP=1` 是为这条分支留的逃生门。不是为凑覆盖率：缺 7-Zip 的决定性分支只在**用户机器恰好没装**时才会走到，开发者机器上大概率装了，可能一年没人跑过——真踩到时用户得到的就是一份撒了谎的报告。
 
-### 15.4 「校验器在撒谎」的第二个形态
+### 15.5 「校验器在撒谎」的第二个形态
 
 `target: "x64"` 在配置里可选、预检说「可行」，但实现层有三处写死 x86：
 
@@ -2664,7 +2972,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 实测两个目标：`--target x86` → 外壳 `PE32/i386` + 载荷 `PE32/i386`；`--target x64` → 外壳 `PE32/i386` + 载荷 `PE32+/x86-64`。反向验证：拿 32 位产物按 x64 目标校验，正确拒绝。
 
-### 15.5 「九项校验」与实际十一项的偏离
+### 15.6 「九项校验」与实际十一项的偏离
 
 文档曾长期写「九项产物校验」，实测为 11 项。根因是校验项后来增加过（拆分了必需文件、新增了安装器外壳格式），文档未同步。
 
@@ -2686,7 +2994,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 **这 11 项只在「构建后校验」时全部出现**。`mac2win verify <已有安装包>` 没有构建清单，无法比对哈希，因此是 **10 项**——差的那一项就是「文件哈希」。这是设计使然而非缺陷：哈希的作用是证明「产物与刚构建出来时逐字节一致」，对一个来源不明的安装包无从证明。诚实报 10 项比伪称 11 项全绿更重要。
 
-### 15.6 其他已修正的缺陷
+### 15.7 其他已修正的缺陷
 
 | 缺陷 | 症状 | 根因 | 修复 |
 |---|---|---|---|
@@ -2709,6 +3017,384 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 解包判 `File` 表行数错 | 尾部数据被当成行内容 | 认为行数 = 总 u16 数 ÷ 列数 | 按内容特征（连续 `fil`+32hex）定行数 |
 | 中文应用名撞 bundle id | 11 个名字只产出 1 个 id | `[^a-z0-9-.]` 把中文整段吃掉 | 非 ASCII 时挂 8 位 SHA-256 前缀 |
 | 预检错误码映射表键名写错 | 在 Linux / Windows 上构建报「项目目录不存在」，用户去查路径拼写而真因是宿主不支持 | `CHECK_ERROR_CODES` 里写的是 `host-os` / `native-window`，源码里实际用的 id 是 `host-platform` / `framework-shell`。键名对不上不报错，只会静默落进 `?? PROJECT_NOT_FOUND` 兜底 | 改为实际 id，并加一条源码扫描测试：映射表的键必须在 `new Check()` 里出现过，会 fail 的检查项必须显式归码 |
+| `apponwin spike` 把「路径打错」判成「方向被证伪」 | `spike --app /nope.app` 输出「本方向按设计降级为兼容性评估工具」、退出码 1；同一路径喂 `assess` 得到退出码 2 | 门槛 3 的 `catch` 把 `BuildError(INPUT_NOT_FOUND)` 一并记成 `fail`，而 `fail` 的语义是「实测执行并失败」——路径不存在时门槛压根没执行。`fail` 一旦出现，整体结论就是 `rejected` | 输入不合法单独归 `blocked` + `invalidInput` 标记，`runSpike` 汇总成 `inputErrors`，CLI 据此走退出码 2 / `AOW_1002`；门槛 1 把样本路径校验提到探测环境之前，否则环境缺失时永远看不到「路径写错」这条最该先看到的提示 |
+| `contracts/validate.mjs` 把范围写法切成两个端点 | 一份 `exitCode: 6` 配 `M2W_4002` 的报告被判「退出码与错误码不一致」，而 4002 完全合法 | 用 `split(/[/-]/)` 解析 `errorSegment`：`"4001-5002"` 被切成 `['4001','5002']`，范围内的中值既不等于下界也不等于上界。长期未发现是因为真实报告多命中端点（4001 / 5002），端点恰好就是切分结果 | 抽出 `segmentAllows()` 分别处理 `-` 与 `/`；测试不只测 4002，而是把 `4001/4002/4003/5001/5002` 与 `6001/6002/6003` 全部跑一遍 —— 只测端点等于没测 |
+| `win2mac --strict-host` 的报告自相矛盾 | `--strict-host` 退出码 2 配 `W2M_1001`，而契约 13 条退出码里没有任何一条声明过 1001 | 抛的是 `HOST_UNSUPPORTED`（1001），`exitCodeFor` 按段位兜底给出 2。用户收到的信号是「参数错误」，会去查路径拼写，真因是「这台机器不能干这件事」 | 改抛 `UNSUPPORTED`（1005 → 退出码 4，明确不支持）；`doctor` 的失败归码同理由 1001 改为 `TOOL_OUTDATED`（2002 → 退出码 5，doctor 的唯一失败原因就是 Node 版本过低）。`apponwin doctor` 同一处同形态缺陷一并修掉 |
+| 契约缺 `3000` 段（运行时）的退出码声明 | `M2W_3001/3002/3003` 在代码里映射到退出码 5，而契约 `exit 5` 只声明 `2001/2002` | 契约文件维护滞后于实现：三个方向都预留了运行时错误码，mac2win 真的在用（Electron/NW.js 下载与架构校验），但没人回来补契约 | 本轮**未改契约**（改契约属于对外承诺变更，需人工确认），已在 15.9 列为待决项 |
+
+### 15.8 跨平台可运行性巡检（2026-11-19）
+
+这一节回答一个只能靠盘点才能回答的问题：**代码里那些「只在 Windows 上走」的分支，到底有没有被执行过**。
+
+本机是 darwin + arm64。三个方向的宿主都是 Windows，所以它们的平台判断分支长期处于「写在那里、从没跑过」的状态。测试全绿并不代表这些分支是对的 —— 恰恰相反，**没跑过的分支出错时也不会报错**。
+
+**扫描方法**：机械抽取，不靠眼看。对全部 `.mjs` / `.py` 源码用五条正则匹配平台判断（`process.platform ===/!==`、`platform() ===/!==`、`sys.platform`、`platform.system()`、`platform.machine()`），共命中 30 处。
+
+**清单与覆盖状况**：
+
+| 位置 | 分支 | 此前有测试 | 处置 |
+|---|---|---|---|
+| `mac2win/src/core/preflight.mjs:88` | 非 darwin → `host-platform` 判 fail | 仅测了归码，分支本身从未执行 | 平台与架构改为可注入，新增 7 项测试 |
+| `win2mac/bin/win2mac.mjs:162` | 非 win32 → 警告或 `--strict-host` 拒绝 | 无 | 见下方缺陷记录；`--strict-host` 的错误码已修 |
+| `win2mac/bin/win2mac.mjs:436` | 非 darwin → 不探 `plutil` | 无 | 已由 `verifyBundle` 注入测试间接覆盖 |
+| `win2mac/src/core/verify.mjs:125` | 非 darwin → `plutilLint` 直接返回不可用 | 无 | 平台可注入，新增 3 项测试 |
+| `win2mac/src/core/verify.mjs:332` | 按平台给不同的「未验证」警告 | 无 | 同上 |
+| `win2mac/src/core/wexezip.mjs:140/167` | Windows 的 `stat().mode` 不可信 | **有**（5 项，注入平台） | 已是正确范式，本轮未动 |
+| `apponwin/src/core/spike.mjs:83` | 非 win32 → WSL2 探测直接判不可用 | **有** | 已覆盖 |
+| `apponwin/bin/apponwin.mjs:99/511` | 非 win32 → 警告不拦 | **有**（doctor 实跑） | 已覆盖 |
+| `console/src/directions.mjs:199` | Windows 上不 detach | 无（该分支只影响 spawn 选项） | 与下一条同源，合并覆盖 |
+| `console/src/directions.mjs:344` | Windows → `taskkill /t /f` | **无，且是超时与取消的唯一兜底** | 平台与 spawn 可注入，新增 5 项测试 |
+| `exeonmac/wepack/cli.py:1817` | 非 arm64 → 无需 Rosetta | **有**（doctor 实跑断言名字与结果） | 已覆盖 |
+| `exeonmac/wepack/report.py:146` | 平台字段归一化 | 无（纯输出字段） | 无行为分支，不补 |
+
+**两条优先补的分支，理由**：
+
+1. **`console` 的 `taskkill`** —— 它是超时与取消的**唯一**兜底。走错了症状是「用户点了取消、父进程报已取消，但 wine 还在后台装东西」，而所有测试照样全绿，因为父进程确实正常退出了。
+2. **`mac2win` 的宿主判断** —— 走错了症状是「在 Linux 上跑，报『项目目录不存在』」，用户去查路径拼写、权限、软链，而真正该做的是换机器。
+
+**三条缺陷**（都是实测发现，非推断）：
+
+1. `win2mac --strict-host` 的退出码 2 配 `W2M_1001`，而契约 13 条退出码没有任何一条声明 1001。修法见 15.7。
+2. `apponwin doctor` 与 `win2mac doctor` 的失败归码同属这一类，一并修掉。
+3. `contracts/validate.mjs` 的**范围解析**把 `"4001-5002"` 切成两个端点，导致范围内的 4002 / 4003 / 5001 被判越界。这条不是平台问题，是本轮为了「用契约校验巡检报告」而撞出来的。
+
+**仍然无法在本机验证的部分**（如实标注，不写成已验证）：
+
+- 真实的 Windows 宿主行为：`taskkill` 的实际有效性、`detach: false` 下子进程组的表现、Windows 上 `wine` 的路径语义。
+- WSL2 + Darling：需要 Windows 机器，见 15.2.1。
+- 上表「已覆盖」项中的 `wepack` doctor 分支：它在本机跑的是 arm64 那条，非 arm64 那条（Intel mac）靠代码审读判定为直通返回，未实测。
+
+注入式测试证明的是**判断逻辑**，不是**平台行为**。这个区别必须说清楚：`killTree` 的 5 项测试证明了「在 win32 上会调 `taskkill` 且参数带 `/t`」，不证明「`taskkill /t` 真的能杀掉 wine 的整棵进程树」。后者只能在 Windows 上跑。
+
+### 15.10 Tauri Rust 壳的端到端实测（2026-11-19）
+
+本节回答一个问题：**在 arm64 macOS 上，`cargo xwin` 到底能不能把一个真实的 Tauri v2 项目编成 Windows 原生窗口程序？**
+
+结论分三层，每层都有实测，也都有明确的边界。
+
+#### 15.10.1 结论总表
+
+| 层次 | 结论 | 依据 |
+|---|---|---|
+| Rust 交叉编译链本身 | **成立**。能编出 `PE32 / i386 / windows-GUI` | 自写探针 `rsprobe`：92160 字节，`file` 判为 `PE32 executable (GUI) Intel 80386, for MS Windows` |
+| Tauri **整棵依赖树**编译+链接 | **成立**。`tauri 2.12.7` + `wry 0.57.3` + `tao 0.37.3` + `webview2-com 0.39.1` 全部链接成 PE | 探针 `linkprobe`：1096192 字节，`PE32 executable (GUI) Intel 80386` |
+| Tauri **完整项目**（含 `build.rs` 资源节） | **不成立**。卡在 `llvm-rc`，且 `brew install llvm` 解决不了 | `tauri-winres 0.3.7` panic：`NotAttempted("llvm-rc")` |
+
+**所以「arm64 mac 编不出 Windows x86 程序」这句话是错的**（前两层的实测已证伪），但「完整 Tauri 项目能一次编成带图标和版本信息的原生窗口 exe」这句话**目前也不成立**（第三层卡住）。两句都不许写成定论 —— 它们的真值取决于你说的「编出」是哪一层。
+
+#### 15.10.2 第一层与第二层：Rust 与整棵 Tauri 依赖树
+
+探针 `linkprobe` 刻意**不调** `generate_context!()`、不写 `build.rs`，把资源编译这一步完全排除在实验之外，只验证「tauri 的依赖树能不能在 i686-pc-windows-msvc 上编译并链接成 PE」：
+
+```rust
+#![windows_subsystem = "windows"]
+
+fn main() {
+    let builder: tauri::Builder<tauri::Wry> = tauri::Builder::default();
+    std::hint::black_box(&builder);
+}
+```
+
+实测命令与结果：
+
+```
+CC_i686_pc_windows_msvc=clang-cl AR_i686_pc_windows_msvc=llvm-lib \
+XWIN_ARCH=x86 XWIN_CACHE_DIR=<干净目录> \
+cargo xwin build --target i686-pc-windows-msvc --release
+
+→ Finished `release` profile [optimized] target(s) in 33.07s
+→ linkprobe.exe  1096192 字节
+→ file: PE32 executable (GUI) Intel 80386, for MS Windows
+```
+
+#### 15.10.3 第三层：真正的卡点是 `llvm-rc`，而且是**双重**卡点
+
+完整项目（带 `build.rs` + `tauri.conf.json` + `icons/icon.ico`）在同一个环境下：
+
+```
+thread 'main' panicked at tauri-winres-0.3.7/src/lib.rs:543:14:
+called `Result::unwrap()` on an `Err` value: NotAttempted("llvm-rc")
+```
+
+`llvm-rc` 的来源链是 `tauri-build` → `tauri-winres` → `embed-resource`。**第一重卡点**是它不在任何现成安装里：Xcode 的 LLVM 没有（`Toolchains/XcodeDefault.xctoolchain/usr/bin/` 只有 `llvm-cov` / `llvm-nm` / `llvm-objdump` 等十来个，无 `llvm-rc`），cargo-xwin 也只造 `clang-cl` 与 `lld-link` 两个 shim。
+
+**第二重卡点更隐蔽**：`brew install llvm` 确实提供 `llvm-rc`（Homebrew 官方 Binaries 列表里明确列着），但装上之后**仍然不生效**。原因在 `embed-resource` 的编译器识别方式（`src/lib.rs:692` 的 `Compiler::llvm_rc`）：
+
+```rust
+pub fn llvm_rc(executable: Cow<'static, str>) -> Result<Compiler, Cow<'static, str>> {
+    if_runnable(executable, |executable| {
+        CompilerType::LlvmRc {
+            has_no_preprocess: Command::new(executable)
+                .arg("/?")
+                .output().ok()
+                .map(|out| memmem::find(&out.stdout, b"no-preprocess").is_some())
+                .unwrap_or(false),
+        }
+    })
+}
+```
+
+它要**执行** `llvm-rc /?` 并检查 stdout 里有没有 `no-preprocess` 字样。实测把 `RC` 指向一个只会 `exit 0` 的替身脚本，得到的是：
+
+```
+NotAttempted("Unknown RC compiler variant: /tmp/w06/fake-rc.sh")
+```
+
+也就是说「路径可用」不够，还得**回话格式对得上**。这一层说明：把 `llvm-rc` 装到 PATH 上就能通过，但任何「假装是 rc」的包装脚本都过不了这个探针。
+
+#### 15.10.4 顺带修掉的两个真实缺陷
+
+这两个都不是本轮引入，而且**都不会报错**，所以此前所有测试都是绿的。
+
+**缺陷 A：`checkRustEnv` 对 `XWIN_ARCH` 的效果判断错误。**
+
+`XWIN_ARCH=x86` 只影响 cargo-xwin **该下载什么**，不保证**已经下到了**。而 `cargo-xwin-0.23.1/src/compiler/clang_cl.rs` 的 `setup_msvc_crt` 有这样一段提前返回：
+
+```rust
+let done_mark_file_content = fs::read_to_string(&done_mark_file);
+if let Ok(content) = &done_mark_file_content {
+    let mut lines = content.lines();
+    if let Some(archs) = lines.next() { /* 只读首行文本 */ }
+}
+if !update && xwin_arches.difference(&downloaded_arches).next().is_none() {
+    return Ok(());   // ← 直接返回，从不校验文件是否真在
+}
+```
+
+判据是 **`DONE` 文件首行的文本**，不是磁盘上的文件。本机实测到的具体不一致：
+
+| 事实 | 值 |
+|---|---|
+| `xwin/DONE` 首行 | `x86`（自称已下载） |
+| `xwin/crt/lib/` 实有 | 只有 `x86_64` |
+| `xwin/sdk/lib/um/` 实有 | `aarch64`、`x86_64` |
+
+后果：`cargo xwin build --target i686-pc-windows-msvc` 一路编完 130+ crate，在**链接**阶段才吐 10 条 `could not open 'user32.lib'`，而重跑同一命令仍是同一个错（`DONE` 说「有了」）。同一份代码把 `XWIN_CACHE_DIR` 指到干净目录后一次通过 —— 同一个二进制的 `crt/lib/x86` 与 `sdk/lib/um/x86` 各 63 与 482 个文件。
+
+修法：`checkRustEnv` 新增 `x86-libs` 一项，判据直接查**磁盘目录**（`crt/lib/x86`、`sdk/lib/um/x86`），并支持 `XWIN_CACHE_DIR` 覆盖。用户能在编译**前**被告知，而不是等十几分钟。
+
+**缺陷 B：`buildRustShell` 调用的 `cargo xwin` 不带 `TAURI_ENV_TARGET_TRIPLE`。**
+
+`tauri` 的 `generate_context!()` 在**宿主**上展开，`tauri-codegen-2.7.6/src/context.rs:148` 读的是 `TAURI_ENV_TARGET_TRIPLE`，不是 `TARGET`。不设这个变量时它按宿主判定为 macOS，于是生成的代码里带上 `tauri::embed_plist::...` —— 而 `embed_plist` 在 `tauri-2.12.7/src/lib.rs:75` 被 `#[cfg(target_os = "macos")]` 门控，交叉编译到 Windows 时该门未开，报：
+
+```
+error[E0433]: cannot find `embed_plist` in `tauri`
+```
+
+实测对比（同一个项目、同一份缓存）：
+
+| `TAURI_ENV_TARGET_TRIPLE` | 结果 |
+|---|---|
+| 不设 | `error[E0433]`，`generate_context!()` 展开失败 |
+| 设为 `i686-pc-windows-msvc` | 编译通过（此时才走到 `llvm-rc` 那一关） |
+
+修法：`buildRustShell` 显式传 `TAURI_ENV_TARGET_TRIPLE`，值由目标三元组拼出，不写死。
+
+#### 15.10.5 关于「跳过 `tauri_build` 也能编出 exe」
+
+实测中见过一种很有诱惑力的做法：在 `build.rs` 里判断「`llvm-rc` 不可用就跳过 `tauri_build`」，这样编译能「成功」，也确实产出 `.exe`。
+
+**这是假成功。** 实测该 exe 的节表：
+
+```
+sections: [('.text', 5069064), ('.rdata', 989732), ('.data', 6888),
+           ('.tls', 273), ('.reloc', 151920)]
+has .rsrc: False
+```
+
+没有 `.rsrc` 节，意味着**图标、版本信息、应用清单全部缺失**。这种 exe 在 Windows 上会被 SmartScreen 当成无发行者程序，右键属性里没有版本页，任务栏图标是默认空白。它能双击运行，但它不是一个可交付的 Windows 程序。
+
+所以本节明确：**不允许把「跳过 `tauri_build`」当作 Tauri 壳的降级方案**。要么补 `llvm-rc`，要么如实报错并退回「打包 Node/前端层」路线 —— 那条路线的产物是完整的（README 十二章的基线测试守的就是它）。
+
+#### 15.10.6 仍未验证的部分
+
+- **装好真 `llvm-rc` 之后的完整构建**。本机未装（`brew install llvm` 需下载 457 MB bottle、占 1.9 GB，属改变用户开发环境的操作，按仓库规矩不由定时任务自动执行）。因此「第三层成立」这句话本轮**不能写**。
+- **产物的真实运行**：编出的 PE 从未在 Windows 上启动过，窗口是否真的出现、WebView2 是否加载，均未验证。
+- **`ico` 图标文件的形态要求**：`tauri-build` 要求 `icons/icon.ico` 存在，否则直接报错。本轮实测项目用的是空 `icon: []` 配置，未测真实 `.ico`。
+
+
+### 15.9 待人工确认：契约需补 `3000` 段
+
+**问题**：`contracts/exit-codes.json` 的 `exit 5` 只声明 `errorSegment: "2001/2002"`，但三个方向的 `exitCodeFor` 都把 `3xxx` 映射到退出码 5，且 mac2win 真的在用：
+
+| 码 | 用途 | 触发点 |
+|---|---|---|
+| `M2W_3001` | 运行时下载失败 | `electron.mjs:97/123`、`nwjs.mjs:89/115` |
+| `M2W_3002` | 运行时校验和不匹配 | 运行时缓存校验 |
+| `M2W_3003` | 运行时架构不对 | `runtime.mjs:315/323/331`、`electron.mjs:66` |
+
+**为何不本轮直接改**：`exit-codes.json` 是**对外承诺**（文件首行写着「码值一经发布不再改动，只追加」）。给它加一个段位声明，等于告诉所有调用方「退出码 5 也可能来自运行时问题」，这是行为契约的扩张，不是修 bug。按本仓库的规矩，这类改动要列清单等人工点头。
+
+**两个候选方案**（供决策，本轮不执行）：
+
+| 方案 | 改动 | 代价 |
+|---|---|---|
+| A. 契约补声明 | `exit 5` 的 `errorSegment` 改为 `"2001/2002/3001-3003"` | 退出码 5 的语义从「缺外部工具」扩为「缺东西（含运行时）」。语义上说得通 —— 三者都是「环境里少了某样东西」，但下游若按 2001 特判「装个工具就好」会漏掉运行时类 |
+| B. 实现改归码 | 把三个 3xxx 改到 `2001` / `5002` | 不需要动契约，但**丢掉「运行时」这一层区分**。用户看到 2001 会去 `brew install`，而真因是下载被墙或缓存损坏，处置动作完全不同 |
+
+**倾向 A**：段位表里 `3000` 段本来就定义了（「运行时：下载失败、校验和不匹配、架构不对」），缺的只是退出码那一行的引用。B 会让已定义的段位变成死代码。
+
+**需要人工确认的一句话**：`exit 5` 是否接受 `3001-3003`。确认后改动只涉及 `contracts/exit-codes.json` 一行 + `validate.test.mjs` 一条用例。
+
+### 15.11 代码签名与公证的评估结论（2026-11-19，不执行）
+
+这一节回答「要不要签、能不能签、要花多少」，**不含任何签名实现**——没有证书就没有可验证的实现，写了也只是无法测试的代码。
+
+#### 15.11.1 先推翻一条旧结论
+
+README 此前四处写着「签名在 macOS 上无法完成」（13.6、14.4、15.1、十七章第 7 项）。**这句话只对了一半，必须拆开**：
+
+| 说法 | 实测 | 判定 |
+|---|---|---|
+| `codesign` / `notarytool` / `stapler` / `spctl` 在 macOS 上可用 | 四个工具全部存在：`codesign` 在 `/usr/bin`，`notarytool 1.1.4 (43)` 与 `stapler` 在 Xcode 内，`spctl --status` → `assessments enabled` | ✅ 事实 |
+| Windows exe 的 Authenticode 签名必须在 Windows 上做 | `osslsigncode` 在 Homebrew 有 bottle（`stable 2.16`，依赖 `openssl@4`），按上游 README 可在 macOS 编译并运行，且支持 PKCS#11 硬件令牌与云端 PKCS#11 模块 | ❌ **不成立** |
+| macOS 产物的公证必须在 macOS 上做 | `notarytool` 是 macOS/Xcode 独占 | ✅ 成立 |
+
+**真正的障碍不是工具，是证书**。CA/Browser Forum 与 Microsoft/Apple 自 2023-06-01 起要求 OV/EV 代码签名私钥必须存放在 FIPS 140-2 Level 2+ 认证硬件里、且不可导出（来源：CA 侧文档 fairssl.com/en/code-signing-hsm-key-storage、sslmarket.com）。这条要求与操作系统无关——**换到 Windows 上一样得插令牌**。所以「在 macOS 上做不到」是个误诊，会让人误以为买台 Windows 机器就解决了。
+
+#### 15.11.2 本机实测：现有产物处于「签名不一致」状态
+
+这是本轮唯一能不看证书就验证的部分。做法是复刻 `wepack` 的真实装配结构，测四项判定。
+
+**工具链事实**：`security find-identity -v -p codesigning` → `0 valid identities found`。Xcode 在 `/Applications/Xcode.app`，`xcode-select -p` 正常。即：**工具齐全，无证书**。
+
+**对照实验结果**（同一份 Mach-O，两种签名状态）：
+
+| 对象 | `codesign -v` | `spctl -a -t exec` | `--verify --deep --strict` |
+|---|---|---|---|
+| **A：现状（只换二进制进 bundle，未重签）** | **exit 1**<br>`code has no resources but signature indicates they must be present` | **exit 1**<br>同上 | **exit 1** |
+| **B：对整个 bundle 一致重签（ad-hoc）** | exit 0 | exit 3<br>`rejected`（未公证，预期） | exit 0 |
+
+**A 的成因**：`clang` / `swiftc` 产出的 arm64 可执行文件由**链接器自动附加 ad-hoc 签名**（`flags=0x20002(adhoc,linker-signed)`，`Signature=adhoc`）。此时签名只覆盖那一个可执行文件。`wepack` 随后把 `Info.plist`、`PkgInfo`、`Resources/` 一起组装进 bundle，**没有再签一次**，于是「签名声称自己有资源封印，但实际没有」——两者对不上。
+
+**这不是理论风险**。实测复刻的产物（`launcher` 137464 字节真实编译产物 + Info.plist）`codesign -v` 直接退 1。用户拖进 `/Applications` 后在「系统设置」里看到的是校验失败，而不是「未公证」这种至少能解释的提示。
+
+**复现命令**（用仓库真实 launcher 源码编译，按 `wepack` 的方式装配）：
+
+```bash
+cd exeonmac && python3 -c "
+from pathlib import Path
+from wepack.package.launcher_build import compile_launcher
+print(compile_launcher(Path('/tmp/r/launcher'), use_cache=False))"
+mkdir -p /tmp/r/R.app/Contents/MacOS && cp /tmp/r/launcher /tmp/r/R.app/Contents/MacOS/
+/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string launcher" \
+  -c "Add :CFBundleIdentifier string com.wacmin.repro" \
+  -c "Add :CFBundlePackageType string APPL" /tmp/r/R.app/Contents/Info.plist
+codesign -v /tmp/r/R.app ; echo "exit=$?"    # → exit=1，code has no resources…
+codesign -s - --force /tmp/r/R.app
+codesign -v /tmp/r/R.app ; echo "exit=$?"    # → exit=0
+```
+
+以上三条命令本轮实跑，输出与上表一致。
+
+#### 15.11.3 但修不了：资源封印与 WINEPREFIX 存在架构级冲突
+
+A 的修法很直接——自内向外重签每个内层可执行文件，最后签外层 bundle。**本轮已实测该修法有效**（`codesign -v` 由 1 变 0，`--strict` 也变 0）。但这条路在 ExeOnMac 上撞墙：
+
+`launcher/Sources/main.swift:234` 写的是 `env["WINEPREFIX"] = layout.privateDir.path`，而 `privateDir` 指向 `Contents/Resources/Private`（同文件 `:66`）。也就是说 **wine 的整个 prefix 就住在 bundle 的 `Resources/` 里，且被原地读写**。
+
+`codesign` 会把 `Contents/Resources` 下所有文件纳入资源封印。签名之后 wine 一写 prefix，封印立刻失效：
+
+```
+签名后       → codesign -v exit=0
+改写 prefix  → S.app: a sealed resource is missing or invalid   exit=1
+```
+
+**对照实验**：把 `Private/` 挪出 bundle 外部，重签后再写 prefix → `codesign -v` 仍 exit 0。
+
+**结论（决定性的）**：ExeOnMac 要么不签名，要么必须把 prefix 移出 bundle。后者是破坏性架构改动，牵动分层、`clonefile` 前缀克隆、卸载时清理、`recipe` 路径约定四处，不在评估轮动。**这是本轮最该被记住的一条**：签名不是「加个命令」，它会反过来约束目录布局。
+
+顺带说明本题的边界：上述冲突只存在于 ExeOnMac。Mac2Win 的产物是 `.exe`（单文件 Authenticode，无资源封印概念），Win2Mac 的产物是纯静态目录（无原地写入的运行时状态）。
+
+#### 15.11.4 逐方向结论
+
+| 方向 | 产物 | 签名技术路径 | 可行性 | 卡点 |
+|---|---|---|---|---|
+| Mac2Win | `.exe` / `.zip` | `osslsigncode` + PKCS#11 令牌，或 CI 用 `windows-latest` 跑 `signtool` | **可行** | 只需证书，无技术障碍 |
+| Win2Mac | `.app`（静态） | `codesign` → `notarytool submit` → `stapler staple` | **可行** | 需 Apple Developer ID（$99/年） |
+| ExeOnMac | `.app`（含可写 prefix） | 同上 | **当前布局下不可行** | 见 15.11.3，须先改布局 |
+| AppOnWin | 无产物 | — | 不适用 | 方向本身结论是「环境不具备」 |
+
+**Win2Mac 的公证前置条件**（来源：Apple 公证要求与第三方实测记录）：bundle 内**每个**可执行文件都要有 Developer ID 签名、开启 hardened runtime、带安全时间戳、且不得含 `com.apple.security.get-task-allow` 权限。缺一条即 rejected。
+
+#### 15.11.5 成本（2026-11-19 检索，非报价）
+
+| 方案 | 费用 | 对中国大陆独立开发者的可用性 |
+|---|---|---|
+| Apple Developer Program | **$99/年**（来源：Apple 官方 enroll 页） | 可用，个人身份即可 |
+| Windows OV 证书 | **$150–300/年**，含 SafeNet USB 令牌 | 可用（来源：Microsoft Learn 代码签名选项页） |
+| Windows EV 证书 | **$400+/年** | 可用但**不再有免 SmartScreen 的特权**——Microsoft 自 2024 年起把 EV 与 OV 的 SmartScreen 行为拉平 |
+| Azure Artifact Signing（原 Trusted Signing） | **$9.99/月** | **个人开发者仅限美国与加拿大**，中国大陆个人不适用（来源：同上 Microsoft 页面明确的地理限制） |
+| 自签名证书 | 免费 | 仅本地测试。公开分发会被拦 |
+
+**必须纠正一个常见误解**：签名**不保证**用户第一次下载就不见警告。Microsoft 官方页面写明新签名文件在积累足够声誉前仍会提示，OV 与 EV 表现相同。签名的实际收益是「发布者身份可信 + 警告更轻 + 可被 SmartScreen 逐版本继承」，不是「警告消失」。
+
+**一个诚实的成本提醒**：Windows 侧令牌是 USB 硬件，**标准 RDP 无法转发**（CA 文档明确记录，需 TeamViewer 类工具）。若签名机是云端 Windows，这条会直接影响运维方式；改用 Azure Key Vault / DigiCert KeyLocker 等云 HSM 可绕开，但 KeyLocker 约 $300/年且限 1000 次签名。
+
+#### 15.11.6 CI 侧可行性
+
+仓库现有 `.github/workflows/ci.yml` 已使用 `ubuntu-latest` / `macos-latest` / `windows-latest` 三种 runner（`runs-on` 实测 7 处）。因此：
+
+- Windows 签名：`windows-latest` 上 `signtool` 是 Windows SDK 自带，无需额外安装。证书走 GitHub Secrets（base64 的 pfx 或云 HSM 凭据）。
+- macOS 签名公证：`macos-latest` 上 `codesign` / `notarytool` 自带。Apple 凭据走 `notarytool store-credentials` + Secrets。
+- **但这属于「发布流水线」，不属于「测试流水线」**。当前 CI 只做测试与契约校验，没有任何 push 或发布动作；加签名等于同时加发布权限，属于对外行为变更。
+
+#### 15.11.7 本轮不做什么（明确列出）
+
+1. **不实现任何签名代码**。无证书则无法验证，写出来就是不可测的代码——与本仓库「不把未验证写成通过」的规矩冲突。
+2. **不改 ExeOnMac 的 prefix 布局**。破坏性架构改动，须人工决策后单独排期。
+3. **不改 `exit-codes.json`**。签名失败应归到哪个退出码是新的对外承诺，与 15.9 同类，等人工点头。
+4. **不申请证书、不创建 CI Secret**。涉及资金与外部账号。
+
+#### 15.11.8 建议的决策路径（供人工选择）
+
+| 优先级 | 动作 | 理由 |
+|---|---|---|
+| 1 | 修 15.11.2 的签名不一致——**改为显式不加 ad-hoc 签名的干净产物，或整体重签** | 无需证书。前者零成本，后者需在装配末尾加一次 `codesign -s -`（本地 ad-hoc 不解决 Gatekeeper，但至少 `codesign -v` 自洽）。**二选一必须先定，因为「不一致」比「明确未签」更糟**：它让用户看到的是「损坏」而不是「未签名」 |
+| 2 | 若要真分发 macOS 产物：买 $99 Apple 会员，**同时**决定 ExeOnMac 的 prefix 是否移出 bundle | 两件事耦合，不能只做一半 |
+| 3 | Windows 侧签名：按发布量决定。年发布少于 10 次时，OV 证书 + `osslsigncode`（macOS 本地即可签）比搭 Windows CI 更省事 | 技术路径已验证可用 |
+
+---
+
+### 15.12 视口检查脚本的静默挂死（2026-11-19 已修）
+
+**症状**：`node console/scripts/viewport-check.mjs` 在本机跑不起来 —— 不是报错，是**不返回**。既不输出表格也不退出，挂死 6 分钟以上，只能手工杀。这类故障比报错难查得多：报错会指出位置，挂死只留一片空白。
+
+**逐层隔离（每一层都实测，不靠猜）**：
+
+| 层 | 实测结果 |
+|---|---|
+| 本地服务 | 正常，`fetch` 返回 200 / 2470 字节 |
+| Chrome 进程 | 能起，`DevToolsActivePort` 正常写出 |
+| WebSocket | 能 open |
+| `Target.createTarget` | 49 ms 返回 |
+| `Target.attachToTarget` | 15 ms 返回 |
+| `Page.enable` | **永不回包** |
+
+根因是 Chrome 在本沙箱里**自建 sandbox 失败**（`sandbox initialization failed: Operation not permitted`），renderer 进程起不来，于是页面级命令全部无响应。追加 `--no-sandbox` 后 `Page.enable` / `Runtime.enable` / `evaluate 1+1=2` 全部立刻通过。
+
+**代码层的真正缺陷不是缺 `--no-sandbox`，是 `CdpClient.send()` 没有超时**：
+
+```js
+// 修之前：Promise 永不 settle，超时与错误分支都不存在
+send(method, params = {}, sessionId) {
+  return new Promise((resolve_, reject) => {
+    this.pending.set(id, { resolve: resolve_, reject })
+    this.socket.send(JSON.stringify(frame))
+  })
+}
+```
+
+`once()` 有 15 秒超时，`send()` 没有 —— 这种不对称让最常用的那条路径成了唯一会挂死的地方。修法两层：
+
+1. **`send()` 自带 20 秒超时**，超时后 `pending.delete(id)` 清槽、错误上打 `cdpTimeout = true` 标记、`clearTimeout` 防定时器吊住进程。
+2. **只在 `cdpTimeout` 出现时降级重试一次 `--no-sandbox`**。不是无条件重试：找不到 Chrome、服务端没起、页面脚本抛异常都跟沙箱无关，重试只会把同一个错误再犯一遍并掩盖真实原因。降级事实通过 `fallbackReason` 同时写进人读输出与 `--json`，避免读报告的人误以为默认就是这么跑的。
+
+**修后实测**：同一台机器同一条命令，从「挂死 6 分钟以上」变为 **26 秒完成**，三档 375 / 768 / 1440 基线与压测均 0 处越界、页面横向溢出 0px，退出码 0，并明确打印「首次以默认参数启动时 Page.enable 超时，已用 --no-sandbox 重跑一次」。
+
+**回归锁**：`console/test/viewport-check.test.mjs` 新增 4 项（共 10 项），锁的是「有超时」「只在 cdpTimeout 时降级」「`--no-sandbox` 不在基础参数里」「降级必须外显」四条。三处负向验证各自都能把测试打红：去掉 `send` 的 `timeoutMs` 默认值 → 1 项红；把 `sandboxSuspected` 改成恒 `true` → 1 项红；把 `--no-sandbox` 写进基础参数数组 → 1 项红。三次还原后均 10/10 绿。
+
+**这条缺陷值得记住的地方**：它从 W-01 起就在，`npm test` 一直是绿的 —— 因为视口脚本**不在** `npm test` 里（要起真实 Chrome，太慢）。于是它成了「没人跑就没人知道」的脚本。W-07 的定时任务发现了它但没有修（当时任务范围是签名评估），本轮才补上。**凡是不进测试套件的脚本，都要有一条「它真的能跑完」的守卫**，否则绿着的测试套件会给它背书。
 
 ---
 
@@ -2731,12 +3417,12 @@ README 描述项目当前状态，发行版记录每次改了什么，两者不�
 | 1 | Mac2Win 收尾 | 已完成 | 打包、校验、图形界面全部落地，转入维护 |
 | 2 | ExeOnMac 五阶段 | 已完成 | 识别、解包、prefix、静默安装、`.app` 封装、分层、配方库全部落地 |
 | 3 | Win2Mac 装配式打包 | 已完成 | 保留权限位的 zip 写入器、plist 生成与校验 |
-| 4 | AppOnWin 运行能力 | **待定** | 三条门槛中第 2 条（AppKit 窗口）是决定性的，需在 Windows + WSL2 + Darling 环境实测 |
-| 5 | console 全功能看板 | 进行中 | 四方向统一入口已可用（CLI + Web），历史持久化与进度推送已落地 |
-| 6 | Tauri Rust 壳端到端验证 | 待环境 | 代码就绪，需能装 LLVM 的环境完成端到端 |
-| 7 | 代码签名支持 | 待评估 | 需 Windows EV 证书与 `signtool`，在 macOS 上无法完成，可能引入 CI 侧方案 |
-| 8 | macOS 侧签名与公证 | 待评估 | 需 Apple Developer 证书与 `notarytool`，仅在 macOS 上可完成 |
-| 9 | 层自动构建扩展 | 待排期 | 目前只有 base 层能自动构建，mfc / dotnet / fonts-cn 需用户自备 |
+| 4 | AppOnWin 运行能力 | **环境不具备** | 2026-11-19 实测：门槛 1、2 因宿主非 Windows 而 `blocked`，门槛 3 通过，整体 `unverified` / 退出码 5。结论既非通过也非证伪，需 Windows + WSL2 + Darling 重跑，见 3.4 与 5.1.2 |
+| 5 | console 全功能看板 | 已完成 | 四方向统一入口（CLI + Web）、历史持久化、进度推送全部落地；三档视口（375 / 768 / 1440）由 `console/scripts/viewport-check.mjs` 实测无溢出，负向验证可复现 |
+| 6 | Tauri Rust 壳端到端验证 | **部分成立** | 2026-11-19 实测：Rust 链与 tauri 2.12.7 整棵依赖树在 arm64 macOS 上均能编成 `PE32/i386`（`linkprobe.exe` 1096192 字节）。完整项目卡在 `llvm-rc`——`tauri-winres` 编资源节要用，本机未装；`brew install llvm` 会提供它。**不是**架构限制，也**不是**「必换 Windows 机器」。见 15.10 |
+| 7 | 代码签名支持 | **已评估（2026-11-19）** | 结论：可行，且不需要 Windows 机器——`osslsigncode` 在本机签 PE。瓶颈是证书与硬件令牌。**同时发现现有 ExeOnMac 产物签名不一致**（`codesign -v` 退 1），且因 prefix 在 bundle 内而无法以签名修复。见 15.11；决策待人工 |
+| 8 | macOS 侧签名与公证 | **已评估（2026-11-19）** | 结论：Win2Mac 可行，需 Apple Developer ID（$99/年）+ 四个公证前置条件；**ExeOnMac 在当前布局下不可行**——prefix 在 bundle 内被原地写，签名必被破坏。见 15.11；决策待人工 |
+| 9 | 层自动构建扩展 | 已完成（2026-11-19）| base / dotnet / fonts-cn 自动构建；mfc 无合法来源、vcpp base 已内置 |
 | 10 | AI 接入层 | 已完成 | MCP server、统一命令行、Skill、专家包四种形态全部落地；协议层零依赖自研 |
 
 **不做的事**（已明确排除，不在路线图上）：自研 PE 加载器、接入 FEX、API 语义映射层、macFUSE / kext / 系统扩展、游戏启动器业务、云桌面、**内置 LLM 或封装模型调用**。`ai/` 的定位是把本仓库能力交给外部 AI，不是自己变成 AI 工具。
@@ -2750,7 +3436,7 @@ README 描述项目当前状态，发行版记录每次改了什么，两者不�
 1. **退出码只追加，不改含义**。已发布的码值一旦改动，所有依赖它的脚本都会失效。
 2. **错误码段位不越界**。`4xxx` 永远是输入物处理，不因某个方向的特殊需要而改变含义。
 3. **`--json` / `--report` 时 stdout 只有 JSON**。日志一律走 stderr。
-4. **help 文本必须与解析器一致**。三件事都要成立：help 写的选项解析器都认、解析器认的选项 help 都写了、拼错的子命令明确报错而不是被当成路径。每条都有测试守着（各方向的 `test/help.test.mjs`），因为这类偏差不会崩溃——只会让人白花时间。已踩过的实例见 15.2。
+4. **help 文本必须与解析器一致**。三件事都要成立：help 写的选项解析器都认、解析器认的选项 help 都写了、拼错的子命令明确报错而不是被当成路径。每条都有测试守着（三个 Node 方向是 `test/help.test.mjs`，ExeOnMac 在 `tests/test_phase0.py` 的 `TestCLIContract` 与 `test_phase6.py` 里），因为这类偏差不会崩溃——只会让人白花时间。已踩过的实例见 15.3。
 
 ### 18.2 提交前检查
 
@@ -3131,11 +3817,11 @@ git push -u origin main
 | # | 检查项 | 结论 |
 |---|---|---|
 | 1 | 是否还有口语化表达或歧义句 | 已检查。全文采用书面语，无感叹号与省略号制造的随意感；术语首次出现处给出定义 |
-| 2 | 是否遗漏核心功能、配置项或依赖 | 已补全。32 个配置项全表（9.2）、13 个环境变量全表（9.3）、14 项外部工具七要素表（6.2）、10 个子命令族（10.1） |
-| 3 | 每个亮点是否都有具体依据 | 二十条亮点均含「亮点名称 / 价值 / 实现方式 / 差异化 / 证据」五段，证据全部为实测数据或可复现命令 |
+| 2 | 是否遗漏核心功能、配置项或依赖 | 已补全。37 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1）。数字与 `mac2win/src/core/config.mjs` 的 `DEFAULTS`（37 键）、`NOTICE` 第三章（18 行）、10.1 表（6 行）逐项对齐 |
+| 3 | 每个亮点是否都有具体依据 | 二十五条亮点均含「亮点名称 / 价值 / 实现方式 / 差异化 / 证据」五段，证据全部为实测数据或可复现命令 |
 | 4 | 设计细节是否都写明 | 第 5 章 11 节，覆盖异常输入与边界、超时重试降级容错、缓存与性能、并发与一致性、存储优化、安全防护、体验微决策、默认值理由、跨平台策略 |
 | 5 | 第三方项目、版权、许可证是否完整出现在 README 与 NOTICE | 第 6 章 + `NOTICE` 十三节，两处信息一致 |
-| 6 | 介绍是否与实际功能与目录结构一致 | 目录结构（11.1）按实际 `ls` 结果撰写；测试规模（16）与实测输出一致；校验项数（15.5）按实测 11 项 / 10 项区分 |
+| 6 | 介绍是否与实际功能与目录结构一致 | 目录结构（11.1）按实际 `ls` 结果撰写；测试规模（12.1）与实测输出一致；校验项数（15.6）按实测 11 项 / 10 项区分 |
 | 7 | 是否存在来源不明、未经授权的文本、代码、素材 | 无。全部代码自研，参考过的项目在 `NOTICE` 第 7 节逐项声明且未复制代码 |
 | 8 | 是否同时保护自身版权并尊重他人版权 | 第 19 章声明自身版权与商标；`NOTICE` 声明他人版权与再分发义务 |
 | 9 | 是否提供与中文版同步的 `README_EN.md`，两版顶部语言切换链接 | 是。两版章节标题逐一对应，顶部互链 |

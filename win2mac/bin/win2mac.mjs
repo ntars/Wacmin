@@ -156,6 +156,19 @@ async function commandBuild(positional, values) {
      *      这是 Windows 上做不到的。
      *
      * 所以改成警告，把判断权交给用户。`--strict-host` 可恢复旧的严格行为。
+     *
+     * ## 严格模式用 1005 而不是 1001
+     *
+     * 「宿主不是 Windows」落在**硬边界**里：路径没错、参数没错，是这台
+     * 机器做不了这件事。契约里 `exit 4 → 1005`（明确不支持），mac2win
+     * 的 `host-platform` 检查项也是归到 `UNSUPPORTED`（1005）。
+     *
+     * 早先这里抛 `HOST_UNSUPPORTED`（1001），而契约的 13 条退出码里
+     * **没有任何一条声明 1001**，于是 `exitCodeFor('W2M_1001')` 按段位
+     * 兜底给出 2 —— 报告里是 `exitCode 2` 配 `W2M_1001`，
+     * `node contracts/validate.mjs --report r.json --exit-code 2` 直接报红。
+     * 用户拿到的信号是「参数错误」，会去查路径拼写，而真正该做的
+     * 是换机器或去掉 `--strict-host`。
      */
     tracker.enter('preflight')
     const hostWarnings = []
@@ -165,7 +178,7 @@ async function commandBuild(positional, values) {
         '请在 macOS 上打开一次确认能运行。'
       hostWarnings.push(message)
       if (values['strict-host'] === true) {
-        throw new BuildError(ErrorCode.HOST_UNSUPPORTED, message, {
+        throw new BuildError(ErrorCode.UNSUPPORTED, message, {
           hint: '去掉 --strict-host，或换到 Windows 上运行',
         })
       }
@@ -468,8 +481,18 @@ async function commandDoctor(values) {
     ...await hostToolChecks(),
   ]
   const allOk = checks.every((check) => check.ok)
+  /*
+   * 失败项只可能是 Node 版本过低 —— platform / arch / plutil 都是 ok=true
+   * 的说明项，永远不会让 allOk 变假。
+   *
+   * 所以归码用 `TOOL_OUTDATED`（2002，退出码 5），而不是 `HOST_UNSUPPORTED`
+   * （1001）。后者是「宿主不是 Windows」，与本分支的唯一实际失败原因
+   * 无关；而且退出码 5 在契约里只对应 2001/2002，配 1001 会被
+   * `contracts/validate.mjs` 判为不一致。
+   */
+  const failCode = ErrorCode.TOOL_OUTDATED
   if (allOk) tracker.leave('preflight')
-  else tracker.markFailed(ErrorCode.HOST_UNSUPPORTED)
+  else tracker.markFailed(failCode)
 
   if (values.json === true) {
     process.stdout.write(`${JSON.stringify({ direction: DIRECTION, checks }, undefined, 2)}\n`)
@@ -483,11 +506,12 @@ async function commandDoctor(values) {
     process.stdout.write(`${JSON.stringify(allOk
       ? successReport({ config: { target: 'arm64' }, result: { artifact: null, artifactSize: 0, durationMs: 0 }, tracker, command: 'doctor' })
       : failureReport({
-        error: new BuildError(ErrorCode.HOST_UNSUPPORTED, `win2mac 只能在 Windows 上运行，当前是 ${process.platform}`, {
-          hint: '在 Windows 上运行本工具',
+        error: new BuildError(failCode, `环境自检未通过：Node ${process.versions.node} 低于要求`, {
+          hint: '用 nvm 或 Homebrew 升级到 Node 20 或更高',
         }),
         tracker,
         exitCode: 5,
+        command: 'doctor',
       }), undefined, 2)}\n`)
   }
   process.exitCode = allOk ? 0 : 5

@@ -118,11 +118,15 @@ export function plistString(text, key) {
  *
  * 非 macOS 平台直接返回 `{available: false}`，由调用方降级为文本检查。
  *
+ * `platform` 可注入：本机是 darwin，那条「非 macOS 跳过」的分支走不到，
+ * 而它决定了报告里是否出现「未做权威校验」这条警告。
+ *
  * @param {string} plistPath
+ * @param {{platform?: string}} [options] 仅供测试注入。
  * @returns {Promise<{available: boolean, ok: boolean, detail: string}>}
  */
-export async function plutilLint(plistPath) {
-  if (process.platform !== 'darwin') {
+export async function plutilLint(plistPath, options = {}) {
+  if ((options.platform ?? process.platform) !== 'darwin') {
     return { available: false, ok: true, detail: '非 macOS，跳过 plutil 校验' }
   }
   const { execFile } = await import('node:child_process')
@@ -146,10 +150,17 @@ export async function plutilLint(plistPath) {
 /**
  * 校验一个 `.app` 目录。
  *
+ * `platform` 可注入，默认取本机。理由：本机是 darwin，那条「非 macOS
+ * 上完成校验」的分支永远走不到，而它恰恰是**用户最需要看到的一条
+ * 免责声明** —— 在 Windows 上打完包的人会看到「plutil / codesign /
+ * 双击均未验证」。不注入就只能靠一台 Windows 机器来验它是否还在。
+ *
  * @param {string} appDir
+ * @param {{platform?: string}} [options] 仅供测试注入。
  * @returns {Promise<{ok: boolean, checks: Array<object>, warnings: string[]}>}
  */
-export async function verifyBundle(appDir) {
+export async function verifyBundle(appDir, options = {}) {
+  const hostPlatform = options.platform ?? process.platform
   const checks = []
   const warnings = []
 
@@ -185,7 +196,7 @@ export async function verifyBundle(appDir) {
        * 「值类型不对」「必需键缺失」这类文本层面看不出的问题。
        * 在 macOS 上开发时这一步能把问题提前暴露，而不是等用户双击。
        */
-      const lint = await plutilLint(plistPath)
+      const lint = await plutilLint(plistPath, { platform: hostPlatform })
       if (lint.available) {
         add('plist.plutil', lint.ok, lint.detail)
       } else {
@@ -329,13 +340,13 @@ export async function verifyBundle(appDir) {
         `例：${escapes.slice(0, 2).join('；')}`)
 
   // ⑧ 平台边界说明：在 Windows 上验不了的东西必须写出来
-  if (process.platform === 'darwin') {
+  if (hostPlatform === 'darwin') {
     warnings.push(
       'plutil 校验已执行；codesign 与实际双击仍未验证。' +
       '最终以 Finder 里打开一次为准。')
   } else {
     warnings.push(
-      '本次校验在 ' + process.platform + ' 上完成，' +
+      '本次校验在 ' + hostPlatform + ' 上完成，' +
       'plutil / codesign / 实际双击均未验证。' +
       '最终以 macOS 上打开一次为准。')
   }

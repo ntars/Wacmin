@@ -335,24 +335,35 @@ export function runDirection(id, command, options = [], hooks = {}) {
  * 这是必要的，因为 `python3 -m wepack` 会拉起 wine、7z 等子进程，
  * 只杀直接子进程会留下孤儿。
  *
+ * Windows 上没有进程组信号，只能调 `taskkill /t` 按树杀。这条分支
+ * 在本机（darwin）永远走不到，而它恰恰是**超时与取消的唯一兜底** ——
+ * 走错了就会留下孤儿 wine 进程继续装东西，用户以为取消了实际没取消。
+ * 所以把平台与 spawn 都做成可注入，让测试能真的执行这条分支。
+ *
  * @param {import('node:child_process').ChildProcess} child
  * @param {NodeJS.Signals} signal
+ * @param {{platform?: string, spawnFn?: typeof spawn}} [options] 仅供测试注入。
+ * @returns {{method: 'none'|'taskkill'|'group'|'direct', args?: string[]}} 实际走的路径，供测试断言。
  */
-export function killTree(child, signal) {
-  if (child.pid === undefined) return
+export function killTree(child, signal, options = {}) {
+  if (child.pid === undefined) return { method: 'none' }
+  const hostPlatform = options.platform ?? process.platform
+  const spawnFn = options.spawnFn ?? spawn
   try {
-    if (process.platform === 'win32') {
+    if (hostPlatform === 'win32') {
       // Windows 上没有进程组信号，用 taskkill 按树杀
-      spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'],
-        { stdio: 'ignore' })
-      return
+      const args = ['/pid', String(child.pid), '/t', '/f']
+      spawnFn('taskkill', args, { stdio: 'ignore' })
+      return { method: 'taskkill', args }
     }
     process.kill(-child.pid, signal)
+    return { method: 'group' }
   } catch {
     /*
      * 进程可能已经退出（ESRCH），或权限不足（EPERM）。
      * 两种情况都不该让调用方崩 —— 后面还有 close 事件兜底。
      */
     try { child.kill(signal) } catch { /* 已经没了 */ }
+    return { method: 'direct' }
   }
 }

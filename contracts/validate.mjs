@@ -491,14 +491,52 @@ function checkError(report, prefixes, exitCodes) {
   const declared = exitCodes?.codes?.[String(report.exitCode)]
   if (declared?.errorSegment == null) return
 
-  // errorSegment 可能是 "1003/1004"（列举）或 "4001-5002"（范围）
-  const allowed = String(declared.errorSegment)
-    .split(/[/-]/).map((part) => part.trim()).filter((part) => part !== '')
   const codeTail = code.slice(code.indexOf('_') + 1)   // "M2W_1005" → "1005"
-  if (allowed.length > 0 && !allowed.includes(codeTail)) {
+  if (!segmentAllows(declared.errorSegment, codeTail)) {
     fail(`退出码 ${report.exitCode} 在契约里对应错误码 ${declared.errorSegment}，`
       + `但报告给的是 ${code}。两边必须一致，否则脚本按退出码分流会走错分支`)
   }
+}
+
+/**
+ * 判断一个错误码是否落在 `errorSegment` 声明的范围内。
+ *
+ * ## 为什么不能让 `/[/-]/` 一把切
+ *
+ * `errorSegment` 有三种写法：列举（`"1003/1004"`）、范围（`"4001-5002"`）、
+ * 单值（`"9999"`）。用 `/[/-]/` 切会把范围切成两个端点，于是 `4002`
+ * 既不等于 `4001` 也不等于 `5002`，被判成「不一致」。
+ *
+ * 这个缺陷实测存在（2026-11-19）：一份 `exitCode: 6` 配 `M2W_4002` 的
+ * 报告被判红，而 4002 完全合法。它此前没被发现，是因为**恰好没有任何
+ * 测试跑过「范围内非端点」的码**，而真实报告里 `4001` / `5002` 这两个
+ * 端点值用得最多 —— 校验器看起来一直是对的。
+ *
+ * 同一判据在 `console/src/contract-check.mjs` 里已经实现对了（分开
+ * 处理 `-` 与 `/`）。这里是第二份实现，属于「同一判据两处各写一套」，
+ * 但两个包没有共享模块的通道（contracts 是零依赖的独立脚本），所以
+ * 用相同的用例把两边钉住，而不是硬抽公共层。
+ *
+ * @param {string} segment 契约里的 `errorSegment` 原文。
+ * @param {string} tail 错误码的后四位，如 `"4002"`。
+ * @returns {boolean}
+ */
+export function segmentAllows(segment, tail) {
+  const numeric = Number(tail)
+  for (const part of String(segment).split('/')) {
+    const piece = part.trim()
+    if (piece === '') continue
+    const dash = piece.indexOf('-')
+    if (dash === -1) {
+      if (piece === tail) return true
+      continue
+    }
+    const low = Number(piece.slice(0, dash))
+    const high = Number(piece.slice(dash + 1))
+    if (Number.isInteger(low) && Number.isInteger(high)
+      && Number.isInteger(numeric) && numeric >= low && numeric <= high) return true
+  }
+  return false
 }
 
 /* ─────────────────────────── 入口 ─────────────────────────── */

@@ -49,7 +49,7 @@ apponwin ${VERSION} — 在 Windows 上运行 macOS 应用（兼容性评估阶�
 退出码
   0   成功 / spike 通过
   1   spike 实测不通过（方向不成立）
-  2   用法错误
+  2   用法错误，或 spike 的输入路径不合法
   5   spike 未验证（环境不具备，不能算通过）
 
 说明
@@ -326,6 +326,8 @@ async function commandSpike(positional, values) {
       decisiveGate: result.decisiveGate,
       gates: result.gates,
       notes: result.notes,
+      /* 输入路径不合法时非空；调用方据此把退出码读成 2 而不是 1。 */
+      inputErrors: result.inputErrors,
       platform: process.platform,
     }
 
@@ -361,28 +363,34 @@ async function commandSpike(positional, values) {
     }
 
     /*
-     * 退出码语义：
+     * 退出码语义（四级，不是三级）：
      *   0 = accepted（可继续）
+     *   2 = 输入路径不合法（`AOW_1002`）—— 门槛根本没执行，与 assess 一致
      *   5 = unverified（环境不具备，不是失败但也不能算通过）
      *   1 = rejected（实测不通过）
      *
      * 用 5 而不是 0 是关键：CI 里若把 unverified 当通过，就会在
      * 没验证的情况下继续推进，这正是要避免的。
      *
+     * 四级里的 2 是本轮补上的：早先 `spike --app /nope.app` 会落到
+     * `rejected` / 退出码 1，把「路径打错」说成「方向被证伪」，而同一个
+     * 路径喂给 `assess` 得到的是 2。同一份输入在两条子命令上给出两种
+     * 含义，脚本无法据退出码分流。
+     *
      * 契约要求报告里的 `exitCode` 与进程退出码一致，所以先算出来
      * 再同时写进两处，而不是各算一遍。
-     */
-    /*
-     * `spike` 的结论有三种，各自对应**不同的错误码**，不能共用一个。
+     *
+     * 各结论对应的错误码：
      *
      *   结论        退出码  错误码              含义
      *   accepted    0       —                  可继续
+     *   inputError  2       AOW_1002           输入路径不合法（门槛未执行）
      *   unverified  5       AOW_2001           缺外部依赖（WSL2 / Darling）
      *   rejected    1       AOW_9999           实测不通过，未归类失败
      *
-     * ## 早先的写法为什么是错的
+     * ## 更早的写法为什么是错的
      *
-     * 原来两种失败都填 `HOST_UNSUPPORTED`（AOW_1001），而退出码按结论
+     * 曾经两种失败都填 `HOST_UNSUPPORTED`（AOW_1001），而退出码按结论
      * 分别是 5 和 1。于是同一份报告里出现
      *
      *   exitCode: 5, error.code: AOW_1001
@@ -400,12 +408,17 @@ async function commandSpike(positional, values) {
      * 不属于任何具体段位，归 `INTERNAL`（9999）的「未归类失败」。
      */
     const conclusion = result.conclusion
-    process.exitCode = conclusion === 'accepted' ? 0 : conclusion === 'unverified' ? 5 : 1
+    const hasInputError = result.inputErrors.length > 0
+    process.exitCode = hasInputError
+      ? 2
+      : conclusion === 'accepted' ? 0 : conclusion === 'unverified' ? 5 : 1
 
     if (wantReport) {
-      const failureCode = conclusion === 'unverified'
-        ? ErrorCode.TOOL_MISSING
-        : ErrorCode.INTERNAL
+      const failureCode = hasInputError
+        ? ErrorCode.INPUT_NOT_FOUND
+        : conclusion === 'unverified'
+          ? ErrorCode.TOOL_MISSING
+          : ErrorCode.INTERNAL
       process.stdout.write(`${JSON.stringify(process.exitCode === 0
         ? successReport({
           config: { target: 'x86_64' },
@@ -416,9 +429,11 @@ async function commandSpike(positional, values) {
         })
         : failureReport({
           error: new BuildError(failureCode,
-            conclusion === 'rejected'
-              ? 'spike 实测不通过：至少一条门槛失败'
-              : 'spike 未验证：环境不具备（WSL2 / Darling 缺失）', {
+            hasInputError
+              ? `输入路径不合法：${result.inputErrors[0]}`
+              : conclusion === 'rejected'
+                ? 'spike 实测不通过：至少一条门槛失败'
+                : 'spike 未验证：环境不具备（WSL2 / Darling 缺失）', {
               hint: result.notes.join('；'),
             }),
           tracker,
@@ -521,8 +536,18 @@ async function commandDoctor(values) {
   ]
 
   const allOk = checks.every((check) => check.ok)
+  /*
+   * 失败项只可能是 Node 版本过低 —— platform / arch / wsl2 / darling
+   * 都是 ok=true 的说明项（详见上面两段注释：它们只影响能不能跑 spike，
+   * 不阻塞解析与评估）。
+   *
+   * 归码用 `TOOL_OUTDATED`（2002，退出码 5）而非 `HOST_UNSUPPORTED`（1001）：
+   * 后者属 1xxx 段，契约对应退出码 2，与这里的 5 冲突，
+   * `node contracts/validate.mjs --report r.json --exit-code 5` 会报红。
+   */
+  const failCode = ErrorCode.TOOL_OUTDATED
   if (allOk) tracker.leave('preflight')
-  else tracker.markFailed(ErrorCode.HOST_UNSUPPORTED)
+  else tracker.markFailed(failCode)
 
   if (values.json === true) {
     process.stdout.write(`${JSON.stringify({ direction: DIRECTION, checks }, undefined, 2)}\n`)
@@ -536,11 +561,12 @@ async function commandDoctor(values) {
     process.stdout.write(`${JSON.stringify(allOk
       ? successReport({ config: { target: 'x86_64' }, result: { artifact: null, artifactSize: 0, durationMs: 0 }, tracker, command: 'doctor' })
       : failureReport({
-        error: new BuildError(ErrorCode.HOST_UNSUPPORTED, '环境自检未通过', {
-          hint: '见 doctor 的逐项输出',
+        error: new BuildError(failCode, `环境自检未通过：Node ${process.versions.node} 低于要求`, {
+          hint: '用 nvm 或 Homebrew 升级到 Node 20 或更高',
         }),
         tracker,
         exitCode: 5,
+        command: 'doctor',
       }), undefined, 2)}\n`)
   }
   process.exitCode = allOk ? 0 : 5

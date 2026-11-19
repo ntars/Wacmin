@@ -16,7 +16,7 @@ Wacmin is a bidirectional interoperability suite between macOS and Windows: four
 [![Host](https://img.shields.io/badge/host-macOS%20%7C%20Windows-000000.svg?style=flat-square&logo=apple&logoColor=white)](#)
 [![Directions](https://img.shields.io/badge/directions-4-2ea44f.svg?style=flat-square)](#)
 [![Contract](https://img.shields.io/badge/contract-shared%20layer-8957e5.svg?style=flat-square)](#)
-[![Dependencies](https://img.shields.io/badge/dependencies-0%20third--party-8957e5.svg?style=flat-square)](#6-technology-stack-and-dependency-inventory)
+[![Dependencies](https://img.shields.io/badge/dependencies-0%20third--party-8957e5.svg?style=flat-square)](#6-technology-stack-and-dependencies)
 
 ---
 
@@ -146,7 +146,7 @@ The four directions are structurally isomorphic: each subproject follows the sam
 |---|---|---|---|
 | A · Prebuilt binary repackaging | Download the framework's official x86 prebuilt package, insert the user's project, rename, wrap with NSIS | Native window | End-to-end verified: Electron 43, NW.js 0.90 |
 | B · Node runtime + custom launcher | Use the official Node `win-x86` build to host application logic; write a zero-dependency launcher that spawns the host process, serves static files and opens the browser | Browser UI | End-to-end verified: the Ondra (Tauri) project |
-| C · cargo-xwin Rust shell | `cargo xwin build --target i686-pc-windows-msvc` compiles a genuine Tauri shell on macOS | Native window | Code ready; not run end-to-end on this machine due to sandbox limits |
+| C · cargo-xwin Rust shell | `cargo xwin build --target i686-pc-windows-msvc` compiles a genuine Tauri shell on macOS | Native window | Dependency tree verified to link into PE32/i386; complete project blocks on `llvm-rc` (not installed here), see 15.10 |
 | D · Roads not taken | Running makensis under Wine, Zig cross-compilation, Docker Windows containers, a self-developed PE linker, swapping in the system WebView2 | — | Reasons recorded per entry |
 
 **Eight-phase orchestration**: `preflight` → `project-build` → `runtime` → `collect` → `stage` → `manifest` → `package` → `verify`. Any failing phase halts the run and all subsequent phases are marked `skipped`.
@@ -276,15 +276,31 @@ All tests pass, and a real `.app` directory plus zip can be produced.
 | Structure parsing | Reads the `.app` directory, `Info.plist`, Mach-O header | Complete |
 | Framework determination | Infers the technology stack from binaries and framework dependencies | Complete |
 | Portability assessment | Three-level verdict `likely` / `unlikely` / `unknown` | Complete |
-| Feasibility spike | Three states: `pass` / `fail` / `blocked` | Complete (this machine reports `blocked`) |
-| Command-line program execution | Load and execute | To be verified |
-| GUI program execution | AppKit window | To be verified (the decisive gate) |
+| Feasibility spike | Three states: `pass` / `fail` / `blocked` | Complete (this machine: environment not available) |
+| Command-line program execution | Load and execute | Unverified (gate 1 `blocked`) |
+| GUI program execution | AppKit window | Unverified (decisive gate 2 `blocked`) |
 
 All tests pass. `assess` and `parse` are pure read operations that **run on any platform**; only `spike` requires a real Windows + WSL2 + Darling environment.
 
 **Spike gates and verdict semantics**: all three gates must pass before proceeding. Gate 2 (loading a minimal AppKit window) is decisive—failing it demotes AppOnWin to a "compatibility assessment tool" (reporting whether something can run, without running it), removing it from the mainline. When the environment is unavailable the result is `blocked` rather than `pass`; **`blocked` is not `pass`**, and the data structure keeps them distinct.
 
 **Measured sample**: `Calculator.app` assessed to 2 binaries, 21 framework dependencies and 3 frameworks explicitly unsupported by Darling. Frameworks absent from the list are always `unknown`; availability is never assumed.
+
+**Feasibility verdict (measured 2026-11-19): environment not available.**
+
+Falls in the third of the three possible verdicts — neither "holds" nor "does not hold". The basis is one complete `spike --app /System/Applications/Calculator.app --json` run, gate by gate:
+
+| Gate | Status | Source |
+|---|---|---|
+| 1 Command-line Mach-O | `blocked` | `probeWsl()` returns `available:false`, `reason` = "host is darwin, not Windows; WSL2 is only available on Windows." |
+| 2 AppKit window (decisive) | `blocked` | Same — the `darling` probe was never reached |
+| 3 Info.plist parsing | `pass` | Real `.app` parsed, `Calculator` main binary located |
+
+Overall `conclusion = unverified`, process exit code **5**. In the contract `5` means "missing external dependency", paired error code `AOW_2001` (`errorSegment: 2001/2002`), matching `exit-codes.json` item by item.
+
+**Why not write "pending".** "Pending" carries no information: it does not distinguish "tried it and it failed" from "could not try". The two point in opposite directions for the next action — the first should be dropped or demoted, the second only needs a machine with Windows + WSL2. The verdict here is the latter, hence "environment not available". By the same token, **gate 3 passing must not be reported as "partially holds"**: gate 3 only proves the parsing capability works (which is what `assess` / `parse` already deliver), does not depend on Darling, and proves nothing about "can it run". All three gates must pass; missing one is unverified.
+
+**What it takes to become "holds"**: a Windows 10+ machine, WSL2 enabled with a distribution installed, Darling built and installed inside that distribution, and an executable Mach-O sample (`--sample`). All four are required; see 5.1.2.
 
 ### 3.5 Shared Contract Layer
 
@@ -308,6 +324,7 @@ The single point of definition for consistent external behaviour across the four
 | Aggregate self-check | `doctor` runs all four directions' `doctor` in parallel | Complete |
 | Contract checking | `contract` really invokes each direction and validates report compliance | Complete |
 | Web dashboard | Local service + SSE progress push + history persistence | Complete |
+| Viewport measurement | `scripts/viewport-check.mjs` drives a real Chrome across three viewports (375 / 768 / 1440) | Complete |
 
 All tests pass. The responsibility boundary covers exactly three things: locate a direction's CLI and spawn it as a subprocess, read back its `--report` JSON and render it, and check whether the four directions genuinely honour the contract. Seventeen of those tests guard that this module's contract checker and `contracts/validate.mjs` must reach the same verdict on the same report — two independent implementations will diverge, it is only a matter of time.
 
@@ -427,7 +444,9 @@ cargo xwin build --target i686-pc-windows-msvc --release
 → rsprobe.exe  92 KB  PE32 / i386 / windows-gui  entrypoint 69304  verify ok
 ```
 
-**One trap worth knowing**: `cargo xwin cache xwin` downloads only `x86_64` and `aarch64` CRT/SDK components, not x86. A direct build then fails with `could not open 'user32.lib'`, while a `DONE` marker in the cache prevents re-running from fetching the missing pieces. The fix is to set `XWIN_ARCH=x86`—mac2win sets this internally.
+**One trap worth knowing**: `cargo xwin cache xwin` downloads only `x86_64` and `aarch64` CRT/SDK components, not x86. A direct build then fails with `could not open 'user32.lib'`.
+
+Setting `XWIN_ARCH=x86` **is not enough**. That variable only decides *what to download*, while cargo-xwin's cache check reads the first line of `xwin/DONE` and never verifies the files are on disk — so a state can exist where `DONE` says `x86` while `crt/lib/` holds only `x86_64`, and re-running the identical command reproduces the identical error. mac2win therefore does both: it sets `XWIN_ARCH=x86` for the build, and its preflight `x86-libs` item inspects the directories on disk (`crt/lib/x86`, `sdk/lib/um/x86`), reporting the mismatch **before** compilation starts. See 15.10.4.
 
 #### Highlight 9: Electron's x86 ceiling determined by measurement, not guesswork
 
@@ -486,6 +505,109 @@ cargo xwin build --target i686-pc-windows-msvc --release
 - **Differentiation**: Most tools take the filename directly or take the version resource directly; the former produces unreadable paths, the latter has no fallback when the version resource is absent.
 - **Evidence**: `Ondra-1.1.7-alpha-windows-x64-setup` → `Ondra`; `npp.8.6.9.Installer.x64` → `npp`; `MS-Office-setup` → `MS Office`.
 
+#### Highlight 15b: Exactly one entry-point rule—`install` and `package` must name the same exe
+
+- **Value**: `install` located the right entry, `package` located it again with a different rule—so **whatever you installed, the bundle pointed at the same system-supplied program**. Such a defect never raises an error: the `.app` double-clicks, launches, shows a Dock icon, and simply opens something the user never asked for.
+- **Implementation**: The rule lives in a single module, `wepack/entry.py`; `cli._find_installed_entry` and `package._guess_entry` are aliases or callers of it. Search order is "most likely this install's own product" first: `C:\Wacmin\<product dir>` → `Program Files\<product dir>` → `Program Files (x86)\<product dir>` → `AppData\Local\<product dir>` → a whole-layer fallback over all four, and the fallback must pass a filename-relevance gate.
+- **Differentiation**: `package` used to take the highest-scoring exe under `Program Files*` and return it. The scorer awards +25 for "under Program Files", +20 for GUI subsystem and +10 for an icon, so the base layer's own `wordpad.exe` reliably scores 55 and always wins—while the user's program is not in those directories at all and never enters the race.
+- **Evidence**: Same prefix (W02Probe installed to `C:\Wacmin\w02\`), measured: before the fix `install` yielded `drive_c/Wacmin/w02/W02Probe.exe` and `package` yielded `drive_c/Program Files/Windows NT/Accessories/wordpad.exe`; after the fix both agree on the former, all 6 regression guards pass, and reinstating the old implementation turns 2 of them red immediately.
+
+#### Highlight 15c: `build --json` writes one JSON document, merging both halves
+
+- **Value**: `build` chains `install` and `package`, each with its own payload. `--json` used to be passed straight through, so stdout carried **two** concatenated documents and `json.load` raised `Extra data: line 50 column 1`—the reader got nothing usable at all.
+- **Implementation**: Sub-commands are always invoked with `json=False` and their human-readable output is redirected to stderr via `_StdoutToStderr`; `build` emits one summary whose top level carries `entry` / `layers` / `bundle_id`, with `install` and `package` sub-objects for their respective fields.
+- **Differentiation**: The usual approach is "every sub-command emits, the caller concatenates". That barely works in a shell (`jq -s`) but breaks the README 10.1 contract that stdout carries only JSON, and it muddies what `--report` means.
+- **Evidence**: `wepack build setup.exe -o out --json | jq -r .entry` returns the entry path directly; single-document-ness is guarded by a test that counts segments with `raw_decode` and fails on a second one.
+
+#### 4.2.1 Automatic layer builds: three of five are automatable, two are not
+
+**Verdict table** (measured on wine 11.21 / macOS arm64, 2026-11-19):
+
+| Layer | Automatable | Source | Blocker or note |
+|---|---|---|---|
+| `base` | ✅ | One `wineboot -u` run | — |
+| `dotnet` | ✅ | The bundled `wine-mono-*/support/winemono-support.msi` | Installs wine-mono, **not** Microsoft's .NET Framework |
+| `fonts-cn` | ✅ | User-supplied local font files | See "An overturned conclusion" below |
+| `mfc` | ❌ | — | Wine does not implement MFC; no MFC binary ships with the runtime and there is no lawful source |
+| `vcpp` | ❌ | — | The base `system32` already carries all 28 VC++ runtime DLLs; normally unnecessary |
+
+**Measured dotnet layer**: `wepack layers build dotnet` → 1851 files / 332.6 MB / 36 seconds, `inspect_layer` returns `ok=True, problems=[]`. The result contains `Microsoft.NET/Framework/{v1.1.4322,v2.0.50727,v4.0.30319}/mscorlib.dll` plus the matching `Framework64` versions. The delta against base is **61 unique files, 60 of them under `Microsoft.NET/` (5.4 MB)**.
+
+**An easy detail to get wrong**: after the MSI installs, `mscoree.dll` is **byte-identical** to base (md5 `3f9d890657e3829cecf67735d9dade16`, 196608 bytes in both). The MSI does **not** replace wine's stub; the only real addition is the `Microsoft.NET/` directory. Describing the dotnet layer as "upgrades mscoree" would be false.
+
+**Two guard rails against the same class of false success**:
+
+1. After `msiexec` returns 0, the code **must verify** that `Microsoft.NET/Framework` exists and contains `*/mscorlib.dll`, otherwise it raises `VerifyFailed`. Exit code 0 with nothing installed has happened repeatedly in this project.
+2. An existing layer **refuses to rebuild** (`UsageError`) rather than deleting itself. A user may have hand-copied files into it; silently overwriting destroys their work.
+
+**An overturned conclusion: Chinese fonts were never the gap**
+
+The code used to say "Chinese fonts are a real gap: base's `Fonts/` is an empty directory". The directory *is* empty (0 files measured), but **the inference was wrong**—wine does not only look there:
+
+- `wineboot` **auto-registers** host system fonts into the Fonts section of `system.reg` as `Z:\System\Library\Fonts\...`. Measured: base carries **883 entries** there (882 excluding the `#time` metadata), 878 of them pointing at Z: drive host paths; counting the single section, the Chinese families are **PingFang 48 / Hiragino 22 / Songti 16 / Kaiti 14 / Heiti 10**. So "Chinese does not render" is simply false.
+- **One counting trap must be called out here**: `system.reg` contains both `[Software\Microsoft\Windows\CurrentVersion\Fonts]` and `[Software\Microsoft\Windows NT\CurrentVersion\Fonts]`, and **the two sections have identical key sets** (883 each, with no keys unique to either). They are two spellings of the same data, **not two sets of fonts**. Adding the two sections yields a number that is exactly double the truth — the earlier text stating "PingFang 96 entries, 254 Chinese fonts in total" was precisely that arithmetic, twice the real value. Use the `Windows NT` section only.
+- The real gap is **lookup by Windows font name**: the exact names `SimSun`, `Microsoft YaHei`, `SimHei`, `DengXian`, `MingLiU` are **entirely absent** from base (measured 0 each), and none of the 21 `FontSubstitutes` entries (21 after excluding `#time`) maps a Chinese font.
+- `FontLink\SystemLink` gives `Tahoma` (the stand-in for `MS Shell Dlg`) a fallback chain of `SIMSUN.TTC` / `MSYH.TTC` and similar Windows filenames that do not exist inside the layer—so that chain is broken on base.
+
+**The `fonts-cn` layer therefore exists to pin fonts down and remove the host dependency, not to add missing Chinese glyph coverage.** It drops user-supplied font files into `Fonts/` so they ship with the artefact and still work on another Mac. Fonts installed that way are recognised under their own family names and do **not** become SimSun automatically—mapping names like `SimSun` across is a separate link in the chain (below).
+
+**Addendum: the "lookup by Windows name" problem already has a solution, just not in this layer**
+
+The missing `SimSun` described above is handled on the launcher side, independently of the `fonts-cn` layer:
+
+| Stage | Mechanism | Location |
+|---|---|---|
+| Declare the mapping | `font_map` in `compat.yaml`: `微软雅黑: PingFang SC`, `宋体: Songti SC` | Recipe |
+| Generate the registry file | Writes `Contents/Resources/Private/fontsub.reg`, adding entries to `FontSubstitutes` | `launcher/Sources/main.swift:280-333` |
+| Apply it | Runs `wine regedit /S fontsub.reg` before launch; failure logs a WARN without blocking startup | Same |
+
+In other words: `font_map` fixes the display problem when software hard-codes Microsoft YaHei, while the `fonts-cn` layer fixes whether an artefact's fonts depend on the host. They are not substitutes for each other—do not expect installing a layer to give you name mapping for free.
+
+**Correcting a mistake I made last round**: an earlier note claimed "`fontreg` registered 4 entries". That was a misreading. `fontreg` **does not exist** in wine 11.21:
+
+```
+$ wine fontreg
+Application could not be started, or no application associated with the specified file.
+ShellExecuteEx failed: File not found.        # exit code 1
+```
+
+Wine **scans the directory** at startup instead, which `WINEDEBUG=+font` shows directly:
+
+```
+trace:font:unix_face_create unix_name .../drive_c/windows/fonts/WacminProbeCN.ttc, face_index 0..7
+trace:font:insert_face_in_family_list Original font L"\\??\\C:\\windows\\fonts\\Songti.ttc" is newer ...
+```
+
+All 8 faces inside a single ttc get enumerated, and `is newer so skipping` proves the in-layer font really was loaded. The implementation therefore **runs no registration command at all**—it only guarantees the files land and are readable. One fewer external tool dependency, and one fewer place where exit code 0 could mean nothing happened.
+
+**Error semantics for mfc / vcpp** (exit codes per `contracts/exit-codes.json`):
+
+| Command | Exception | Exit code |
+|---|---|---|
+| `layers build mfc` | `MissingDependency`, with the manual copy path | 5 |
+| `layers build vcpp` | `UsageError`, noting base already has 28 | 2 |
+| `layers build <unknown>` | `UsageError` | 2 |
+| `layers build fonts-cn` (no `--font`) | `UsageError` | 2 |
+
+**Tests**: `tests/test_phase7_layers.py` has **31 cases**, 4 of which run real wine (2 end-to-end builds: dotnet MSI install and fonts-cn file placement with 0644 permission checks; 2 match runs against real layers); the rest need no wine. Four cases were verified to go red when the defect is re-injected: turning `host_to_wine_path` from an alias into a wrapper breaks the identity test; reverting version sorting from tuples to strings breaks the `11.3.0` vs `9.10.0` ordering test (`'9' > '1'`, so string sort picks the wrong version); making the Fonts-section parser accept any Fonts section makes `TestFontsSectionCounting` fail with `888 != 883`; reverting the layer DLL index to "system32 only" turns **5 cases** red across `TestLayerDllIndexCoverage` and `TestMatchAgainstRealLayers` with `['commdlg', 'd3d8'] != []`.
+
+**A pre-existing defect fixed along the way: the layer DLL index missed `syswow64` and `Microsoft.NET/`**
+
+`match_layers` decides whether some layer can supply a dependency by scanning which DLLs actually exist in the layer directories. The original implementation scanned only `drive_c/windows/system32` and `drive_c/windows`, non-recursively, so it missed two kinds of files that really exist:
+
+| Missed directory | Measured size | Consequence |
+|---|---|---|
+| `drive_c/windows/syswow64` | 636 DLLs, **64 of which exist only in `syswow64`** (`d3d8` / `commdlg` / `avifile` / `ctl3d` …) | 32-bit apps importing these get `unsolved` "no layer can supply it", although they sit in base |
+| `drive_c/windows/Microsoft.NET/Framework/v*/` | `mscorlib.dll` and 4 others | dotnet layer installed, yet `mscorlib` is still reported as unsolved |
+
+The consequence is not a crash but **misleading output**: `unsolved` is a signal to switch approach or find a substitute, yet nothing is actually missing. Measured before the fix: importing `d3d8`+`commdlg` → `unsolved=['commdlg','d3d8']`; importing `mscorlib` → `unsolved=['mscorlib']`. After the fix both are `[]`, and `mscorlib` additionally moves `layers` from `['base']` to `['base','dotnet']`.
+
+The judgement now lives in a single `_windows_dll_stems(root)` that both `base_dll_index()` and `_layer_dll_index()` call — no second copy (README 5.3 red line). Recursively scanning the whole `windows/` tree costs **23 ms** measured (dotnet layer, 1294 DLLs), which is negligible.
+
+One boundary that must be stated honestly: `system.dll` exists in **neither** base nor dotnet (measured `rglob('system.dll')` returns 0 in both), so programs importing it are still reported `unsolved` — that is an honest conclusion, not a defect. wine-mono packs most of the BCL into a single `mscorlib`; a standalone `System.dll` is the Microsoft-original layout.
+
+**A documentation error caught during the 2026-11-19 review (fixed; recorded here to prevent recurrence)**: this section previously claimed "254 Chinese fonts in total (PingFang 96 / Songti 28 / Kaiti 28 / Heiti 20 / Hiragino 44)". Measuring each one showed **every figure was exactly twice the real value**. The cause was not a transcription slip: the two Fonts sections in `system.reg` have identical key sets, and both were added together. The real single-section values are PingFang 48 / Hiragino 22 / Songti 16 / Kaiti 14 / Heiti 10. What makes this class of error dangerous is that a larger, more finely broken-down number *looks* more credible than an obvious mistake. Three structural-invariant tests now guard it (the two sections must share a key set, the parser must take one section, the Chinese count must not equal the sum of all sections), deliberately asserting structure rather than specific counts—host fonts change with the OS version, so hard-coded numbers would drift again.
+
 ### 4.3 Win2Mac
 
 #### Highlight 16: A custom zip writer so Unix permission bits survive Windows
@@ -541,6 +663,26 @@ This entry is not "what we got right" but "the checker itself can lie"—recorde
 | Prefix regex written as `[A-Z]{2,4}` | Did not accept the digit 2 in `M2W` / `W2M` | Hand-written regex instead of reading the contract |
 | Whitelist missing `checks` | Compliant reports judged as containing unknown fields | Hand-written whitelist out of sync with the schema |
 | Whitelist extra `config` / `nextSteps` | Non-compliant reports judged compliant | Same |
+
+#### Viewport measurement: a check script that used to run on empty
+
+A comment in `style.css` claimed that "after injecting a 139-character path, the three viewports showed N overflows each; adding these two rules brought them to zero". That claim originally had **no reproduction path**—the script that measured it never entered the repository, which amounts to no evidence. Adding `console/scripts/viewport-check.mjs` exposed two deeper problems.
+
+**The script will not announce that it measured nothing.** It launches a real Chrome, renders the real page, injects a long string, measures rectangles, then exits 0. The first version reported "zero overflow across all three viewports"—which looked perfect. Only a negative check (removing the whole `overflow-wrap` group and re-running) revealed it **still reported zero**: the stress injection rewrote the text of existing `.stage-msg` elements, and those containers are **entirely empty** on page load—stage rows are only built by `app.js` after the user triggers a build once. Assigning to an empty set does nothing at all.
+
+The fix is to stop rewriting text and instead create nodes matching `app.js`'s real DOM structure inside the real containers.
+
+**Measuring only element boxes misses half the cases.** After fixing the injection the negative check reacted, but only the 375 viewport reported overflow; 768 and 1440 both reported zero—while wider viewports have more fixed columns and should be worse. The cause is `.check`'s pinned column widths, `grid-template-columns: 16px 200px 1fr`: pushing a 139-character path in leaves **the column width untouched and lets the text overlap the adjacent column**, while the element box measures perfectly normal. So every text node is additionally measured with `Range.getClientRects()`—the glyph boxes actually rendered, which is the boundary the user's eye sees.
+
+| Viewport | Baseline | Stress (rules in place) | Stress (rules removed) |
+|---|---|---|---|
+| 375 | 0 | 0 | 10 |
+| 768 | 0 | 0 | 1 |
+| 1440 | 0 | 0 | 1 |
+
+Reproduce with `node console/scripts/viewport-check.mjs` (human-readable table) or `--json` (JSON only on stdout). Exit codes: `0` no overflow / `1` overflow / `2` no Chrome found—separated because the two situations call for completely different responses, and merging them makes people investigate an environment problem as a code defect.
+
+This script takes a dozen seconds and depends on a locally installed browser, so it does not belong in `npm test`. Instead `console/test/viewport-check.test.mjs` statically guards the three things most likely to rot: the stress string is still 139 characters, the measurement still covers both boxes and glyph rects, and the `style.css` group still carries `min-width: 0` and `overflow-wrap: anywhere`. The third is the real value—if someone deletes those two lines in passing, `npm test` goes red immediately rather than waiting for a user on a narrow screen to find the paths clipped.
 
 ### 4.5 ai
 
@@ -605,6 +747,15 @@ Failing gate 2 demotes AppOnWin to a "compatibility assessment tool" and removes
 
 **Three states, not two**: the spike result is `pass` (measured success) / `fail` (measured failure) / `blocked` (environment unavailable, could not execute). `blocked` **is not** `pass`—writing "not verified" as "passed" is precisely the class of error this project most wants to avoid.
 
+**`blocked` splits one level further** (added 2026-11-19): it has two causes that mean completely different things to the user, so the spike emits `inputErrors` to keep them apart.
+
+| Cause | Example | Overall conclusion | Exit code |
+|---|---|---|---|
+| Environment unavailable | Host is not Windows / no WSL2 / no Darling | `unverified` | 5 |
+| Wrong argument | `--app /nope.app` does not exist, `--sample` points at a missing file | `unverified` + non-empty `inputErrors` | **2** |
+
+The dividing line is "was this gate ever executed": a non-existent path never reached parsing, so it cannot have failed; `fail` must be reserved for "ran once and failed". This previously recorded path errors as `fail`, which turned the overall conclusion into `rejected` with the wording "the direction is demoted to a compatibility assessment tool by design" — **the user had merely mistyped one letter, yet was told the direction was disproven**; the same path handed to `assess` produced exit code 2. The same input yielding two meanings across two subcommands leaves scripts unable to branch on the exit code. Any "invalid input path" now maps to exit code 2 (paired with `AOW_1002`), consistent with `assess` / `parse`.
+
 ### 5.2 Design of the Contract Layer
 
 #### 5.2.1 The nine exit-code semantics
@@ -630,11 +781,14 @@ Failing gate 2 demotes AppOnWin to a "compatibility assessment tool" and removes
 | 1000 | 1001–1999 | Environment and input |
 | 2000 | 2001–2999 | External tools |
 | 3000 | 3001–3999 | Runtime |
-| 4000 | 4001–4999 | Build and assembly |
-| 5000 | 5001–5999 | Packaging |
+| 4000 | 4001–4999 | Input-artefact handling |
+| 5000 | 5001–5999 | Artefact generation |
 | 6000 | 6001–6999 | Artefact verification |
 | 7000 | 7001–7999 | Capability not implemented |
-| 9000 | 9001–9999 | Flow control and internal errors |
+| 9000 | 9001–9998 | Flow control |
+| 9999 | 9999 | Internal errors |
+
+**Nine segments, not eight.** This table must match `segments` in `contracts/error-prefixes.json` item by item—`9000`'s `range` stops at `9998`, and `9999` is a segment of its own. This document previously merged the two into "`9000` / `9001–9999` flow control and internal errors" while the code keeps `9999` separate: `segmentOf()` in `validate.mjs` routes by the actual `range`, so a reader following the old text would expect `9999` to belong to segment `9000` and find the validator behaving differently.
 
 Each direction defines concrete codes in its own errors module, but **segments never cross boundaries**. `4xxx` always means input-artefact handling and never acquires a different meaning for some direction's convenience.
 
@@ -1058,7 +1212,7 @@ Entry names are first normalised to a single separator, then rejected if they st
 
 Three things must hold: every option in help is accepted by the parser, every option accepted by the parser is documented in help, and a misspelt subcommand reports an explicit error rather than being treated as a path.
 
-Each is guarded by tests (each direction's `test/help.test.mjs`), because such divergence does not crash—it merely wastes the user's time. Concrete instances are in section 15.2.
+Each is guarded by tests (in the three Node directions `test/help.test.mjs`; for ExeOnMac, `TestCLIContract` in `tests/test_phase0.py` plus `test_phase6.py`), because such divergence does not crash—it merely wastes the user's time. Concrete instances are in section 15.3.
 
 **One behavioural defect fixed in passing**: `win2mac biuld ./proj` and `apponwin asseess` were previously not recognised as "unknown subcommand"—the former reported "project directory does not exist", sending the user to inspect paths, and the latter was worse, printing a long help text and exiting with **code 0**, so `|| exit 1` in scripts never caught it.
 
@@ -1163,7 +1317,7 @@ During packaging, Mac2Win includes the target framework's **Windows x86 prebuilt
 
 ### 6.4 Indirect and Transitive Dependencies
 
-**This project has no transitive dependencies of its own**—none of the seven modules in the repository (five directions, `console`, `ai`, `contracts`) introduces npm or PyPI packages, so there is no "A depends on B, B depends on C" chain.
+**This project has no transitive dependencies of its own**—none of the seven modules in the repository (four directions, `console`, `ai`, `contracts`) introduces npm or PyPI packages, so there is no "A depends on B, B depends on C" chain.
 
 **Indirect dependencies exist at the runtime level**, bundled by the upstream builders; this project neither splits nor modifies them. The itemised account is in chapter 6 of [`NOTICE`](./NOTICE) and is not repeated here. One point worth knowing in advance: Electron / NW.js / Node.js embed Chromium / V8 / libuv, and Wine embeds FreeType / libpng / MoltenVK; those components' licences ship with the upstream packages and this project does not modify them.
 
@@ -1185,7 +1339,7 @@ The four questions readers ask most often are answered directly here:
 **Bottom line: this repository contains no font files and no icon assets.** Per-item attribution of responsibility is in [`NOTICE`](./NOTICE) chapter 9; what follows covers only the three things most often misunderstood:
 
 - **ExeOnMac extracts icons, but they never enter the repository.** Extraction operates on the installer supplied by the user, and the result is written only into that user's local `.app`, never distributed with this project.
-- **Chinese fonts must be supplied by the user.** This project bundles no commercial fonts and offers no font downloads. If a user places fonts such as Microsoft YaHei or SimSun into the shared layer, the licensing responsibility rests with that user.
+- **Chinese fonts must be supplied by the user.** This project bundles no commercial fonts and offers no font downloads. If a user places fonts such as Microsoft YaHei or SimSun into the shared layer, the licensing responsibility rests with that user. Note this is only about making the artefact independent of host fonts—Chinese already renders on base, because `wineboot` registers the host's Chinese font families (PingFang / Hiragino / Songti / Kaiti / Heiti and others, 110 entries in the single section) into the registry (see [4.2.1](#421-automatic-layer-builds-three-of-five-are-automatable-two-are-not)). Making software's hard-coded "Microsoft YaHei" display correctly relies on `font_map`, not on font files.
 - **Win2Mac generating no icon is a legitimate state.** `--icon` accepts a user-supplied `.icns`; without one no icon is generated and the artefact remains legitimately distributable.
 
 Every visual element of the console and the dashboard is drawn with CSS — no bitmaps, no SVG assets, no icon font.
@@ -1405,9 +1559,11 @@ python3 -m wepack.cli extract ~/Downloads/setup.exe -o /tmp/out
 # 4. Install and produce the .app
 python3 -m wepack.cli install ~/Downloads/setup.exe -o "~/Applications/MyApp (Win).app"
 
-# 5. Open the result
-open "~/Applications/MyApp (Win).app"
+# 5. Open the result (~ inside quotes is not expanded by the shell, so use $HOME here)
+open "$HOME/Applications/MyApp (Win).app"
 ```
+
+`install`'s `-o` is passed through wepack's own `expanduser()`, so `"~/Applications/..."` in step 4 resolves correctly; `open` is a separate process, so a `~` inside quotes reaches it verbatim and reports `~/Applications/... does not exist`.
 
 After `install` completes it prints:
 
@@ -1531,7 +1687,7 @@ These three files are the common language of the four directions. Changing them 
 | File | Content | Change rule |
 |---|---|---|
 | `contracts/exit-codes.json` | The semantics of the nine exit codes and the permitted error-code segments per code | **Append only; never change meanings.** Once published, changing a code value breaks every script that depends on it |
-| `contracts/error-prefixes.json` | The four directions' error-code prefixes (`M2W` / `EOM` / `AOW` / `W2M`) and the seven-segment allocation | Segments may not cross boundaries; a new direction must register its prefix here first. `WAC` and `CNT` are reserved |
+| `contracts/error-prefixes.json` | The four directions' error-code prefixes (`M2W` / `EOM` / `AOW` / `W2M`) and the nine-segment allocation | Segments may not cross boundaries; a new direction must register its prefix here first. `WAC` and `CNT` are reserved |
 | `contracts/run-report.schema.json` | The structure of `--report` / `--json` output | A breaking change must increment `schemaVersion`; `console` branches on it |
 
 `contracts/validate.mjs` is the self-checker for these three files, and it also validates individual reports:
@@ -1681,7 +1837,7 @@ built-in defaults → package.json inference → framework inference → configu
 │   ├── vcpp/            # VC++ runtime (optional; only to overwrite with Microsoft originals)
 │   ├── mfc/             # MFC runtime (absent from base; user-supplied)
 │   ├── dotnet/          # .NET Framework (user-supplied)
-│   └── fonts-cn/        # Chinese fonts (base's Fonts is empty; user-supplied)
+│   └── fonts-cn/        # Pins user fonts down, removing host dependency (Chinese never was the gap)
 ├── runtime/
 │   └── wine/            # Wine runtime (x86_64)
 └── logs/
@@ -1785,9 +1941,22 @@ The subcommands and exit codes of the four directions follow the same contract.
 | Unified entry | `wacmin-console` | `list` / `run` / `doctor` / `contract` / `web` |
 | AI unified entry | `wacmin` | `list` / `status` / `run` / `doctor` / `contract` / `mcp` / `skill` |
 
-**Common options** (identical across directions): `--json` outputs machine-readable results, `--report` outputs the unified run report, `--verbose` enables debug-level logs, `-h/--help`, `-v/--version`.
+**Common options** (identical across directions): `--json` outputs machine-readable results, `--report` outputs the unified run report, `--verbose` enables debug-level logs, `-h/--help`, `--version` prints the version.
+
+**`-v` does not have the same meaning across all four directions, so it is not a common option.** In `mac2win` / `win2mac` / `apponwin`, `-v` is short for `--version`; in `wepack` it is short for `--verbose` (`--version` has only the long form and is a top-level argument, not accepted after a subcommand). Scripts that need the version should use `--version` everywhere; `-v` turns on debug logging under `wepack` and prints a version number under the other three. The difference comes from the two parsers (hand-written argv on the Node side, `argparse` on the Python side); this document does not force them together, it only asks that **`-v` is never used to fetch the version**.
 
 **Relationship between `--json` and `--report`**: `--report` emits exactly the structure defined by `contracts/run-report.schema.json`; `--json` is an alias or subset in some directions. Both share the same constraint: **stdout carries only JSON and logs go to stderr**, so a pipe can hand stdout directly to `jq`.
+
+**`apponwin spike` has four exit codes, one more than the generic set — the input-error branch on exit code 2**:
+
+| Exit code | Trigger | Paired error code |
+|---|---|---|
+| 0 | All three gates `pass` (`accepted`) | — |
+| 1 | At least one gate `fail` (`rejected`, direction does not hold) | `AOW_9999` |
+| 2 | `--sample` / `--app` points at a non-existent path (gate never executed, `inputErrors` non-empty) | `AOW_1002` |
+| 5 | Environment unavailable causing `blocked` (`unverified`) | `AOW_2001` |
+
+`2` and `5` must stay separate: the first only needs a corrected path, the second needs a different machine. Collapsing them makes CI record "mistyped path" as "missing dependency", triggering a pointless WSL2 installation.
 
 **ExeOnMac failure output format**:
 
@@ -1846,7 +2015,9 @@ Using Mac2Win as the example, `build` has eight phases with weights (weights dri
 
 **Why weights are not uniform**: averaged across phases, packaging (over half the total duration) would occupy only 1/8 and users would watch the bar stall at 87%. Weighted by expected duration, the progress curve roughly matches actual elapsed time.
 
-**ExeOnMac's eight phases**: `detect` → `mkdir` → `prefix` → `install` → `scan` → `package` → `register` → `write`. Isomorphic to Mac2Win's eight phases, differing in that step 3 creates a Wine prefix rather than preparing a Node runtime.
+**ExeOnMac's eight phases** (matching `wepack/report.py`'s `STAGES` one-to-one): `preflight` → `detect` → `extract` → `prefix` → `install` → `scan` → `package` → `verify`. Isomorphic to Mac2Win's eight phases, differing in that step 2 identifies an installer rather than a project and step 4 creates a Wine prefix rather than preparing a Node runtime.
+
+**A single sub-command does not run all eight; the rest are marked `skipped`**. `detect` runs only `preflight` and `detect`; `extract` stops after `extract` (everything past install is irrelevant to it); `install` skips `extract` (installing needs no prior unpacking) plus `package` / `verify`; `package` skips the first six and runs only `package` and `verify`. Reports therefore show no false "all grey" and do not count unrun stages toward duration.
 
 ### 10.4 Local HTTP Interfaces
 
@@ -1989,7 +2160,9 @@ Wacmin/
 │   ├── error-prefixes.json    Error-code prefixes and segment allocation
 │   ├── run-report.schema.json --report / --json output structure
 │   ├── validate.mjs           Contract self-check + report validation
-│   └── validate.test.mjs      Tests for the checker itself
+│   ├── validate.test.mjs      Tests for the checker itself
+│   ├── doc-counts.mjs         Sole reader of the 12.1 test-count table (--check / --min / --list)
+│   └── doc-counts.test.mjs    Guard keeping the table and both READMEs consistent
 ├── mac2win/                   Direction 1 · Produce Windows installers on macOS
 │   ├── bin/mac2win.mjs        Single command entry
 │   ├── src/                   Core implementation
@@ -2013,6 +2186,8 @@ Wacmin/
 │   │   ├── layers/            Layer building and import-table matching
 │   │   ├── package/           .app assembly, icons, launcher build, verification
 │   │   ├── recipes/           compat.yaml read/write and recipe library
+│   │   ├── entry.py           Entry-point rule (the single copy install and package share)
+│   │   ├── report.py          Unified run report and the eight stage records
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher (AppKit + Foundation)
 │   ├── tools/badge.swift      Icon badge composition
@@ -2032,6 +2207,7 @@ Wacmin/
 │   └── package.json
 ├── console/                   Unified entry for the four directions (CLI + web dashboard)
 │   ├── bin/wacmin-console.mjs Executable entry (thin shell: parses argv and prints only)
+│   ├── scripts/               viewport-check.mjs (three-viewport measurement)
 │   ├── src/                   directions.mjs / server.mjs / contract-check.mjs
 │   ├── web/
 │   ├── test/
@@ -2223,14 +2399,14 @@ Performance in each direction is determined by its foundation; this project only
 
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
-| mac2win | 132 | about 30 seconds | |
-| exeonmac | 416 | about 5 minutes | Includes on-the-spot NSIS / Inno compilation and 3 real wine installs |
-| win2mac | 121 | about 2 seconds | |
-| apponwin | 91 | about 0.5 seconds | |
-| console | 215 | about 11 seconds | |
+| mac2win | 167 | about 28 seconds | |
+| exeonmac | 453 | about 4 minutes | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
+| win2mac | 130 | about 2 seconds | |
+| apponwin | 96 | about 0.5 seconds | |
+| console | 230 | about 19 seconds | |
 | ai | 132 | about 9 seconds | |
-| contracts | 58 | about 2 seconds | Includes 15 documentation-count self-checks |
-| **Total** | **1165** | — | See "0 skipped repository-wide" below |
+| contracts | 79 | about 2 seconds | Includes documentation-count and exit-code pairing self-checks |
+| **Total** | **1287** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -2401,8 +2577,8 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 | Item | Status | Reason |
 |---|---|---|
-| Artefact code signing | Not implemented | Requires a Windows EV certificate and `signtool`, impossible on macOS |
-| Artefact notarisation | Not implemented | Win2Mac artefacts are unsigned, and notarisation presupposes a signature |
+| Artefact code signing | Not implemented | Certificate missing, not tooling. The bottleneck is CA/B Forum requiring the private key on FIPS 140-2 L2+ hardware, non-exportable—OS-independent, so a Windows machine changes nothing. `osslsigncode` signs `.exe` locally on macOS. See 15.11 |
+| Artefact notarisation | Not implemented | Needs an Apple Developer ID ($99/yr) and `notarytool`, the latter genuinely macOS-only. **ExeOnMac has an additional architectural blocker**: the wine prefix lives inside the bundle and is written in place, so signing breaks the resource seal. See 15.11.3 |
 | Local service authentication | Not implemented | Loopback binding plus `Origin` validation already covers the threat model; adding auth complicates CLI triggering with no real gain |
 | Transport encryption | Not implemented | Loopback communication; encryption would be meaningless |
 | Supply-chain signature verification | Only for Node.js | See 13.2; other upstreams offer no usable list |
@@ -2465,7 +2641,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | Limitation | Reason | Workaround |
 |---|---|---|
 | Mac2Win's Electron x86 stops at v43 | No `win32-ia32` prebuilds from v44 onwards | None. Higher versions require abandoning the x86 target |
-| Mac2Win artefacts are unsigned | Requires a Windows EV certificate and `signtool`, neither possible on macOS | Sign in CI on a Windows runner |
+| Mac2Win artefacts are unsigned | Certificate missing (private key must sit on FIPS 140-2 L2+ hardware, OS-independent), not tooling | Sign with `osslsigncode` locally on macOS, or via `signtool` on a Windows CI runner. See 15.11 |
 | Mac2Win does not support native modules (`.node`) | Compiled machine code is bound to OS/CPU | Switch to a pure-JS alternative; mac2win intercepts during collection and names the package |
 | Mac2Win cannot build macOS packages on a Mac for Windows | Platform binary formats differ (Mach-O vs PE) and the matching SDK is required | None. Build on the corresponding platform |
 | Mac2Win cannot build Linux packages on a Mac | Requires Linux glibc and an ELF toolchain | Docker is possible but out of scope |
@@ -2534,9 +2710,9 @@ Every place where the same code behaves differently across hosts:
 **Mac2Win**
 
 1. **Electron's ceiling is version 43.** An upstream release policy, not something this project can bypass.
-2. **Artefacts are unsigned.** The `.exe` triggers a SmartScreen warning, and the only advice is to click "More info → Run anyway". Signing requires a Windows EV certificate and `signtool`, impossible on macOS.
+2. **Artefacts are unsigned.** The `.exe` triggers a SmartScreen warning, and the only advice is to click "More info → Run anyway". What is missing is a certificate, not a tool—`osslsigncode` signs PE directly on macOS via `brew install osslsigncode`. The certificate side is bound by the CA/B Forum hardware-key requirement (OS-independent). See 15.11.
 3. **Native modules are unsupported.** `.node` files are compiled machine code bound to OS/CPU. Collection intercepts them and names the offending package.
-4. **The Tauri Rust shell is not verified end-to-end on this machine.** The code exists (`src/core/rust-shell.mjs`) and preflight plus configuration are wired up, but LLVM could not be installed here because of sandbox limits. The `rsprobe.exe` compilation proves "arm64 macOS can produce a native Windows x86 GUI program", but a complete Tauri project has not been verified end-to-end.
+4. **The Tauri Rust shell is verified up to "the dependency tree links into a PE", but a complete project still blocks on `llvm-rc`.** The code exists (`src/core/rust-shell.mjs`) and preflight plus configuration are wired up. Measurement on 2026-11-19 corrected two earlier misattributions: the blocker is **not** "sandbox limits prevent installing LLVM", and **not** "arm64 macs cannot build for i686". The real picture: both the Rust chain and tauri 2.12.7's entire dependency tree compile to `PE32/i386` on arm64 macOS (measured `linkprobe.exe`, 1096192 bytes); a complete project blocks because `tauri-winres` needs `llvm-rc` for the resource section and **it is not installed here** (modifying the user's toolchain was not performed automatically). See 15.10.
 5. **The x64 target was added later.** The three places that hard-coded x86 (runtime filename, cache directory, architecture assertion) are fixed, but x64's measured coverage is smaller than x86's.
 6. **`--target x64` artefacts still have an i386 stub shell.** This is not a defect: NSIS always compiles a 32-bit installer, which runs on all Windows versions. The verification rules distinguish "shell" from "payload" accordingly.
 
@@ -2550,7 +2726,7 @@ Every place where the same code behaves differently across hosts:
 6. **A silent installation failure does not auto-fallback to interactive.** `--interactive` must be specified explicitly. Reason: automatic fallback pops a window that interrupts batch runs, and the user may not be at the machine.
 7. **Restart suppression is "pretending success".** Installations that genuinely require a reboot (rare) manifest as "installed but will not start" and require manual investigation.
 8. **Runtime downloads verify no signatures**, only download completeness. Use `--archive` in security-sensitive settings.
-9. **Only the base layer can be built automatically.** mfc / dotnet / fonts-cn require user-supplied files.
+9. **base / dotnet / fonts-cn can all be built automatically.** mfc and vcpp still cannot (no lawful source for the former; base already bundles the latter). See [4.2.1](#421-automatic-layer-builds-three-of-five-are-automatable-two-are-not).
 10. **Layer matching only inspects the static import table.** DLLs loaded via `LoadLibrary` (plugin architectures, delay loading) are invisible, and such programs need manual layer addition.
 11. **Wine window coordinate mapping under multi-monitor / HiDPI is not handled.**
 12. **Without icon resources a placeholder is used** (blue background, white W). The artefact is legitimately distributable, but its appearance is not faithful.
@@ -2567,15 +2743,89 @@ Every place where the same code behaves differently across hosts:
 **AppOnWin**
 
 1. **The largest uncertainty in the project.** Darling officially supports Linux only; on Windows it requires WSL2, and GUI support is labelled experimental upstream. Failing spike gate 2 demotes it to a compatibility assessment tool.
-2. **When the host is not Windows + WSL2, all three spike gates report "unverified" rather than "passed"**, so the verdict cannot be taken as evidence the direction is feasible.
+2. **The verdict on this machine is "environment not available", not "does not hold"** (measured 2026-11-19, see 3.4). Gates 1 and 2 are `blocked` because the host is not Windows; gate 3 passes. Overall `unverified`, exit code 5. This verdict is neither a pass nor a refutation — it only says the machine cannot verify it.
 3. **The framework list is incomplete.** Frameworks absent from the list are always `unknown`; availability is never assumed.
+4. **`blocked` in `spike` has two causes**: environment unavailable (exit code 5) and invalid input path (exit code 2, non-empty `inputErrors`). They must not be conflated; conflating them escalates "mistyped path" into "direction disproven".
 
 **console**
 
 1. **The web dashboard binds `127.0.0.1` only** and offers no remote access. This is a deliberate security trade-off.
 2. **History retains only the last 20 runs**, with no archiving or export.
 
-### 15.2 Three Divergences Between Documentation and Implementation
+### 15.2 Measured Results for the Real-Run Chain (2026-11-19)
+
+This section answers a question only running can answer: **what happens with no Wine, and with Wine, can a Windows program actually be launched**. Both need measurement, not inference.
+
+**Environment facts**: this machine has `wine-11.21` (x86_64, via Rosetta 2), installed by `wepack runtime install --archive`. `which wine wine64` finds nothing on the system PATH — that is not a defect: the runtime is managed by `wepack` under `~/Library/Application Support/wexe/runtime/wine/` and deliberately does not pollute PATH.
+
+**① The no-Wine branch (degraded path)**
+
+`wine_binary()` looks at the managed runtime first, then PATH, and raises `MissingDependency` only when both are empty. The CLI maps that to exit code 5 ("missing external dependency" in `contracts/exit-codes.json`) with error segment `EOM_2001` (2xxx, "external tools"). Coverage lives in `tests/test_phase2.py::test_install_without_wine_fails_clearly` (asserts exactly 5 and that the payload's `error` mentions `wine`) and `test_phase0.py::test_install_requires_wine_runtime`. All three paths (install / build / layers match) share this one rule rather than each writing their own.
+
+**② One end-to-end encapsulation with Wine present (measured on this machine, not inferred)**
+
+Sample compiled on the spot: `makensis` builds an NSIS installer with 15 files / 2.2 MB including a genuine `PE32+ GUI x86-64` main executable. Run through `wepack build`:
+
+| Stage | Measured result |
+|---|---|
+| Detect | `kind=nsis`, confidence on the NSIS branch |
+| Prefix creation | clonefile of 1858 base-layer files, sub-second |
+| wineboot | `code=0`, 11.5 s |
+| Silent install | `code=0`, 6.6 s, net +12 files / 2.1 MB |
+| Entry detection | `drive_c/Wacmin/<app>/<App>.exe` |
+| Assembly verification | 10 / 10 passed, `lsregister` succeeded |
+| **Launch** | launcher → wine → main exe process alive (`pgrep` shows the pid); `wine-<app>.log` contains only MoltenVK graphics-layer lines, no `ShellExecuteEx failed` |
+
+The launch step is the only **new evidence** this round: earlier the verification stopped at "the artefact is structurally valid" and never confirmed "double-clicking starts a process". The first attempt used a hand-made minimal PE (DOS header + optional header only, no section table) and Wine reported `Application could not be started / ShellExecuteEx failed: Bad format` — **a sample problem, not a tool problem**: that PE has no section table, and the Windows loader would refuse it just the same. Switching the payload to a real `notepad.exe` shipped with Wine passed on the first try. The lesson worth recording: **verify the run chain with a genuinely executable PE; a minimal PE header only proves "the format is recognised", not "it runs"**.
+
+**③ Two real defects fixed**
+
+The measurement surfaced two defects that no prior test had caught, neither introduced this round:
+
+| # | Defect | Consequence | Fix |
+|---|---|---|---|
+| 1 | `package`'s `_guess_entry` and `install`'s `_find_installed_entry` were **two different rules** | Whatever you installed, the bundle pointed at the base layer's own `wordpad.exe` — the `.app` double-clicked and started a process, just not the software the user installed | Rule consolidated into `wepack/entry.py`; both call it (the README 5.3 red line) |
+| 2 | `build --json` passed `--json` through to `install` and `package`, each emitting its own payload | stdout carried two concatenated JSON documents and `json.load` raised `Extra data` — the caller got nothing usable | Sub-commands always run with `json=False`; human-readable output redirected to stderr; `build` emits one summary itself |
+
+What the two share is worth recording: **neither raises an error**. Defect 1's artefact launches; defect 2 looks like normal output in a terminal. This class of "silently doing the wrong thing" can only be caught end-to-end — unit tests stay green because each piece is correct in isolation.
+
+**④ Still unverified**
+
+- **The wording of `runtime status` when Wine is off PATH**: covered by tests, but no human has read it for actionability.
+- **Behaviour across Wine versions**: only 11.21 measured. The version requirement in 14.2 comes from upstream documentation, not from a matrix measured here.
+- **Actual rendering of the GUI window**: this was an unattended run, so only process liveness and a clean log were verified; the window contents were not confirmed by eye. That is this round's honest boundary, and it is not written up as "verified".
+
+### 15.2.1 Measured Record Behind the AppOnWin Verdict (2026-11-19)
+
+Section 3.4 gives the verdict; this gives **the run that produced it**, plus a defect that run exposed.
+
+**Commands and outputs** (host is macOS arm64, no WSL2):
+
+| Command | Conclusion | Exit code |
+|---|---|---|
+| `node apponwin/bin/apponwin.mjs spike --json` (no samples) | `unverified`, all 3 gates `blocked` | 5 |
+| `node apponwin/bin/apponwin.mjs spike --app /System/Applications/Calculator.app --json` | `unverified`, gates 1/2 `blocked`, gate 3 `pass` | 5 |
+| `node apponwin/bin/apponwin.mjs assess /System/Applications/Calculator.app` | `unlikely`: 2 binaries / 21 frameworks / 3 explicitly unsupported by Darling / 12 `unknown` | 0 |
+
+Gate 3 passing deserves its own note: it proves the **parsing capability** (which `assess` / `parse` already deliver), and since it does not depend on Darling it proves nothing about "can it run". **All three gates must pass to count as holding; missing one means unverified** — "one out of three passed" is not "partially holds", that intermediate state does not exist.
+
+**The defect caught along the way: `spike` treated "mistyped path" as "direction disproven"**
+
+| | Before | After |
+|---|---|---|
+| `spike --app /nope.app` conclusion | `rejected` | `unverified` + non-empty `inputErrors` |
+| That gate's status | `fail` | `blocked` + `invalidInput: true` |
+| Exit code | **1** | **2** |
+| What the user sees | "the direction is demoted to a compatibility assessment tool by design" | "1 gate was not executed because the input path is invalid (the direction does not fail). Fix the path and re-run." |
+| Same path handed to `assess` | exit code 2 (`AOW_1002`) | exit code 2 (unchanged) |
+
+The root cause was gate 3's `catch` recording `BuildError(INPUT_NOT_FOUND)` alongside genuine parse failures as `fail` — and any `fail` forces the overall conclusion to `rejected`. **`fail` must be reserved for "ran once and failed"**; a non-existent path never entered parsing, so it is "I do not know", which is `blocked`.
+
+Fixing it revealed a second layer: gate 1 probed the environment before validating the sample path, so whenever the environment was missing (as here) the user never saw "your `--sample` is wrong" — the message worth seeing first. Path validation now runs before environment probing: **an argument error must surface on any machine, regardless of whether WSL2 is installed here**.
+
+Regression locks live in `apponwin/test/spike.test.mjs`: three new cases ("invalid input path yields unverified with inputErrors", "non-existent Mach-O sample makes that gate blocked, not fail", "correct path with a missing environment is not counted as inputError"), plus the previously **wrong assertion** "non-existent path yields fail" corrected to assert `blocked`. Negative check: injecting the old implementation back into `spike.mjs` turns 2 tests red immediately (`not ok 26` / `not ok 27`); restoring gives 94/94 green.
+
+### 15.3 Three Divergences Between Documentation and Implementation
 
 This section records three real instances where "the documentation said one thing and the code did another". They are recorded not to assign blame but because all three belong to the class of problem that **does not crash, only wastes the reader's time**, and is therefore most easily waved through again and again.
 
@@ -2591,9 +2841,67 @@ The command was supported—even the "unknown subcommand" error message listed i
 
 The other three directions' help all mentioned "`--report` outputs the unified run report". The unified report contract is a core mechanism shared by all four directions, yet exactly one direction failed to surface it.
 
-Beyond "missing documentation" there is the reverse problem—**help promising what the code does not implement** (early on, `--no-package` was exactly that). Both directions must be guarded, which is why each direction's `test/help.test.mjs` asserts in both directions.
+Beyond "missing documentation" there is the reverse problem—**help promising what the code does not implement** (early on, `--no-package` was exactly that). Both directions must be guarded, which is why each direction's help tests assert in both directions (`test/help.test.mjs` on the Node side, `tests/test_phase0.py` and `test_phase6.py` for `wepack`).
 
-### 15.3 The Time the Verifier Lied
+#### 15.3.1 A Systematic Audit of the Documentation Side (2026-11-19)
+
+The three cases above were found by accident. On 2026-11-19 a **mechanical** audit was run: the 267 command lines inside the README's 42 shell blocks were extracted, yielding 31 unique executable commands. The **read-only and self-check** ones were run one by one; the ones **requiring a real artefact or a Windows host** were only reconciled against help text and code paths (both lists appear at the end of this subsection and are not conflated); every number in the tables was reconciled against the constants in the code.
+
+**Result: 9 divergences between documentation and implementation, all now fixed.** Every one belongs to the class where a reader following the document either cannot complete the step or sees something different from what is described. In addition, 4 missing directory-tree entries and 1 broken anchor were corrected, noted at the end of this subsection.
+
+| # | Location | Stated | Measured | Nature |
+|---|---|---|---|---|
+| 1 | 5.2.2 segment table | 8 rows, `9000` given as `9001–9999` meaning "flow control and internal errors" | `error-prefixes.json` defines **9 segments**: `9000` is `9001–9998` (flow control) and `9999` is a separate `9999` (internal errors) | Both the count and the range were wrong. `segmentOf()` in `validate.mjs` routes by the actual `range`, so a reader trusting the old table cannot reconcile the validator's behaviour |
+| 2 | 9.1 contract-file table | "seven-segment allocation" | 9, as above | Same root as #1 |
+| 3 | 8.2 quick start | `open "~/Applications/MyApp (Win).app"` | A `~` inside quotes is not expanded by the shell; `open` reports `~/Applications/... does not exist`. **Copying this line always fails** | Non-executable command. Note the preceding `install -o "~/..."` is correct—`wepack` calls `expanduser()` itself; the difference is that `open` is an external process |
+| 4 | 6.4 transitive dependencies | "seven modules (**five** directions, `console`, `ai`, `contracts`)" | There are only 4 directions (`mac2win`/`exeonmac`/`win2mac`/`apponwin`), and 7 = 4 + 3 | The arithmetic inside the parentheses does not hold |
+| 5 | Appendix C item 2 | 32 configuration keys / 14 external tools / 10 subcommand families | 9.2 has **37** rows (matching `DEFAULTS` in `config.mjs`, 37 keys), 6.2 has **18** rows (`NOTICE` chapter 3 also has 18), 10.1 has **6** rows | All three numbers stale |
+| 6 | Appendix C item 3 | twenty highlights | Actually **25** (including "Highlight 15b" and "15c") | Undercounted |
+| 7 | 5.10.4 and 18.1 | "instances are in 18.5" / "in 15.2" | The instances are in **15.3** (*Three Divergences Between Documentation and Implementation*); 15.2 is the ExeOnMac real-run measurement and 18.5 is the documentation-sync requirement | Two cross-references pointing at the wrong section |
+| 8 | Appendix C item 6 | test sizes (**16**), check counts (**15.5**) | The test-count table is **12.1** (16 is the changelog); the check counts are in **15.6** | Two more wrong references |
+| 9 | 10.1 common options | "`-v/--version`" identical across all four directions | In `mac2win`/`win2mac`/`apponwin`, `-v` is short for version; in `wepack`, `-v` is short for **verbose** and `--version` has only the long form as a top-level argument | Divergent semantics; a script using `-v` for the version gets logs |
+
+**Four missing entries in the directory tree were added at the same time**: `contracts/doc-counts.mjs` and `doc-counts.test.mjs`, cited in the body (12.1 states the baselines are read from that table) but absent from the 11.1 tree; likewise `wepack/entry.py` and `wepack/report.py`, both named in 5.3 and 10.3.
+
+**One broken link was fixed as well**: the "Dependencies" badge at the top of the English README pointed at `#6-technology-stack-and-dependency-inventory` while the actual heading is `## 6. Technology Stack and Dependencies`, so the anchor is `#6-technology-stack-and-dependencies`. Clicking it landed on a dead anchor rather than the chapter. All internal anchors in both files now validate with 0 invalid.
+
+**What passed is recorded too**, so the next round does not repeat the work. **Note the split between "actually run this round" and "not run this round"**—nothing unverified is written up as passing:
+
+**Commands actually run this round** (read-only and self-check only; listed individually rather than as a total, because this round already produced one miscount of its own command list). `--help` was also invoked for every direction to reconcile option lists:
+
+- `node contracts/validate.mjs` → `✓ contract self-consistent` (13 exit codes, 9 segments, 4 prefixes)
+- `node contracts/doc-counts.mjs --check` → total matches the 12.1 table, both versions identical item by item (1177 at the time; 12.1 is authoritative)
+- `node console/bin/wacmin-console.mjs list` / `doctor` / `contract` → 4 / 4 / 10-10
+- `node ai/bin/wacmin.mjs list` / `status --human` / `mcp` / `skill` → matches section 8.6
+- `node mac2win/bin/mac2win.mjs doctor` → 5 items all OK
+- `python3 -m wepack.cli doctor` / `version` / `recipe list` / `layers list` / `runtime status`
+- `node apponwin/bin/apponwin.mjs spike` (including `--json`) → exit code 5, conclusion `unverified`
+- `node console/bin/wacmin-console.mjs run exeonmac version` → normalised report, all eight stages `skipped`
+- `node mac2win/bin/mac2win.mjs build /tmp/w03proj --dry-run` → all 14 preflight items pass, eight-step plan printed, exit code 0 (**measured against a temporary minimal Node project, not a real build**)
+- `node console/bin/wacmin-console.mjs run mac2win build /tmp/w03proj --dry-run` → same via the unified entry, exit code 0
+- `node contracts/validate.mjs --report <report> --exit-code 0` → validates a real report produced by `console run mac2win doctor`, `✓ contract self-consistent`
+- `node ai/bin/wacmin.mjs doctor mac2win --report` → unified report structure
+- `node console/scripts/viewport-check.mjs` → 0 overflows across all three viewports
+
+**Not run this round, only statically checked** (must not be treated as verified):
+
+- `mac2win build` **without `--dry-run`**, and `verify` (both need a complete build artefact; not done this round. The `--dry-run` branch was run)
+- `wepack install` / `build` / `extract` (needs installer samples; the end-to-end `install`/`build` run was verified in run-20261119-0753 but not re-run here)
+- `win2mac build` / `verify`, `apponwin assess` / `parse` (need a Windows host or a `.app` sample)
+- `console web` (listens on a port indefinitely—unsuitable for unattended runs)
+- Sample flags in the README (`--dry-run`, `--keep-staging`, `--framework`) were **only confirmed to exist in help**, not each run end to end
+
+**Statically checked and passing**:
+
+- HTTP endpoints: 8 in `mac2win` (`state`/`preflight`/`build`/`cancel`/`verify`/`probe`/`reveal`/`events`) and 4 in `console` (`history`/`status`/`contract`/`run`), matching the 10.4 table item by item;
+- Stage breakdown: Mac2Win's eight stages match `STAGES` in `builder.mjs` including weights (1/3/4/2/4/2/5/3); ExeOnMac's eight stages match `STAGES` in `report.py`;
+- Test counts: all seven suites with 0 skipped; **the actual numbers live in 12.1 and are not duplicated here** (an earlier draft hard-coded a total on this line, and it went stale the moment apponwin gained 3 tests — exactly the "one number stored in many places inevitably drifts" problem this section criticises);
+- All 13 environment variables are genuinely read (each grep-confirmed in non-test source);
+- 6 MCP tools, matching `ai/src/tools.mjs`.
+
+**The lesson from this audit itself**: 4 of the 9 (#5 #6 #7 #8) were **numbers and references**, not prose. A stale number is invisible because it reads perfectly well—which is the same issue as 12.1's "one write point per number", seen from the other side. Appendix C's self-check list has no machine guard, so it drifts. **The next step should fold it into the checks in `contracts/doc-counts.mjs`**, so these numbers are read out by a script instead of being counted by a human.
+
+### 15.4 The Time the Verifier Lied
 
 This section stands alone because it is the **most dangerous** class of defect encountered so far: the program did not crash, the tests were all green, the conclusion was explicit, and the conclusion was false.
 
@@ -2614,7 +2922,7 @@ The UI was corrected in the same place: it used to render "`result.verify.length
 
 `MAC2WIN_NO_7ZIP=1` is the escape hatch for this branch. It is not for coverage padding: the decisive branch for a missing 7-Zip is only reached when **the user's machine happens to lack it**. A developer machine almost certainly has it, so the branch may go unexercised for a year—and when finally reached, the user receives a report that lied.
 
-### 15.4 The Second Form of "the Verifier Is Lying"
+### 15.5 The Second Form of "the Verifier Is Lying"
 
 `target: "x64"` was selectable in the configuration and preflight said "feasible", but three places in the implementation hard-coded x86:
 
@@ -2644,7 +2952,7 @@ Yet extracting the payload reveals `node.exe` is `PE32+ / x86-64`—**the applic
 
 Measured across both targets: `--target x86` → shell `PE32/i386` + payload `PE32/i386`; `--target x64` → shell `PE32/i386` + payload `PE32+/x86-64`. Reverse verification: validating a 32-bit artefact against the x64 target is correctly rejected.
 
-### 15.5 The "Nine Checks" Divergence from the Actual Eleven
+### 15.6 The "Nine Checks" Divergence from the Actual Eleven
 
 The documentation long stated "nine artefact checks" while measurement showed 11. The root cause was that checks had been added over time (required files split out, installer shell format added) without the documentation being updated.
 
@@ -2666,7 +2974,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 
 **All 11 appear only during "post-build verification".** `mac2win verify <existing installer>` has no build manifest and cannot compare hashes, so it performs **10 checks**—the missing one being "file hashes". This is by design, not a defect: hashes prove "the artefact is byte-identical to what was just built", which cannot be proven for an installer of unknown provenance. Reporting 10 honestly is more important than falsely claiming 11 green.
 
-### 15.6 Other Fixed Defects
+### 15.7 Other Fixed Defects
 
 | Defect | Symptom | Root cause | Fix |
 |---|---|---|---|
@@ -2689,6 +2997,384 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | `File` table row count misjudged | Trailing data treated as row content | Assumed rows = total u16 count ÷ column count | Determine row count from content features (a run of `fil`+32hex) |
 | Chinese application names collided on bundle id | 11 names produced only 1 id | `[^a-z0-9-.]` swallowed entire Chinese segments | Append an 8-hex SHA-256 prefix for non-ASCII input |
 | Wrong key names in the preflight error-code map | Building on Linux / Windows reports "project directory does not exist"; the user chases a path typo while the real cause is an unsupported host | `CHECK_ERROR_CODES` listed `host-os` / `native-window` while the source actually uses `host-platform` / `framework-shell`. A mismatched key raises nothing—it silently falls into the `?? PROJECT_NOT_FOUND` default | Use the real ids, plus a source-scanning test: every key must appear in a `new Check()` call, and every check that can fail must be explicitly mapped |
+| `apponwin spike` treats "mistyped path" as "direction disproven" | `spike --app /nope.app` prints "the direction is demoted to a compatibility assessment tool by design" with exit code 1, while the same path handed to `assess` yields exit code 2 | Gate 3's `catch` recorded `BuildError(INPUT_NOT_FOUND)` as `fail`, but `fail` means "executed and failed"—a non-existent path was never executed. Any `fail` turns the overall conclusion into `rejected` | Invalid input maps to `blocked` with an `invalidInput` flag; `runSpike` aggregates them into `inputErrors`, and the CLI branches to exit code 2 / `AOW_1002`. Gate 1 now validates the sample path before probing the environment, otherwise the one message worth seeing first ("your path is wrong") never surfaces when the environment is missing |
+| `contracts/validate.mjs` splits a range into two endpoints | A report with `exitCode: 6` and `M2W_4002` is rejected as "exit code and error code disagree", yet 4002 is perfectly legal | `errorSegment` was parsed with `split(/[/-]/)`: `"4001-5002"` becomes `['4001','5002']`, so a mid-range code equals neither bound. It went unnoticed because real reports mostly hit the endpoints (4001 / 5002), which are exactly the split results | Extracted `segmentAllows()` to handle `-` and `/` separately. Tests do not just cover 4002: `4001/4002/4003/5001/5002` and `6001/6002/6003` are all exercised—testing only the endpoints tests nothing |
+| `win2mac --strict-host` produces a self-contradictory report | `--strict-host` exits 2 with `W2M_1001`, but none of the contract's 13 exit codes declares 1001 | It threw `HOST_UNSUPPORTED` (1001) and `exitCodeFor` fell back to 2 by segment. The user reads "bad argument" and hunts for a path typo, while the real cause is "this machine cannot do this" | Throw `UNSUPPORTED` (1005 → exit code 4, explicitly unsupported). `doctor`'s failure code changed for the same reason to `TOOL_OUTDATED` (2002 → exit code 5; the only way doctor fails is an old Node). The same defect in `apponwin doctor` was fixed too |
+| Contract lacks an exit-code declaration for segment `3000` (runtime) | `M2W_3001/3002/3003` map to exit code 5 in code while contract `exit 5` only declares `2001/2002` | The contract file lags behind the implementation: all three directions reserve runtime codes and mac2win genuinely uses them (Electron/NW.js download and architecture checks), but nobody came back to update the contract | The contract was **not** changed this round (changing it alters an external promise and needs human sign-off); tracked in 15.9 |
+
+### 15.8 Cross-Platform Runnability Audit (2026-11-19)
+
+This section answers a question only an inventory can answer: **have the branches that only execute on Windows ever actually run?**
+
+This machine is darwin + arm64. All three directions target Windows, so their platform branches have long been in a "written down, never executed" state. Green tests do not mean those branches are correct—on the contrary, **a branch that has never run can also fail silently**.
+
+**Method**: mechanical extraction, not eyeballing. Five regular expressions for platform checks (`process.platform ===/!==`, `platform() ===/!==`, `sys.platform`, `platform.system()`, `platform.machine()`) were run over every `.mjs` / `.py` source, yielding 30 hits.
+
+**Inventory and coverage**:
+
+| Location | Branch | Previously tested | Action |
+|---|---|---|---|
+| `mac2win/src/core/preflight.mjs:88` | Not darwin → `host-platform` fails | Only the error-code mapping; the branch never ran | Platform and arch made injectable, 7 new tests |
+| `win2mac/bin/win2mac.mjs:162` | Not win32 → warn or refuse with `--strict-host` | No | See the defect record below; `--strict-host`'s error code fixed |
+| `win2mac/bin/win2mac.mjs:436` | Not darwin → skip probing `plutil` | No | Covered indirectly via `verifyBundle` injection |
+| `win2mac/src/core/verify.mjs:125` | Not darwin → `plutilLint` returns unavailable | No | Platform injectable, 3 new tests |
+| `win2mac/src/core/verify.mjs:332` | Emit a different "unverified" warning by platform | No | Same as above |
+| `win2mac/src/core/wexezip.mjs:140/167` | Windows `stat().mode` is untrustworthy | **Yes** (5 tests, injected platform) | Already the correct pattern; untouched |
+| `apponwin/src/core/spike.mjs:83` | Not win32 → WSL2 probe reports unavailable | **Yes** | Covered |
+| `apponwin/bin/apponwin.mjs:99/511` | Not win32 → warn, do not block | **Yes** (real doctor run) | Covered |
+| `console/src/directions.mjs:199` | No detach on Windows | No (affects a spawn option only) | Covered together with the next row |
+| `console/src/directions.mjs:344` | Windows → `taskkill /t /f` | **No—and it is the only fallback for timeouts and cancellation** | Platform and spawn injectable, 5 new tests |
+| `exeonmac/wepack/cli.py:1817` | Not arm64 → Rosetta not needed | **Yes** (doctor run asserts name and result) | Covered |
+| `exeonmac/wepack/report.py:146` | Platform field normalisation | No (output field only) | No behavioural branch; not added |
+
+**Why the two highest-priority branches matter**:
+
+1. **`console`'s `taskkill`** — it is the **only** fallback for timeouts and cancellation. Get it wrong and the symptom is "the user cancels, the parent process reports cancelled, but wine keeps installing in the background"—while every test stays green, because the parent process really did exit cleanly.
+2. **`mac2win`'s host check** — get it wrong and the symptom is "running on Linux reports 'project directory does not exist'"; the user chases path spelling, permissions and symlinks when the real answer is to use another machine.
+
+**Three defects**, all found by measurement rather than inference:
+
+1. `win2mac --strict-host` exits 2 with `W2M_1001`, while none of the contract's 13 exit codes declares 1001. Fix in 15.7.
+2. `apponwin doctor` and `win2mac doctor` fail with the same class of code; fixed together.
+3. `contracts/validate.mjs` **range parsing** splits `"4001-5002"` into two endpoints, so 4002 / 4003 / 5001 are judged out of range. This one is not a platform problem—it surfaced because this round used the contract validator to inspect reports.
+
+**What still cannot be verified here** (stated plainly, not written up as verified):
+
+- Real Windows-host behaviour: whether `taskkill` actually works, how process groups behave under `detach: false`, and the semantics of `wine` paths on Windows.
+- WSL2 + Darling: needs a Windows machine; see 15.2.1.
+- The non-arm64 `wepack` doctor branch: this machine runs the arm64 path; the Intel path is judged by code reading only (a straight passthrough) and was not measured.
+
+Injected tests prove the **decision logic**, not the **platform behaviour**. The distinction matters: the five `killTree` tests prove "on win32 it calls `taskkill` with `/t`", not "`taskkill /t` really kills wine's whole process tree". The latter needs a Windows machine.
+
+### 15.10 End-to-End Findings on the Tauri Rust Shell (2026-11-19)
+
+This section answers one question: **on arm64 macOS, can `cargo xwin` actually turn a real Tauri v2 project into a native Windows window binary?**
+
+The answer has three layers. Each has measurement behind it, and each has a clear boundary.
+
+#### 15.10.1 Summary
+
+| Layer | Verdict | Evidence |
+|---|---|---|
+| The Rust cross-compile chain itself | **Holds.** Produces `PE32 / i386 / windows-GUI` | Bespoke probe `rsprobe`: 92160 bytes, `file` reports `PE32 executable (GUI) Intel 80386, for MS Windows` |
+| Tauri's **whole dependency tree** compiled and linked | **Holds.** `tauri 2.12.7` + `wry 0.57.3` + `tao 0.37.3` + `webview2-com 0.39.1` all link into a PE | Probe `linkprobe`: 1096192 bytes, `PE32 executable (GUI) Intel 80386` |
+| A **complete** Tauri project (with the `build.rs` resource section) | **Does not hold.** Blocked on `llvm-rc`, and `brew install llvm` does not fix it | `tauri-winres 0.3.7` panics: `NotAttempted("llvm-rc")` |
+
+**So "arm64 macs cannot build Windows x86 binaries" is false** (the first two layers disprove it), but "a complete Tauri project compiles in one shot into a native window exe with icon and version info" **also does not hold today** (the third layer blocks it). Neither statement may be written as settled fact — their truth depends on which layer "build" refers to.
+
+#### 15.10.2 Layers one and two: Rust and the whole Tauri dependency tree
+
+The `linkprobe` probe deliberately **avoids** `generate_context!()` and has no `build.rs`, keeping resource compilation entirely out of the experiment. It tests one thing only: whether tauri's dependency tree compiles and links to a PE for `i686-pc-windows-msvc`:
+
+```rust
+#![windows_subsystem = "windows"]
+
+fn main() {
+    let builder: tauri::Builder<tauri::Wry> = tauri::Builder::default();
+    std::hint::black_box(&builder);
+}
+```
+
+Measured command and result:
+
+```
+CC_i686_pc_windows_msvc=clang-cl AR_i686_pc_windows_msvc=llvm-lib \
+XWIN_ARCH=x86 XWIN_CACHE_DIR=<clean dir> \
+cargo xwin build --target i686-pc-windows-msvc --release
+
+→ Finished `release` profile [optimized] target(s) in 33.07s
+→ linkprobe.exe  1096192 bytes
+→ file: PE32 executable (GUI) Intel 80386, for MS Windows
+```
+
+#### 15.10.3 Layer three: the real blocker is `llvm-rc`, and it blocks twice
+
+A complete project (`build.rs` + `tauri.conf.json` + `icons/icon.ico`) in the same environment:
+
+```
+thread 'main' panicked at tauri-winres-0.3.7/src/lib.rs:543:14:
+called `Result::unwrap()` on an `Err` value: NotAttempted("llvm-rc")
+```
+
+The chain is `tauri-build` → `tauri-winres` → `embed-resource`. **First blocker**: `llvm-rc` ships with nothing you already have — Xcode's LLVM lacks it (`Toolchains/XcodeDefault.xctoolchain/usr/bin/` carries about ten tools such as `llvm-cov` / `llvm-nm` / `llvm-objdump`, none of them `llvm-rc`), and cargo-xwin only creates the `clang-cl` and `lld-link` shims.
+
+**The second blocker is subtler**: `brew install llvm` does provide `llvm-rc` (it is listed in Homebrew's official Binaries list), yet installing it still changes nothing. The reason is how `embed-resource` identifies its compiler (`src/lib.rs:692`, `Compiler::llvm_rc`):
+
+```rust
+pub fn llvm_rc(executable: Cow<'static, str>) -> Result<Compiler, Cow<'static, str>> {
+    if_runnable(executable, |executable| {
+        CompilerType::LlvmRc {
+            has_no_preprocess: Command::new(executable)
+                .arg("/?")
+                .output().ok()
+                .map(|out| memmem::find(&out.stdout, b"no-preprocess").is_some())
+                .unwrap_or(false),
+        }
+    })
+}
+```
+
+It **executes** `llvm-rc /?` and looks for the string `no-preprocess` in stdout. Pointing `RC` at a stub script that merely `exit 0`s yields:
+
+```
+NotAttempted("Unknown RC compiler variant: /tmp/w06/fake-rc.sh")
+```
+
+Being on the path is not enough; the reply has to match the expected shape. Putting a real `llvm-rc` on `PATH` works, but no wrapper that pretends to be one gets through this probe.
+
+#### 15.10.4 Two real defects fixed along the way
+
+Neither was introduced this round, and **neither reports an error**, which is why every test suite was green before.
+
+**Defect A: `checkRustEnv` misjudged what `XWIN_ARCH` achieves.**
+
+`XWIN_ARCH=x86` only tells cargo-xwin **what to download**; it does not guarantee **it was downloaded**. `setup_msvc_crt` in `cargo-xwin-0.23.1/src/compiler/clang_cl.rs` returns early:
+
+```rust
+let done_mark_file_content = fs::read_to_string(&done_mark_file);
+if let Ok(content) = &done_mark_file_content {
+    let mut lines = content.lines();
+    if let Some(archs) = lines.next() { /* reads the first line only */ }
+}
+if !update && xwin_arches.difference(&downloaded_arches).next().is_none() {
+    return Ok(());   // ← returns, never checking the files exist
+}
+```
+
+The criterion is **the text on the first line of `DONE`**, not the files on disk. The actual mismatch on this machine:
+
+| Fact | Value |
+|---|---|
+| `xwin/DONE` first line | `x86` (claims downloaded) |
+| `xwin/crt/lib/` actually contains | only `x86_64` |
+| `xwin/sdk/lib/um/` actually contains | `aarch64`, `x86_64` |
+
+Consequence: `cargo xwin build --target i686-pc-windows-msvc` compiles 130+ crates and only at the **link** step emits ten `could not open 'user32.lib'` errors, and re-running the identical command reproduces them (because `DONE` says it is there). The same code with `XWIN_CACHE_DIR` pointed at a clean directory passes first time — that directory holds 63 and 482 files under `crt/lib/x86` and `sdk/lib/um/x86` respectively.
+
+Fix: `checkRustEnv` gained an `x86-libs` item that inspects the **directories on disk** (`crt/lib/x86`, `sdk/lib/um/x86`) and honours `XWIN_CACHE_DIR`. The user is now told **before** compiling, rather than a dozen minutes in.
+
+**Defect B: `buildRustShell` called `cargo xwin` without `TAURI_ENV_TARGET_TRIPLE`.**
+
+`tauri`'s `generate_context!()` expands **on the host**, and `tauri-codegen-2.7.6/src/context.rs:148` reads `TAURI_ENV_TARGET_TRIPLE`, not `TARGET`. Without it the macro decides it is on macOS and emits `tauri::embed_plist::...` — but `embed_plist` in `tauri-2.12.7/src/lib.rs:75` is gated by `#[cfg(target_os = "macos")]`, so cross-compiling to Windows fails with:
+
+```
+error[E0433]: cannot find `embed_plist` in `tauri`
+```
+
+Measured comparison (same project, same cache):
+
+| `TAURI_ENV_TARGET_TRIPLE` | Result |
+|---|---|
+| unset | `error[E0433]`, `generate_context!()` expansion fails |
+| set to `i686-pc-windows-msvc` | Compiles (and only then reaches the `llvm-rc` gate) |
+
+Fix: `buildRustShell` now passes `TAURI_ENV_TARGET_TRIPLE` explicitly, derived from the target triple constant rather than hard-coded.
+
+#### 15.10.5 On "skipping `tauri_build` still produces an exe"
+
+One tempting trick showed up during measurement: have `build.rs` skip `tauri_build` when `llvm-rc` is unavailable. Compilation then "succeeds" and an `.exe` really is produced.
+
+**That is a false success.** The section table of that exe:
+
+```
+sections: [('.text', 5069064), ('.rdata', 989732), ('.data', 6888),
+           ('.tls', 273), ('.reloc', 151920)]
+has .rsrc: False
+```
+
+No `.rsrc` section means **no icon, no version info, no application manifest**. On Windows such a binary is treated by SmartScreen as unsigned/unknown, has no version tab in its properties, and shows a blank taskbar icon. It launches, but it is not a shippable Windows program.
+
+Therefore this section states plainly: **skipping `tauri_build` is not an acceptable fallback for the Tauri shell.** Either supply `llvm-rc`, or fail honestly and fall back to the "package the Node/frontend layer" route — that route's output is complete, and the baseline tests in chapter 12 guard it.
+
+#### 15.10.6 Still unverified
+
+- **A full build with a real `llvm-rc` installed.** Not installed here (`brew install llvm` downloads a 457 MB bottle and occupies 1.9 GB; modifying the user's toolchain is not something a scheduled task does on its own). So "layer three holds" **cannot** be written this round.
+- **Running the output**: the produced PE has never been launched on Windows. Whether the window appears and whether WebView2 loads are both unverified.
+- **The `.ico` format requirement**: `tauri-build` requires `icons/icon.ico` to exist or it errors out. This round's project used `icon: []`, so a real `.ico` was never exercised.
+
+
+### 15.9 Pending Human Sign-Off: the Contract Needs a `3000` Segment
+
+**Problem**: `contracts/exit-codes.json` gives `exit 5` only `errorSegment: "2001/2002"`, yet all three directions' `exitCodeFor` map `3xxx` to exit code 5, and mac2win genuinely uses them:
+
+| Code | Purpose | Call sites |
+|---|---|---|
+| `M2W_3001` | Runtime download failed | `electron.mjs:97/123`, `nwjs.mjs:89/115` |
+| `M2W_3002` | Runtime checksum mismatch | Runtime cache verification |
+| `M2W_3003` | Wrong runtime architecture | `runtime.mjs:315/323/331`, `electron.mjs:66` |
+
+**Why not change it this round**: `exit-codes.json` is an **external promise** (its first line reads "released code values never change, only append"). Adding a segment declaration tells every caller "exit code 5 may also come from a runtime problem"—that is an expansion of the behavioural contract, not a bug fix. By this repository's rules, such a change is listed and waits for human approval.
+
+**Two candidate options** (for decision, not executed this round):
+
+| Option | Change | Cost |
+|---|---|---|
+| A. Extend the contract | Set `exit 5`'s `errorSegment` to `"2001/2002/3001-3003"` | Exit code 5 widens from "missing external tool" to "something is missing (runtime included)". Semantically defensible—all three mean "the environment lacks something"—but a downstream that special-cases 2001 as "just install a tool" would miss the runtime class |
+| B. Change the implementation | Re-map the three `3xxx` codes to `2001` / `5002` | No contract change, but **the runtime layer disappears**. Seeing 2001, the user runs `brew install`, when the real cause is a blocked download or a corrupt cache—a completely different remedy |
+
+**Preference: A.** The segment table already defines `3000` ("Runtime: download failure, checksum mismatch, wrong architecture"); only the exit-code line is missing the reference. B would turn a defined segment into dead code.
+
+**The one question needing sign-off**: whether `exit 5` should accept `3001-3003`. Once confirmed, the change is one line in `contracts/exit-codes.json` plus one test case in `validate.test.mjs`.
+
+### 15.11 Code Signing and Notarization Assessment (2026-11-19, Not Executed)
+
+This section answers "should we sign, can we sign, what does it cost". It contains **no signing implementation**—without a certificate there is nothing testable, and code that cannot be tested should not be written.
+
+#### 15.11.1 First, Retract an Old Claim
+
+The README previously stated in four places that "signing cannot be done on macOS" (13.6, 14.4, 15.1, roadmap item 7). **That is only half true and has to be split**:
+
+| Claim | Measured | Verdict |
+|---|---|---|
+| `codesign` / `notarytool` / `stapler` / `spctl` exist on macOS | All four present: `codesign` in `/usr/bin`, `notarytool 1.1.4 (43)` and `stapler` inside Xcode, `spctl --status` → `assessments enabled` | ✅ Fact |
+| Authenticode signing of Windows exe must happen on Windows | `osslsigncode` has a Homebrew bottle (`stable 2.16`, depends on `openssl@4`), builds and runs on macOS per upstream README, and supports PKCS#11 hardware tokens and cloud PKCS#11 modules | ❌ **False** |
+| Notarization of macOS artefacts must happen on macOS | `notarytool` is macOS/Xcode-only | ✅ True |
+
+**The real obstacle is not the tooling, it is the certificate.** Since 2023-06-01 the CA/Browser Forum plus Microsoft and Apple require OV/EV code-signing private keys to live on FIPS 140-2 Level 2+ certified hardware and be non-exportable (sources: fairssl.com/en/code-signing-hsm-key-storage, sslmarket.com). That requirement is OS-independent—**buying a Windows machine would not remove it**. "Impossible on macOS" is a misdiagnosis that sends people shopping for a Windows box they do not need.
+
+#### 15.11.2 Measured Here: Current Artefacts Carry an Inconsistent Signature
+
+This is the only part verifiable without a certificate. The method was to replicate `wepack`'s real assembly structure and run four checks.
+
+**Toolchain facts**: `security find-identity -v -p codesigning` → `0 valid identities found`. Xcode is at `/Applications/Xcode.app`, `xcode-select -p` resolves. In short: **tools complete, certificate absent**.
+
+**Controlled experiment** (identical Mach-O, two signature states):
+
+| Object | `codesign -v` | `spctl -a -t exec` | `--verify --deep --strict` |
+|---|---|---|---|
+| **A: status quo (binary dropped into bundle, not re-signed)** | **exit 1**<br>`code has no resources but signature indicates they must be present` | **exit 1**<br>same message | **exit 1** |
+| **B: whole bundle consistently re-signed (ad-hoc)** | exit 0 | exit 3<br>`rejected` (not notarized, expected) | exit 0 |
+
+**Why A happens**: `clang` / `swiftc` output for arm64 carries a **linker-applied ad-hoc signature** (`flags=0x20002(adhoc,linker-signed)`, `Signature=adhoc`). That signature covers only that one executable. `wepack` then assembles `Info.plist`, `PkgInfo` and `Resources/` into the bundle **without signing again**, so the signature claims a resource seal that does not exist.
+
+**This is not theoretical.** The replicated artefact (a real 137464-byte compiled `launcher` plus Info.plist) fails `codesign -v` with exit 1. A user dragging it into `/Applications` sees a validation failure in System Settings, not the at-least-explicable "not notarized".
+
+**Reproduction** (compiling the repository's real launcher source, assembled the way `wepack` does it):
+
+```bash
+cd exeonmac && python3 -c "
+from pathlib import Path
+from wepack.package.launcher_build import compile_launcher
+print(compile_launcher(Path('/tmp/r/launcher'), use_cache=False))"
+mkdir -p /tmp/r/R.app/Contents/MacOS && cp /tmp/r/launcher /tmp/r/R.app/Contents/MacOS/
+/usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string launcher" \
+  -c "Add :CFBundleIdentifier string com.wacmin.repro" \
+  -c "Add :CFBundlePackageType string APPL" /tmp/r/R.app/Contents/Info.plist
+codesign -v /tmp/r/R.app ; echo "exit=$?"    # → exit=1, code has no resources…
+codesign -s - --force /tmp/r/R.app
+codesign -v /tmp/r/R.app ; echo "exit=$?"    # → exit=0
+```
+
+All three commands were run this round; output matches the table above.
+
+#### 15.11.3 But It Cannot Be Fixed: the Resource Seal Conflicts with WINEPREFIX
+
+Fixing A looks simple—re-sign every inner executable from the inside out, then the outer bundle. **This round measured that fix and it works** (`codesign -v` goes 1 → 0, `--strict` also 0). On ExeOnMac, however, it hits a wall:
+
+`launcher/Sources/main.swift:234` sets `env["WINEPREFIX"] = layout.privateDir.path`, and `privateDir` points at `Contents/Resources/Private` (`:66` of the same file). **Wine's entire prefix lives inside the bundle's `Resources/` and is read and written in place.**
+
+`codesign` seals every file under `Contents/Resources`. One wine write breaks the seal:
+
+```
+after signing   → codesign -v exit=0
+prefix written  → S.app: a sealed resource is missing or invalid   exit=1
+```
+
+**Control**: move `Private/` outside the bundle, re-sign, then write the prefix → `codesign -v` stays exit 0.
+
+**Decisive conclusion**: ExeOnMac either ships unsigned, or the prefix must move out of the bundle. The latter is a breaking architectural change touching layering, `clonefile` prefix cloning, uninstall cleanup and `recipe` path conventions—not something an assessment round does. **This is the most important takeaway**: signing is not "add a command"; it constrains directory layout.
+
+Scope note: this conflict is ExeOnMac-only. Mac2Win produces a `.exe` (single-file Authenticode, no resource-seal concept); Win2Mac produces a static directory tree with no in-place runtime state.
+
+#### 15.11.4 Per-Direction Verdict
+
+| Direction | Artefact | Signing path | Feasible | Blocker |
+|---|---|---|---|---|
+| Mac2Win | `.exe` / `.zip` | `osslsigncode` + PKCS#11 token, or `signtool` on a `windows-latest` CI runner | **Yes** | Certificate only, no technical obstacle |
+| Win2Mac | `.app` (static) | `codesign` → `notarytool submit` → `stapler staple` | **Yes** | Needs an Apple Developer ID ($99/yr) |
+| ExeOnMac | `.app` (writable prefix) | Same as above | **Not with the current layout** | See 15.11.3; layout must change first |
+| AppOnWin | none | — | N/A | The direction itself concluded "environment unavailable" |
+
+**Win2Mac notarization prerequisites** (sources: Apple notarization requirements and third-party measured reports): every executable inside the bundle must carry a Developer ID signature, hardened runtime must be on, a secure timestamp must be present, and `com.apple.security.get-task-allow` must be absent. Miss one and it is rejected.
+
+#### 15.11.5 Cost (retrieved 2026-11-19, not a quote)
+
+| Option | Cost | Availability for an individual developer in mainland China |
+|---|---|---|
+| Apple Developer Program | **$99/yr** (source: Apple's official enroll page) | Available with an individual identity |
+| Windows OV certificate | **$150–300/yr**, SafeNet USB token included | Available (source: Microsoft Learn code-signing options) |
+| Windows EV certificate | **$400+/yr** | Available, but **no longer bypasses SmartScreen**—Microsoft levelled EV and OV behaviour in 2024 |
+| Azure Artifact Signing (ex Trusted Signing) | **$9.99/month** | **Individuals limited to the US and Canada**; mainland China individuals ineligible (same Microsoft page, geographic limitation) |
+| Self-signed certificate | Free | Local testing only; blocked for public distribution |
+
+**One common misconception to correct**: signing does **not** guarantee a clean first download. Microsoft's own page states new signed files still warn until enough reputation accrues, identically for OV and EV. The real benefit is a verifiable publisher identity, a milder warning, and reputation inherited across releases—not a warning-free download.
+
+**An honest cost caveat**: Windows tokens are USB hardware and **standard RDP cannot forward them** (documented by CAs; TeamViewer-class tools work). If the signing machine is a cloud Windows box this changes the operating model; Azure Key Vault or DigiCert KeyLocker avoid it, but KeyLocker is roughly $300/yr capped at 1000 signatures.
+
+#### 15.11.6 CI Feasibility
+
+The repository's `.github/workflows/ci.yml` already uses `ubuntu-latest`, `macos-latest` and `windows-latest` (7 `runs-on` entries measured). Therefore:
+
+- Windows signing: `signtool` ships with the Windows SDK on `windows-latest`, nothing to install. Credentials via GitHub Secrets (base64 pfx or cloud-HSM credentials).
+- macOS signing and notarization: `codesign` / `notarytool` ship with `macos-latest`. Apple credentials via `notarytool store-credentials` plus Secrets.
+- **But this belongs to a release pipeline, not a test pipeline.** CI currently only runs tests and contract checks, with no push or publish step; adding signing also adds publishing authority, which is an external-facing behaviour change.
+
+#### 15.11.7 What This Round Does Not Do (Explicit)
+
+1. **No signing code.** Without a certificate it cannot be verified; untestable code contradicts this repository's rule against writing unverified results as passing.
+2. **No change to ExeOnMac's prefix layout.** A breaking architectural change requiring a human decision and separate scheduling.
+3. **No change to `exit-codes.json`.** Which exit code signing failure should map to is a new external promise, same class as 15.9, awaiting sign-off.
+4. **No certificate purchase, no CI secrets.** Both involve money and external accounts.
+
+#### 15.11.8 Suggested Decision Path (for a human to choose)
+
+| Priority | Action | Rationale |
+|---|---|---|
+| 1 | Fix the inconsistent signature in 15.11.2—either **ship explicitly unsigned artefacts, or re-sign the whole bundle** | Needs no certificate. The former costs nothing; the latter needs one `codesign -s -` at the end of assembly (local ad-hoc does not satisfy Gatekeeper, but at least `codesign -v` becomes self-consistent). **The choice must be made first, because "inconsistent" is worse than "explicitly unsigned"**: it shows the user "corrupt" instead of "unsigned" |
+| 2 | To actually distribute macOS artefacts: buy the $99 Apple membership **and** decide whether ExeOnMac's prefix moves out of the bundle | The two are coupled; half-measures do not work |
+| 3 | Windows signing: scale to release volume. Below ~10 releases a year, an OV certificate plus `osslsigncode` (signable locally on macOS) is less work than standing up Windows CI | The technical path is verified |
+
+---
+
+### 15.12 The viewport-check script's silent hang (fixed 2026-11-19)
+
+**Symptom**: `node console/scripts/viewport-check.mjs` would not run on this machine—not by erroring, but by **never returning**. It neither printed the table nor exited, hanging for six minutes or more until killed by hand. This class of failure is far harder to diagnose than an error: an error points at a location, a hang leaves a blank.
+
+**Layer-by-layer isolation (every layer measured, none guessed)**:
+
+| Layer | Measured result |
+|---|---|
+| Local server | Fine, `fetch` returns 200 / 2470 bytes |
+| Chrome process | Starts, `DevToolsActivePort` written normally |
+| WebSocket | Opens |
+| `Target.createTarget` | Returns in 49 ms |
+| `Target.attachToTarget` | Returns in 15 ms |
+| `Page.enable` | **Never replies** |
+
+The root cause is that Chrome **fails to create its own sandbox** in this sandboxed environment (`sandbox initialization failed: Operation not permitted`), so the renderer never comes up and every page-level command goes unanswered. Adding `--no-sandbox` made `Page.enable` / `Runtime.enable` / `evaluate 1+1=2` pass immediately.
+
+**The real defect in the code was not the missing `--no-sandbox`, it was that `CdpClient.send()` had no timeout**:
+
+```js
+// Before: the Promise never settles; neither timeout nor error branch exists
+send(method, params = {}, sessionId) {
+  return new Promise((resolve_, reject) => {
+    this.pending.set(id, { resolve: resolve_, reject })
+    this.socket.send(JSON.stringify(frame))
+  })
+}
+```
+
+`once()` had a 15-second timeout and `send()` had none—an asymmetry that left the most-used path as the only one that could hang. Two layers of fix:
+
+1. **`send()` carries a 20-second timeout**; on expiry it calls `pending.delete(id)`, tags the error with `cdpTimeout = true`, and clears the timer so the process is not held open.
+2. **Retry once with `--no-sandbox` only when `cdpTimeout` appears.** Not an unconditional retry: a missing Chrome, an unstarted server, or a page-script exception have nothing to do with sandboxing, and retrying would repeat the same failure while masking the real cause. The fallback is reported through `fallbackReason` in both the human-readable output and `--json`, so nobody mistakes it for default behaviour.
+
+**Measured after the fix**: the same command on the same machine went from "hangs for over six minutes" to **finishing in 26 seconds**, with 375 / 768 / 1440 all showing 0 overflow offenders and 0 px page overflow in both baseline and stress runs, exit code 0, plus an explicit line: "first launch with default flags timed out on Page.enable; re-ran once with --no-sandbox".
+
+**Regression locks**: four new cases in `console/test/viewport-check.test.mjs` (10 total) guard "a timeout exists", "fall back only on cdpTimeout", "`--no-sandbox` is not in the base argument list", and "the fallback must be visible". Each of three negative checks turns the suite red: dropping the `timeoutMs` default → 1 red; making `sandboxSuspected` always `true` → 1 red; writing `--no-sandbox` into the base argument array → 1 red. All restored to 10/10 green.
+
+**Why this one is worth remembering**: it had been there since W-01 and `npm test` stayed green throughout—because the viewport script is **not** part of `npm test` (it launches real Chrome, too slow). It became a script nobody runs and nobody knows about. The W-07 task found it but did not fix it (that round's scope was signature evaluation). **Any script outside the test suite needs a guard proving it actually finishes**, otherwise a green suite is vouching for something it never ran.
 
 ---
 
@@ -2711,12 +3397,12 @@ Ordered by determinism; each item presupposes the one before it.
 | 1 | Mac2Win wrap-up | Complete | Packaging, verification and the graphical interface all landed; now in maintenance |
 | 2 | ExeOnMac's five phases | Complete | Detection, extraction, prefix, silent installation, `.app` wrapping, layering and the recipe library all landed |
 | 3 | Win2Mac assembly packaging | Complete | Permission-preserving zip writer, plist generation and verification |
-| 4 | AppOnWin execution capability | **Undetermined** | Gate 2 of the three (an AppKit window) is decisive and needs a real Windows + WSL2 + Darling environment |
-| 5 | console's full dashboard | In progress | The unified entry (CLI + web) works; history persistence and progress push have landed |
-| 6 | Tauri Rust shell end-to-end verification | Awaiting environment | Code ready; needs an environment able to install LLVM |
-| 7 | Code signing support | Under evaluation | Requires a Windows EV certificate and `signtool`, impossible on macOS; may need a CI-side solution |
-| 8 | macOS-side signing and notarisation | Under evaluation | Requires an Apple Developer certificate and `notarytool`, only possible on macOS |
-| 9 | Extended automatic layer builds | Scheduled | Only the base layer builds automatically today; mfc / dotnet / fonts-cn are user-supplied |
+| 4 | AppOnWin execution capability | **Environment unavailable** | Measured 2026-11-19: gates 1 and 2 `blocked` because the host is not Windows, gate 3 passes, overall `unverified` / exit code 5. Neither a pass nor a refutation; needs a re-run on Windows + WSL2 + Darling — see 3.4 and 5.1.2 |
+| 5 | console's full dashboard | Done | Unified entry (CLI + web), history persistence and progress push are all in place; across three viewports (375 / 768 / 1440) `console/scripts/viewport-check.mjs` measures no overflow, with a reproducible negative check |
+| 6 | Tauri Rust shell end-to-end verification | **Partially holds** | Measured 2026-11-19: both the Rust chain and tauri 2.12.7's entire dependency tree compile to `PE32/i386` on arm64 macOS (`linkprobe.exe`, 1096192 bytes). A complete project blocks on `llvm-rc`, which `tauri-winres` needs for the resource section and which is not installed here; `brew install llvm` provides it. This is **not** an architecture limit, and **not** a "must switch to a Windows machine" situation. See 15.10 |
+| 7 | Code signing support | **Assessed (2026-11-19)** | Verdict: feasible, and no Windows machine required—`osslsigncode` signs PE locally. The bottleneck is the certificate and hardware token. **Also found the current ExeOnMac artefacts carry an inconsistent signature** (`codesign -v` exits 1), unfixable by signing because the prefix lives inside the bundle. See 15.11; decision pending human input |
+| 8 | macOS-side signing and notarisation | **Assessed (2026-11-19)** | Verdict: Win2Mac feasible, needs an Apple Developer ID ($99/yr) plus four notarisation prerequisites; **ExeOnMac infeasible under the current layout**—the prefix is written in place inside the bundle, so any signature is broken. See 15.11; decision pending human input |
+| 9 | Extended automatic layer builds | Done (2026-11-19) | base / dotnet / fonts-cn build automatically; mfc has no lawful source and vcpp is already in base |
 | 10 | AI integration layer | Complete | All four forms landed—MCP server, unified CLI, Skill and expert package; the protocol layer is dependency-free and self-implemented |
 
 **Not on the roadmap** (explicitly excluded): a self-developed PE loader, FEX integration, an API semantic mapping layer, macFUSE / kext / system extensions, game-launcher business logic, cloud desktops, and **a built-in LLM or any wrapped model call**. The purpose of `ai/` is to hand this repository's capabilities to external AI, not to turn the project into an AI tool itself.
@@ -2730,7 +3416,7 @@ Ordered by determinism; each item presupposes the one before it.
 1. **Exit codes are append-only; meanings never change.** Once published, changing a code value breaks every dependent script.
 2. **Error-code segments never cross boundaries.** `4xxx` always means input-artefact handling and does not change meaning for any direction's convenience.
 3. **stdout carries only JSON when `--json` / `--report` is set.** Logs always go to stderr.
-4. **Help text must match the parser.** Three things must hold: every option in help is accepted by the parser, every option accepted by the parser is documented in help, and a misspelt subcommand reports an explicit error rather than being treated as a path. Each is guarded by tests (each direction's `test/help.test.mjs`), because such divergence does not crash—it only wastes time. Concrete instances are in section 15.2.
+4. **Help text must match the parser.** Three things must hold: every option in help is accepted by the parser, every option accepted by the parser is documented in help, and a misspelt subcommand reports an explicit error rather than being treated as a path. Each is guarded by tests (in the three Node directions `test/help.test.mjs`; for ExeOnMac, `TestCLIContract` in `tests/test_phase0.py` plus `test_phase6.py`), because such divergence does not crash—it only wastes time. Concrete instances are in section 15.3.
 
 ### 18.2 Pre-Commit Checks
 
@@ -3111,11 +3797,11 @@ Responding item by item to the ten requirements in chapter 5 of `README提示词
 | # | Check | Conclusion |
 |---|---|---|
 | 1 | Any colloquialisms or ambiguous sentences | Checked. The whole document is written in formal prose, free of exclamation marks and ellipsis-driven casualness; terms are defined at first use |
-| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 32 configuration keys (9.2), 13 environment variables (9.3), 14 external tools with all seven attributes (6.2), 10 subcommand families (10.1) |
-| 3 | Every highlight has concrete evidence | All twenty highlights follow the five-part structure (name / value / implementation / differentiation / evidence), with evidence drawn from measurement or reproducible commands |
+| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 37 configuration keys (9.2), 13 environment variables (9.3), 18 external tools with all seven attributes (6.2), 6 subcommand families (10.1). Counts verified against `DEFAULTS` in `mac2win/src/core/config.mjs` (37 keys), `NOTICE` chapter 3 (18 rows) and the 10.1 table (6 rows) |
+| 3 | Every highlight has concrete evidence | All twenty-five highlights follow the five-part structure (name / value / implementation / differentiation / evidence), with evidence drawn from measurement or reproducible commands |
 | 4 | All design details recorded | Chapter 5, eleven sections, covering abnormal input and boundaries, timeout/retry/degradation/fault tolerance, caching and performance, concurrency and consistency, storage optimisation, security measures, micro UX decisions, default-value rationale, cross-platform strategy |
 | 5 | Third-party projects, copyright and licences fully present in README and NOTICE | Chapter 6 plus the thirteen sections of `NOTICE`, consistent between the two |
-| 6 | Description consistent with actual features and directory structure | Directory structure (11.1) written from the actual `ls` output; test sizes (16) match measured output; check counts (15.5) distinguish the measured 11 from 10 |
+| 6 | Description consistent with actual features and directory structure | Directory structure (11.1) written from the actual `ls` output; test sizes (12.1) match measured output; check counts (15.6) distinguish the measured 11 from 10 |
 | 7 | Any text, code or assets of unknown or unauthorised origin | None. All code is original; referenced projects are itemised in `NOTICE` section 7 with an explicit statement that no code was copied |
 | 8 | Both own copyright protected and others' respected | Chapter 19 states own copyright and trademarks; `NOTICE` states others' copyright and redistribution obligations |
 | 9 | `README_EN.md` synchronised with the Chinese version, language links at the top of both | Yes. Section headings correspond one-to-one; both link to each other at the top |

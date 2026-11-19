@@ -141,3 +141,79 @@ for (const command of ['parse', 'assess']) {
     assert.match(result.stderr, /缺少/)
   })
 }
+
+/* ══════════════ doctor 的失败归码必须与退出码自洽 ══════════════ */
+
+/**
+ * doctor 成功时退出码 0，上面已由真实 CLI 覆盖。失败路径在本机走不到
+ * （那需要 Node < 20），所以这里只钉「归码选得对不对」这一条 ——
+ * 用常量比对，不跑子进程。
+ *
+ * ## 这一条守的是真实缺陷的同形态
+ *
+ * `doctor` 早先把失败归到 `HOST_UNSUPPORTED`（AOW_1001），而它同时写
+ * `exitCode: 5`。契约里 `exit 5 → 2001/2002`，1001 属 exit 2。
+ * 于是同一份报告里两个值互斥，`node contracts/validate.mjs --report
+ * r.json --exit-code 5` 会直接报红。
+ *
+ * 而 doctor 的唯一失败原因是 Node 版本过低，语义上是「缺依赖/版本太低」，
+ * 对应 `TOOL_OUTDATED`（2002）才对。
+ *
+ * 为什么不用子进程测：伪造「Node < 20」需要换一个 Node 二进制，
+ * 成本远高于收益。常量比对足够 —— 它守的是「选哪个码」，正是缺陷所在。
+ */
+test('doctor 的失败归码落在退出码 5 的声明范围内', () => {
+  const contract = JSON.parse(readFileSync(join(CONTRACTS, 'exit-codes.json'), 'utf8'))
+
+  /*
+   * 先断言「代码里实际用的是哪个码」，再断言它合规。
+   *
+   * 只断言「TOOL_OUTDATED 合规」是空转的：那个常量永远合规，
+   * 而 bin 里可能用的是别的码 —— 改了实现测试照样绿。
+   * 实测过这件事：把 `failCode` 注回 HOST_UNSUPPORTED，只断言常量的
+   * 版本 14/14 全绿，什么都没抓到。
+   */
+  const binText = readFileSync(join(HERE, '..', 'bin', 'apponwin.mjs'), 'utf8')
+  const used = /const failCode = ErrorCode\.([A-Z_]+)/u.exec(binText)
+  assert.notEqual(used, null, '找不到 doctor 的 failCode 定义，测试需同步更新')
+  assert.equal(used[1], 'TOOL_OUTDATED',
+    `doctor 的失败归码必须是 TOOL_OUTDATED（2002），实际用的是 ${used[1]}`)
+
+  const expand = (segment) => {
+    const out = new Set()
+    for (const part of String(segment).split('/')) {
+      const [low, high] = part.split('-')
+      if (high === undefined) { out.add(Number(low)); continue }
+      for (let i = Number(low); i <= Number(high); i += 1) out.add(i)
+    }
+    return out
+  }
+
+  const code = ErrorCode.TOOL_OUTDATED
+  const exit = exitCodeFor(code)
+  const declared = contract.codes[String(exit)]
+
+  assert.equal(exit, 5, 'doctor 失败应走退出码 5')
+  assert.notEqual(declared.errorSegment, null,
+    `退出码 ${exit} 在契约里没有声明错误码段位`)
+  assert.ok(expand(declared.errorSegment).has(Number(code.slice(-4))),
+    `${code} 映射到退出码 ${exit}，但契约里该退出码只声明 ${declared.errorSegment}`)
+})
+
+test('doctor 不再把「宿主不是 Windows」当成失败', () => {
+  /*
+   * 这是另一个已经发生过的事故形态：非 Windows 上 doctor 报失败，
+   * 用户被拦住，而解析与评估本来在任何平台都能做。
+   *
+   * 判据：bin 里 doctor 分支的 platform 检查项必须是 ok: true。
+   * 用真跑覆盖更直接 —— 本机就是非 Windows，能跑到那条分支。
+   */
+  const result = runCli(['doctor', '--json'])
+  assert.equal(result.status, 0, `doctor 在本机应成功，实际退出码 ${result.status}`)
+
+  const payload = JSON.parse(result.stdout)
+  const platformCheck = payload.checks.find((check) => check.name === 'platform')
+  assert.ok(platformCheck, 'doctor 必须报出 platform 这一项')
+  assert.equal(platformCheck.ok, true,
+    '平台不是 Windows 不该算失败 —— 解析与评估任何平台都能做')
+})

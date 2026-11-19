@@ -371,6 +371,50 @@ describe('报告：跨字段不变量', () => {
     }))
     assert.equal(result.code, 0, result.stderr)
   })
+
+  /*
+   * 区间写法的中值。这一组是 2026-11-19 修掉的真实缺陷的回归锁。
+   *
+   * 契约里 `exit 6 → "4001-5002"` 是**范围**写法。旧实现用
+   * `String(seg).split(/[/-]/)` 解析，范围被切成两个端点，
+   * 于是 4002 既不等于 4001 也不等于 5002，被判「不一致」。
+   *
+   * 它长期没被发现，因为真实报告命中的多是端点（4001 构建失败、
+   * 5002 装配失败），端点恰好就是切分后的那两个字符串。
+   * 所以这组不只测 4002，而是把范围内的每一个真实码都跑一遍 ——
+   * 只测端点等于没测。
+   */
+  for (const tail of ['4001', '4002', '4003', '5001', '5002']) {
+    test(`exit 6 配 ${tail} 是合法配对（范围内所有码都该过）`, () => {
+      const result = checkReportWith(validReport({
+        ok: false, exitCode: 6,
+        error: { code: `M2W_${tail}`, message: 'x' },
+      }))
+      assert.equal(result.code, 0,
+        `M2W_${tail} 落在契约 exit 6 的 4001-5002 范围内，不该报错：\n${result.stderr}`)
+    })
+  }
+
+  for (const tail of ['6001', '6002', '6003']) {
+    test(`exit 7 配 ${tail} 是合法配对`, () => {
+      const result = checkReportWith(validReport({
+        ok: false, exitCode: 7,
+        error: { code: `M2W_${tail}`, message: 'x' },
+      }))
+      assert.equal(result.code, 0, `M2W_${tail} 应在 6001-6003 内：\n${result.stderr}`)
+    })
+  }
+
+  test('范围外的码配 exit 6 仍被拦下（修区间不能把门开太大）', () => {
+    /*
+     * 修「范围判定」最容易犯的错是改成「只要是 4xxx/5xxx 就放行」，
+     * 那样 3001 也会被放过。这条守住上界。
+     */
+    assertRejected(validReport({
+      ok: false, exitCode: 6,
+      error: { code: 'M2W_3001', message: 'x' },
+    }), '两边必须一致')
+  })
 })
 
 /* ══════════════════════════ 真实退出码比对 ══════════════════════════ */

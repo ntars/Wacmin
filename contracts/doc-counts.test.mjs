@@ -24,7 +24,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -253,11 +253,39 @@ describe('--min 供 CI 取基线', () => {
 
 describe('对真实仓库的断言', () => {
   test('本仓库当前 12.1 表格自洽', () => {
+    /*
+     * ## 这里曾经硬编码 `合计 1150 项`
+     *
+     * 那行断言在两份 README 都把总数写成 1165 之后就一直红着 —— 而它守着
+     * 的恰恰是「同一个数字只能有一个写入点」这条规矩，自己却成了第二个
+     * 写入点。改一次测试计数，就得记得同时改 README 和这里，否则红；而
+     * 一旦有人图省事把这里改成新数字，它又变成下一次漂移的伏笔。
+     *
+     * 所以这里不认任何具体数字，只认两件事：
+     *
+     *   1. `--check` 退出码为 0（表格自洽、两版逐项相同）
+     *   2. 输出里的合计**等于各分项之和**（从同一份 README 里现读）
+     *
+     * 真正的数字真源是 README 12.1 表格，`--check` 负责守它；测试只守
+     * 「`--check` 在真实仓库上确实通过」。数字对不对，由表格自己的
+     * 加总关系决定，不由测试背下来。
+     */
     const { status, stdout } = spawnSync(process.execPath, [SCRIPT, '--check'], {
       cwd: HERE,
       encoding: 'utf8',
     })
     assert.equal(status, 0, stdout)
-    assert.match(stdout, /合计 1150 项/)
+
+    const match = /合计 (\d+) 项/u.exec(stdout)
+    assert.notEqual(match, null, `输出里应有合计数，实际：${stdout}`)
+
+    const readme = readFileSync(join(HERE, '..', 'README.md'), 'utf8')
+    const { rows, total } = parseCountTable(readme)
+    const sum = [...rows.values()].reduce((acc, n) => acc + n, 0)
+
+    assert.equal(rows.size, 7, `12.1 应有 7 个模块行，实际 ${String(rows.size)}`)
+    assert.equal(total, sum, `合计 ${String(total)} 应等于各分项之和 ${String(sum)}`)
+    assert.equal(Number(match[1]), sum,
+      `--check 报出的合计 ${match[1]} 应与表格分项之和 ${String(sum)} 一致`)
   })
 })

@@ -266,7 +266,10 @@ def _assemble_from_scratch(app_dir: Path, *, style: str, color: str,
         )
 
     name = app_name or _name_from_bundle(app_dir)
-    resolved_entry = entry or _guess_entry(private)
+    # 把应用名传下去：它是兜底闸门唯一能拿到的产品名线索。不传的话
+    # `find_installed_entry` 的产品名为空，闸门整条放行，又会退回
+    # 「Program Files 下打分第一」那个坑（见 _guess_entry 的说明）。
+    resolved_entry = entry or _guess_entry(private, app_name=name)
     if not resolved_entry:
         raise UsageError(
             f"无法自动确定入口程序：{app_dir}",
@@ -299,28 +302,45 @@ def _name_from_bundle(app_dir: Path) -> str:
     return stem
 
 
-def _guess_entry(private: Path) -> str | None:
+def _guess_entry(private: Path, *, app_name: str = "") -> str | None:
     """在 prefix 里找最像主程序的 exe。
 
-    复用 extract 阶段的候选打分（GUI 子系统、体积、位置、含图标资源），
-    而不是简单取第一个 exe —— 一个目录里常有 updater / crashpad 之类的
-    辅助程序，直接取第一个经常错。
-    """
-    from ..extract.candidates import best_candidate
+    ## 这里**不能**自己判，必须走 entry.py 那一份
 
-    drive_c = private / "drive_c"
-    roots = [drive_c / "Program Files", drive_c / "Program Files (x86)"]
-    for root in roots:
-        if not root.is_dir():
-            continue
-        candidate = best_candidate(root)
-        if candidate is None:
-            continue
-        try:
-            return (root / candidate.relpath).relative_to(private).as_posix()
-        except ValueError:
-            continue
-    return None
+    早先的实现是「在 Program Files 与 Program Files (x86) 下各取打分最高
+    的 exe」，看起来合理，实际上把 `install` 阶段辛苦建立的判据全丢了：
+
+    - 不搜 `C:\\Wacmin\\` —— 而那是本工具的**默认**安装位置，用户程序
+      根本不在它的搜索范围内；
+    - 不按产品名认领子目录；
+    - 兜底不过文件名相关性闸门。
+
+    实测端到端后果（W02Probe 装到 `C:\\Wacmin\\w02\\`）：
+
+        install → drive_c/Wacmin/w02/W02Probe.exe      （对）
+        package → drive_c/Program Files/Windows NT/Accessories/wordpad.exe
+
+    也就是**装什么软件，打包出来都指向写字板** —— base 层自带的
+    wordpad.exe 在 Program Files 下拿 55 分，永远是第一名。
+
+    仓库根 README.md 第 5.3 节把「同一判据不许两处各写一套」列成红线。
+    判据现在只有 `wepack/entry.py` 一份，`install` 与 `package` 都调它。
+
+    `app_name` 传进来时会参与产品名比对；不传则退回纯结构扫描（仍受
+    路径优先级与兜底闸门约束），不会越权认领系统组件。
+    """
+    from ..entry import find_installed_entry
+
+    class _Hint:
+        """只为凑出 `detection.product_name` 这一个字段。
+
+        真正生效的是 `app_name`（它同时进了 keywords 集合），这里不额外
+        造产品名 —— 凭空补一个反而可能认错目录。
+        """
+
+        product_name = None
+
+    return find_installed_entry(private, _Hint(), app_name)
 
 
 def _guess_reverse_domain(app_name: str) -> str:

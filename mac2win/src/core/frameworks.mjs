@@ -62,10 +62,21 @@ export const FRAMEWORKS = {
     id: 'tauri',
     label: 'Tauri',
     architectures: ['x86'],
-    /** Rust 壳无法跨架构编译，只能打包它的 Node/前端层。 */
+    /*
+     * 默认不编 Rust 壳，但**原因不是「编不了」**。
+     *
+     * 2026-11-19 实测：arm64 macOS 上 `cargo xwin build --target
+     * i686-pc-windows-msvc` 能编出真实的 `PE32 / i386 / windows-gui`。
+     * 完整 Tauri 项目卡在 `llvm-rc`（`tauri-winres` 编资源节要用）——
+     * 一个可选组件，不是架构限制。详见 `rust-shell.mjs`。
+     *
+     * 默认关着是为了省 1.5 GB 依赖与 10–30 分钟首次构建，
+     * 这是产品取舍，不是能力边界。注释写清楚，免得下一个人
+     * 又把「默认不做」读成「做不到」。
+     */
     nativeShell: false,
     runtime: 'node',
-    description: 'Tauri 的 Rust 壳需要 Windows 工具链，只能打包其 Node/前端层',
+    description: 'Tauri 默认只打包其 Node/前端层；要原生窗口需显式开启 Rust 壳编译',
     defaultEntry: 'dist',
   },
   node: {
@@ -289,7 +300,22 @@ export function describeCapabilities(frameworkId) {
   if (framework.nativeShell) {
     lines.push('原生窗口：包含（由框架自带的预编译壳提供）')
   } else if (frameworkId === 'tauri') {
-    lines.push('原生窗口：不包含（Rust 壳需要 Windows 工具链，无法在 arm64 mac 上编译）')
+    /*
+     * 这句此前写的是「Rust 壳需要 Windows 工具链，无法在 arm64 mac 上编译」。
+     *
+     * **那个说法是错的。** 2026-11-19 实测：arm64 macOS 上用
+     * `cargo xwin build --target i686-pc-windows-msvc` 能编出真实的
+     * `PE32 / i386 / windows-gui`（探针 92160 字节）。跨架构编译这条路是通的。
+     *
+     * 真正拦住完整 Tauri 项目的是另一件事：`tauri-build` 生成 Windows
+     * 资源节时要用 `llvm-rc`，而它不是任何现成安装的组成部分（详见
+     * `rust-shell.mjs` 里 `llvm-rc` 那一段的注释）。这跟 CPU 架构无关，
+     * 在 Intel mac 上一样缺。
+     *
+     * 产物说明是写给**最终用户**看的，不能把内部实现细节说成「做不到」。
+     * 所以这里只陈述产物事实（本次没带原生窗口），不再给架构层面的断言。
+     */
+    lines.push('原生窗口：本次未包含（Rust 壳需显式开启，且依赖 llvm-rc 等交叉编译工具）')
     lines.push('降级行为：界面通过系统默认浏览器打开，后端服务在后台运行')
   } else {
     lines.push('原生窗口：不包含（这类项目本身没有原生壳）')

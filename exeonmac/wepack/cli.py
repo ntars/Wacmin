@@ -1205,11 +1205,24 @@ def cmd_package(args: argparse.Namespace) -> int:
         "checks": checks,
         "warnings": report.warnings,
     }
-    _emit(payload, args.json)
 
-    # 挂到 args 上供 cmd_build 汇总。build 把两段结果合成一份输出，
-    # 不能靠 stdout 拼——那会让 `--json` 产生两段 JSON，`json.load` 抛
-    # `Extra data`。README 10.1 的契约是 stdout 只有一段 JSON。
+    # 失败时**不**在这里输出 payload。
+    #
+    # ## 为什么失败路径要单独处理
+    #
+    # 早先这里无条件 `_emit(payload, args.json)`，然后才 `raise
+    # VerifyFailed`。于是 `package --json` 一失败，stdout 上是**两段**
+    # JSON：先一份 `ok:false` 的完整 payload，再一份 main() 的
+    # `{"ok": false, "error": ..., "exit_code": 7}`。`json.load` 抛
+    # `Extra data: line 79`，管道直接交给 jq 也解析失败 —— 而 README
+    # 10.1 的契约是「stdout 只有 JSON」。
+    #
+    # 这与 w-02 修过的「build --json 两段 JSON」是同一形态：都是
+    # 「成功路径的输出先落盘，失败路径又补一份」。区别只在这里是
+    # 单个子命令内部，不在父子命令之间。
+    #
+    # 现在失败走单一段：main() 的 error 段带上 message 与 exit_code，
+    # 详细 checks 由 stderr 与 `--report`（结构化报告）承载。
     args.package_result = payload
 
     if not args.json:
@@ -1236,6 +1249,8 @@ def cmd_package(args: argparse.Namespace) -> int:
     if not report.ok:
         raise VerifyFailed("产物校验未通过：" + "；".join(
             f"{c.name}（{c.detail}）" for c in report.checks if c.required and not c.ok))
+
+    _emit(payload, args.json)
 
     if want_report and tracker is not None:
         from .report import success_report

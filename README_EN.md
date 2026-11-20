@@ -2402,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 454 | about 2m20s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
+| exeonmac | 461 | about 2m30s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 230 | about 19 seconds | |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1322** | — | See "0 skipped repository-wide" below |
+| **Total** | **1329** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3038,7 +3038,8 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | `contracts/validate.mjs` splits a range into two endpoints | A report with `exitCode: 6` and `M2W_4002` is rejected as "exit code and error code disagree", yet 4002 is perfectly legal | `errorSegment` was parsed with `split(/[/-]/)`: `"4001-5002"` becomes `['4001','5002']`, so a mid-range code equals neither bound. It went unnoticed because real reports mostly hit the endpoints (4001 / 5002), which are exactly the split results | Extracted `segmentAllows()` to handle `-` and `/` separately. Tests do not just cover 4002: `4001/4002/4003/5001/5002` and `6001/6002/6003` are all exercised—testing only the endpoints tests nothing |
 | `win2mac --strict-host` produces a self-contradictory report | `--strict-host` exits 2 with `W2M_1001`, but none of the contract's 13 exit codes declares 1001 | It threw `HOST_UNSUPPORTED` (1001) and `exitCodeFor` fell back to 2 by segment. The user reads "bad argument" and hunts for a path typo, while the real cause is "this machine cannot do this" | Throw `UNSUPPORTED` (1005 → exit code 4, explicitly unsupported). `doctor`'s failure code changed for the same reason to `TOOL_OUTDATED` (2002 → exit code 5; the only way doctor fails is an old Node). The same defect in `apponwin doctor` was fixed too |
 | Contract lacks an exit-code declaration for segment `3000` (runtime) | `M2W_3001/3002/3003` map to exit code 5 in code while contract `exit 5` only declares `2001/2002` | The contract file lags behind the implementation: all three directions reserve runtime codes and mac2win genuinely uses them (Electron/NW.js download and architecture checks), but nobody came back to update the contract | The contract was **not** changed this round (changing it alters an external promise and needs human sign-off); tracked in 15.9 |
-| launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); both were negatively verified |
+| launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
+| `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -3521,6 +3522,62 @@ except subprocess.TimeoutExpired:
 The behavioural test alone would catch it too, but only after waiting out the 20-second timeout; the static test alone would not stop some other spelling that is equally broken. Both together are fast and complete.
 
 **⑦ Still unverified**: this section proves only that "SIGTERM is forwarded to wine and the launcher exits". All three signals share the same code path but only SIGTERM was exercised. **Whether wine writes every window's state back into the prefix on SIGTERM** (`wineserver`'s shutdown completeness) is unverified — the local probe used `notepad.exe`, which has no state to save; stateful commercial software needs a real-machine check.
+
+### 15.15 Packaging "succeeds" on a half-broken prefix (measured 2026-11-20, fixed)
+
+**This defect is the same family as 15.14: the packaging flow is all green, exit code 0, verification 10/10 — and the product is a `.app` that does nothing when double-clicked.**
+
+**① How it was found.** The optimization loop entered from the "usability" dimension and asked: "when a prefix already exists but is broken, how do `install` / `build` report it?" Digging in showed the wording was not the problem — `package` had no idea the prefix was broken.
+
+**② The predicate only checked whether a directory exists.** Item 7 of `package/verify.py` used to be a single assertion: `Private/drive_c` is a directory. All three kinds of damage below therefore passed:
+
+| Damage | Old verdict | Real consequence (same prefix, handed to wine) |
+|---|---|---|
+| `system.reg` / `user.reg` / `userdef.reg` deleted | 10/10 pass, exit 0 | `wine: could not load kernel32.dll, status c0000135` (rc=53) |
+| `system32` still present but emptied | 10/10 pass, exit 0 | `could not open working directory L"C:\\windows\\system32\\"` |
+| `dosdevices/c:` replaced by a regular file | 10/10 pass, exit 0 | drive C: does not exist; every install path fails |
+
+Method: build a bundle that genuinely passes verification with `build_bundle`, then damage it row by row and run `wepack package <app> --no-register --json`. All three returned `EXIT=0`, `ok=true`, `failures=[]`.
+
+**③ Why "the directory exists" is structurally insufficient.** The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions: `drive_c`, non-empty `system32`, `dosdevices/c:` is a relative symlink, three non-empty `.reg` files). The packaging side did not call it — the same business rule with two implementations, and the looser one sat on the last gate. Exactly what the §5.3 red line forbids.
+
+**④ Fix: one implementation of the predicate, no second copy.**
+
+```python
+# wepack/package/verify.py
+from ..prefix import validate_prefix          # reuse, do not copy
+prefix_problems = validate_prefix(private)
+report.checks.append(Check("prefix.valid", not prefix_problems,
+                           "；".join(prefix_problems)))
+```
+
+The check was renamed from `prefix.drive_c` to `prefix.valid`, and on failure every missing item is named (not just "verification failed").
+
+**⑤ After the fix (four prefix states, process exit codes measured individually).**
+
+| Prefix state | Process EXIT | `ok` | Failing check |
+|---|---|---|---|
+| Healthy | 0 | `true` | none |
+| Three `.reg` files missing | **7** | `false` | `prefix.valid` (names all three) |
+| `system32` emptied | **7** | `false` | `prefix.valid` (`system32 为空`) |
+| `dosdevices/c:` not a symlink | **7** | `false` | `prefix.valid` (`dosdevices/c: 不是符号链接`) |
+
+Exit code 7 = `VERIFY_FAILED`, matching `contracts/exit-codes.json`.
+
+**⑥ The fixture was as weak as the predicate — that is why it hid.** Most important point here. The test fixture `make_app()` used to create only `drive_c/App/`, with no `system32`, no `.reg` files and no `dosdevices/c:` — in other words, **the fixture's own prefix could not boot**. The predicate only checked for a directory, so the fixture passed; both sides being loose kept the defect green forever. The fix makes the fixture meet `validate_prefix`'s minimum requirements, so "tighten the predicate" and "make the fixture real" become the same change.
+
+**⑦ A second instance of the same shape, fixed alongside: `package --json` wrote two JSON documents on failure.** `cmd_package` used to `_emit(payload)` unconditionally and only then `raise VerifyFailed`, so on failure stdout carried "full payload + main's error document" glued together. Same cause as the `build --json` defect fixed in W-02, just inside a single subcommand. Measured with `raw_decode`: before the fix `documents=2` and `json.load` throws `Extra data`; after the fix `documents=1`, with `ok=false` and `exit_code=7` in the same document. **This defect already existed on HEAD** (reproduced with the old implementation plus a deleted entry); it was not introduced here.
+
+**⑧ Regression locks: 7 items, both directions negatively verified.**
+
+| Guard | Location | Guards | Negative verification |
+|---|---|---|---|
+| Healthy prefix must pass | `test_phase3.TestPrefixHealthGuard` | against over-correction | — |
+| Missing `.reg` / empty `system32` / broken `dosdevices`, one each | same | names each item | old predicate injected → **5 red**, 5/5 green after restore |
+| Predicate must come from the `prefix` module | same | no second copy | source assertions: `from ..prefix import validate_prefix` present, `(private / "drive_c").is_dir()` absent |
+| `package --json` single document on failure | `test_phase6.TestPackageJsonFailureContract` | stdout contract | "emit then raise" injected → **2 red**, 8/8 green after restore |
+
+**⑨ Still unverified**: this section proves structural damage is blocked. **Software-level corruption where the prefix structure is intact but registry contents are half-written (e.g. an installer killed midway) can still only be found by actually running wine** — `validate_prefix` checks existence and non-emptiness, not content validity. Not over-engineered here; recorded as-is.
 
 ---
 

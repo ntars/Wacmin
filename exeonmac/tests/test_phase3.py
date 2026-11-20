@@ -3,9 +3,9 @@
 跑法：
     cd exeonmac && python3 -m unittest tests.test_phase3 -v
 
-不依赖真实安装包：prefix 用临时目录伪造（只要求 drive_c 存在），
-图标源用测试内生成的 .ico（PNG 帧与 BMP 帧两种路径都覆盖）。
-只有需要真实 wine 的启动测试才走环境变量：
+不依赖真实安装包：prefix 用临时目录伪造（按 `prefix.validate_prefix` 的最低要求造齐
+system32 / dosdevices / 三个 .reg），图标源用测试内生成的 .ico（PNG 帧与 BMP 帧两种
+路径都覆盖）。只有需要真实 wine 的启动测试才走环境变量：
     WEXE_REAL_WINE=1                      启用真实 wine 启动
     WEXE_SAMPLE_NSIS=/path/to/setup.exe   用真实安装包做图标提取
 """
@@ -117,10 +117,39 @@ def make_ico(path: Path, frames: list[tuple[int, int, bytes]]) -> Path:
 
 def make_app(tmp: Path, *, entry: str = "drive_c/App/app.exe",
              app_name: str = "Demo") -> Path:
-    """造一个已装好 prefix 的 .app 骨架（只建目录与假 exe）。"""
+    """造一个已装好 prefix 的 .app 骨架（只建目录与假 exe）。
+
+    ## 为什么连 system32 / dosdevices / .reg 一起造
+
+    这里的目标是「一个真的装了东西的 prefix」。早先只建 `drive_c/App/`，
+    看着够用，但那样造出来的 prefix 连 wine 都起不来（实测 `could not
+    load kernel32.dll, status c0000135`）。装配校验曾经只断言 `drive_c`
+    是个目录，所以假 prefix 也能 10/10 全绿 —— 夹具与判据一起弱，
+    缺陷就藏得住。现在夹具按 `validate_prefix` 的最低要求造齐：
+    system32 非空、`dosdevices/c:` 是相对软链、三个 `.reg` 非空。
+    """
     app_dir = tmp / bundle_dir_name(app_name)
     paths = ensure_skeleton(app_dir)
-    entry_path = paths["private"] / entry
+    private = paths["private"]
+
+    # wine 认得出这个 prefix 的最低要求，逐条对应 prefix.validate_prefix
+    system32 = private / "drive_c" / "windows" / "system32"
+    system32.mkdir(parents=True, exist_ok=True)
+    (system32 / "kernel32.dll").write_bytes(b"MZ" + b"\0" * 64)
+
+    dosdevices = private / "dosdevices"
+    dosdevices.mkdir(parents=True, exist_ok=True)
+    c_link = dosdevices / "c:"
+    if c_link.is_symlink() or c_link.exists():
+        c_link.unlink()
+    os.symlink("../drive_c", c_link)          # 相对路径，包可移动
+
+    # wine 的 .reg 是 UTF-16LE + BOM，非空即可（内容由 wine 自己补全）
+    for name in ("system.reg", "user.reg", "userdef.reg"):
+        (private / name).write_bytes(
+            b"\xff\xfe" + "WINE REGISTRY Version 2\n".encode("utf-16-le"))
+
+    entry_path = private / entry
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry_path.write_bytes(b"MZ" + b"\0" * 128)
     return app_dir
@@ -744,6 +773,86 @@ class TestVerify(unittest.TestCase):
             report = verify_bundle(Path(tmp) / "Nothing.app")
             with self.assertRaises(VerifyFailed):
                 report.raise_if_failed()
+
+
+class TestPrefixHealthGuard(unittest.TestCase):
+    """`prefix.valid` 这条校验的回归锁。
+
+    ## 为什么需要这一组
+
+    早先 `verify_bundle` 只断言 `Private/drive_c` 是个目录。只要那个目录
+    还在，把 system32 清空、三个 `.reg` 全删、`dosdevices/c:` 改成普通
+    文件，校验照样 **10/10 全绿**、`wepack package` 照样退 0。而同一份
+    prefix 交给真实 wine 是直接起不来的（实测 `could not load
+    kernel32.dll, status c0000135`，rc=53）。
+
+    即：用户会拿到一个「打包成功、双击毫无反应」的 .app。四条用例分别锁
+    「缺什么会被点名」与「什么都不缺时不许误报」两头。
+    """
+
+    def _bundle(self, tmp_path: Path) -> Path:
+        app_dir = make_app(tmp_path, app_name="Demo")
+        ico = make_ico(tmp_path / "s.ico", [(64, 64, make_bmp_frame(64))])
+        build_bundle(app_dir, app_name="Demo", bundle_id="com.wexe.win.demo.demo",
+                     version="1.0", entry="drive_c/App/app.exe",
+                     icon_source=ico, register=False)
+        return app_dir
+
+    def test_healthy_prefix_passes(self):
+        """造齐的 prefix 必须判过 —— 防矫枉过正，把正常包也拦下。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = self._bundle(Path(tmp))
+            report = verify_bundle(app_dir)
+            self.assertTrue(report.ok, [c.to_dict() for c in report.failures])
+            self.assertIn("prefix.valid", [c.name for c in report.checks])
+
+    def test_missing_registry_detected(self):
+        """缺 .reg 的 prefix，wine 起不来，校验必须报出来。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = self._bundle(Path(tmp))
+            private = app_dir / "Contents/Resources/Private"
+            for name in ("system.reg", "user.reg", "userdef.reg"):
+                (private / name).unlink()
+            report = verify_bundle(app_dir)
+            self.assertFalse(report.ok)
+            self.assertIn("prefix.valid", [c.name for c in report.failures])
+            detail = next(c.detail for c in report.failures if c.name == "prefix.valid")
+            self.assertIn("system.reg", detail)
+
+    def test_empty_system32_detected(self):
+        """system32 还在但被清空 —— 只看「目录存在」会漏，必须看内容。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = self._bundle(Path(tmp))
+            system32 = app_dir / "Contents/Resources/Private/drive_c/windows/system32"
+            shutil.rmtree(system32)
+            system32.mkdir()
+            report = verify_bundle(app_dir)
+            self.assertFalse(report.ok)
+            detail = next(c.detail for c in report.failures if c.name == "prefix.valid")
+            self.assertIn("system32 为空", detail)
+
+    def test_broken_dosdevices_link_detected(self):
+        """dosdevices/c: 不是软链 → wine 的 C: 盘不存在。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = self._bundle(Path(tmp))
+            link = app_dir / "Contents/Resources/Private/dosdevices/c:"
+            link.unlink()
+            link.write_bytes(b"not a symlink")
+            report = verify_bundle(app_dir)
+            self.assertFalse(report.ok)
+            detail = next(c.detail for c in report.failures if c.name == "prefix.valid")
+            self.assertIn("dosdevices/c:", detail)
+
+    def test_check_uses_prefix_module_not_own_copy(self):
+        """判据必须来自 `wepack.prefix.validate_prefix`，不许在这里另写一套。
+
+        同一判据两处各写一套，改一处必漏另一处（README 5.3）。做法是往
+        prefix 里造一个只有 `validate_prefix` 认得出的问题，看校验是否跟着变红。
+        """
+        import wepack.package.verify as verify_mod
+        source = Path(verify_mod.__file__).read_text(encoding="utf-8")
+        self.assertIn("from ..prefix import validate_prefix", source)
+        self.assertNotIn('(private / "drive_c").is_dir()', source)
 
 
 # --------------------------------------------------------------------------

@@ -2401,13 +2401,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 454 项 | 约 2 分 20 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
+| exeonmac | 461 项 | 约 2 分 30 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 230 项 | 约 19 秒 | |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1322 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1329 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3059,6 +3059,8 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | `win2mac --strict-host` 的报告自相矛盾 | `--strict-host` 退出码 2 配 `W2M_1001`，而契约 13 条退出码里没有任何一条声明过 1001 | 抛的是 `HOST_UNSUPPORTED`（1001），`exitCodeFor` 按段位兜底给出 2。用户收到的信号是「参数错误」，会去查路径拼写，真因是「这台机器不能干这件事」 | 改抛 `UNSUPPORTED`（1005 → 退出码 4，明确不支持）；`doctor` 的失败归码同理由 1001 改为 `TOOL_OUTDATED`（2002 → 退出码 5，doctor 的唯一失败原因就是 Node 版本过低）。`apponwin doctor` 同一处同形态缺陷一并修掉 |
 | 契约缺 `3000` 段（运行时）的退出码声明 | `M2W_3001/3002/3003` 在代码里映射到退出码 5，而契约 `exit 5` 只声明 `2001/2002` | 契约文件维护滞后于实现：三个方向都预留了运行时错误码，mac2win 真的在用（Electron/NW.js 下载与架构校验），但没人回来补契约 | 本轮**未改契约**（改契约属于对外承诺变更，需人工确认），已在 15.9 列为待决项 |
 | launcher 收不到 SIGTERM，只能 `kill -9` | 关掉 ExeOnMac 产物时进程不退出；实测 SIGTERM 后 90 秒仍在运行，`launcher.log` 里连「收到信号」都没有 | `DispatchSource.makeSignalSource(queue: .main)`：`.main` 队列的 handler 由 **main run loop** 调度，而 `WineRunner.run` 用 `Thread.sleep(0.2)` 轮询子进程、一路不跑 run loop。`signal(sig, SIG_IGN)` 又把默认处置吃掉了，于是信号既不触发 handler 也不终止进程。**每个用例因此白等 60 秒兜底超时，测试还一直是绿的** | 信号源改挂独立串行队列（`DispatchQueue(label: "com.wexe.launcher.signal")`）。实测 SIGTERM 后 **0.19 秒**退出、日志出现「收到信号 15」与「wine 退出 status=15」；测试从 63.3 秒降到 3.1 秒。补两层守卫：`test_phase0` 静态断言队列不是 `.main`（防写法回退），`test_phase3` 断言「日志出现收到信号」+「20 秒内退出」（防行为回退），两者均做过负向验证 |
+| 打包对「半坏 prefix」照样报成功 | `system.reg` / `user.reg` / `userdef.reg` 全删、或 `system32` 被清空、或 `dosdevices/c:` 换成普通文件之后，`wepack package` 仍 `EXIT=0`、`ok=true`、校验 10/10 全绿；而同一份 prefix 交给 wine 直接 `could not load kernel32.dll, status c0000135`（rc=53） | 装配侧第 7 项校验只断言 `Private/drive_c` **是个目录**。prefix 是否可用，`install` 侧一直用 `prefix.validate_prefix()` 判（五项），装配侧却另写了一套更宽松的判据 —— 同一条业务规则两套实现，宽松那套恰在最后一道关口上（§5.3 红线）。测试夹具也只建 `drive_c/App/`，造出来的 prefix 本身起不来，两边一起宽松所以永远绿 | 第 7 项改为调 `prefix.validate_prefix()`，项名 `prefix.drive_c` → `prefix.valid`，失败时逐项点名缺失。补 7 项回归锁（5 项判据 + 2 项 stdout 契约），注回旧判据 5 项全红。「健康判过」那条同时防矫枉过正。夹具按 `validate_prefix` 的最低要求造齐（system32 非空、`dosdevices/c:` 相对软链、三个 `.reg` 非空） |
+| `package --json` 失败时 stdout 两段 JSON | `wepack package <坏包> --json` 的 stdout 是「完整 payload + main 的 error 段」两段拼接，`json.load` 抛 `Extra data: line 79`，管道交给 `jq` 也直接失败 | `cmd_package` 无条件 `_emit(payload)` 之后才 `raise VerifyFailed`。与 W-02 修过的「`build --json` 两段 JSON」同因，只是发生在单个子命令内部而非父子命令之间 | 改为先判 `report.ok`：失败时只由 `main()` 输出单一段 error（带 `message` 与 `exit_code`），详细 checks 走 stderr 与 `--report`。`raw_decode` 实测修复前段数 2 → 修复后 1；回归锁 2 项，注回旧顺序即变红 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -3541,6 +3543,62 @@ except subprocess.TimeoutExpired:
 只留行为测试也能抓到，但要等满 20 秒超时；只留静态测试则挡不住「换了别的写法但行为一样坏」。两条一起才既快又全。
 
 **⑦ 仍未验证的边界**：本节只证明「SIGTERM 会被转给 wine 且 launcher 能退出」。三个信号共用同一段代码，但实测只发了 SIGTERM。**wine 收到 SIGTERM 后是否把所有窗口状态写回 prefix**（`wineserver` 收尾的完整性）没有验证 —— 本机测的是 `notepad.exe`，它没有需要保存的状态；有状态的商业软件需实机确认。
+
+### 15.15 prefix 半坏时打包照样「成功」（2026-11-20 实测，已修）
+
+**这一节记录的缺陷与 15.14 同族：打包流程一路绿灯、退出码 0、校验 10/10，产物却是双击毫无反应的 .app。**
+
+**① 发现路径。** 优化循环从「可用性」维度切进来，问的是「prefix 已存在但坏了的时候，`install` / `build` 会怎么提示」。查下去发现提示根本不是问题所在 —— `package` 压根不知道 prefix 坏了。
+
+**② 判据只看「目录在不在」。** `package/verify.py` 第 7 项原来只有一行断言：`Private/drive_c` 是个目录。于是下面三种损坏全部放行：
+
+| 破坏 | 原判定 | 真实后果（同一份 prefix 交给 wine） |
+|---|---|---|
+| 删掉 `system.reg` / `user.reg` / `userdef.reg` | 10/10 通过，退 0 | `wine: could not load kernel32.dll, status c0000135`（rc=53） |
+| `system32` 还在但被清空 | 10/10 通过，退 0 | `could not open working directory L"C:\\windows\\system32\\"` |
+| `dosdevices/c:` 换成普通文件 | 10/10 通过，退 0 | C: 盘不存在，安装路径全失效 |
+
+实测方法：用 `build_bundle` 造一个真能过校验的包，再按上表逐项破坏，然后跑 `wepack package <app> --no-register --json`。三条全部 `EXIT=0`、`ok=true`、`failures=[]`。
+
+**③ 为什么「目录存在」这个判据天生不够。** prefix 是否可用，`install` 侧一直在用 `prefix.validate_prefix()` 判（五项：`drive_c`、`system32` 非空、`dosdevices/c:` 是相对软链、三个 `.reg` 非空）。装配侧不调它，等于同一条业务规则有两套实现，且宽松的那套在最后一道关口上 —— 正是 §5.3 那条红线要挡的情形。
+
+**④ 修法：判据收进一处，不另写一套。**
+
+```python
+# wepack/package/verify.py
+from ..prefix import validate_prefix          # 复用，不复制
+prefix_problems = validate_prefix(private)
+report.checks.append(Check("prefix.valid", not prefix_problems,
+                           "；".join(prefix_problems)))
+```
+
+校验项名由 `prefix.drive_c` 改为 `prefix.valid`，失败时把每一项缺失都点名（不是只说「校验未通过」）。
+
+**⑤ 修后实测（四种 prefix 状态，逐个跑进程退出码）。**
+
+| prefix 状态 | 进程 EXIT | `ok` | 失败项 |
+|---|---|---|---|
+| 健康 | 0 | `true` | 无 |
+| 缺三个 `.reg` | **7** | `false` | `prefix.valid`（点名三个文件） |
+| `system32` 为空 | **7** | `false` | `prefix.valid`（`system32 为空`） |
+| `dosdevices/c:` 非软链 | **7** | `false` | `prefix.valid`（`dosdevices/c: 不是符号链接`） |
+
+退出码 7 = `VERIFY_FAILED`「产物校验不通过」，与 `contracts/exit-codes.json` 一致。
+
+**⑥ 夹具与判据一起弱，缺陷才藏得住。** 这条最值得记。测试夹具 `make_app()` 早先只建 `drive_c/App/`，连 `system32`、三个 `.reg`、`dosdevices/c:` 都不造 —— 换句话说，**夹具造出来的 prefix 本身就是起不来的**。判据只查目录在不在，夹具就刚好能过；两边一起宽松，缺陷永远绿着。修法是把夹具改成按 `validate_prefix` 的最低要求造齐，这样「判据收紧」与「夹具变真」是同一件事。
+
+**⑦ 顺带修掉同一形态的第二处：`package --json` 失败时 stdout 两段 JSON。** `cmd_package` 早先无条件 `_emit(payload)`，之后才 `raise VerifyFailed`，于是失败时 stdout 上是「完整 payload + main 的 error 段」两段拼接。这与 W-02 修过的「`build --json` 两段 JSON」同因，只是发生在单个子命令内部。改用 `raw_decode` 实测：修复前 `段数=2`，`json.load` 抛 `Extra data`；修复后 `段数=1`，`ok=false` 与 `exit_code=7` 都在同一段里。**该缺陷在 HEAD 上就存在**（旧实现 + 删掉 entry 复现），不是本节改动引入。
+
+**⑧ 回归锁：7 项，两侧都做负向验证。**
+
+| 守卫 | 位置 | 守什么 | 负向验证 |
+|---|---|---|---|
+| 健康 prefix 必须判过 | `test_phase3.TestPrefixHealthGuard` | 防矫枉过正 | — |
+| 缺 `.reg` / 空 `system32` / 坏 `dosdevices` 各一条 | 同上 | 逐项点名 | 注回旧判据 → **5 项全红**，还原后 5/5 绿 |
+| 判据必须来自 `prefix` 模块 | 同上 | 不许另写一套 | 源码断言 `from ..prefix import validate_prefix` 存在、`(private / "drive_c").is_dir()` 不存在 |
+| `package --json` 失败单段 | `test_phase6.TestPackageJsonFailureContract` | stdout 契约 | 注回「先 emit 再 raise」→ **2 项变红**，还原后 8/8 绿 |
+
+**⑨ 仍未验证的边界**：本节证明的是「结构损坏能被拦住」。**prefix 结构完好但注册表内容被写坏的软件级故障（例如安装器中途被杀留下半个注册表）仍只能靠实跑 wine 发现** —— `validate_prefix` 只看文件存在与非空，不看内容可用性。这条不强解，记在此处。
 
 ---
 

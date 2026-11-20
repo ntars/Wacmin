@@ -136,11 +136,29 @@ def verify_bundle(app_dir: Path) -> VerifyReport:
         "" if icon_path.is_file() else f"缺少图标：{icon_path}",
     ))
 
-    # 7. Private/drive_c 是目录（prefix 已建立）
+    # 7. prefix 本身健康（不只是「有 drive_c 目录」）
+    #
+    # ## 为什么这一项要调 validate_prefix，而不是自己判 drive_c
+    #
+    # 早先这里只断言 `Private/drive_c` 是个目录。于是只要那个目录还在，
+    # 哪怕 system32 被清空、三个 .reg 全丢、`dosdevices/c:` 不再是软链，
+    # 校验照样 10/10 全绿、`wepack package` 照样退 0。实测这一份 prefix
+    # 交给 wine 是直接起不来的：
+    #
+    #     wine: could not open working directory L"C:\\windows\\system32\\"
+    #     wine: could not load kernel32.dll, status c0000135     （rc=53）
+    #
+    # 用户拿到的是一个「打包成功、双击毫无反应」的 .app —— 这正是本文件
+    # 开头那条「产物不合法必须在打包时失败」要挡的情况，却被放行了。
+    #
+    # 判据复用 `validate_prefix`（install 建 prefix 时用的就是它），
+    # 不在这里再写第二套 —— 同一判据两处各写一套，必然一处先漂（README 5.3）。
     private = contents / "Resources" / "Private"
+    from ..prefix import validate_prefix
+
+    prefix_problems = validate_prefix(private)
     report.checks.append(Check(
-        "prefix.drive_c", (private / "drive_c").is_dir(),
-        "" if (private / "drive_c").is_dir() else f"缺少 {private / 'drive_c'}",
+        "prefix.valid", not prefix_problems, "；".join(prefix_problems),
     ))
 
     # 8. compat.yaml 可读且 entry 指向的文件存在

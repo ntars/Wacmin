@@ -203,5 +203,69 @@ class TestBuildJsonContract(unittest.TestCase):
             self.assertIn(key, source, f"build 汇总输出缺少 {key} 字段")
 
 
+class TestPackageJsonFailureContract(unittest.TestCase):
+    """`package --json` 失败时 stdout 也必须只有**一段** JSON。
+
+    ## 缺陷（HEAD 上就存在，此前所有测试绿着）
+
+    `cmd_package` 早先无条件 `_emit(payload)`，之后才 `raise VerifyFailed`。
+    于是失败时 stdout 上有两段 JSON：先一份 `ok:false` 的完整 payload，
+    再一份 `main()` 的 error 段。`json.load` 抛 `Extra data`，
+    `wepack package --json | jq` 直接失败。
+
+    与 `build --json` 那段两段 JSON 是同一形态，只是发生在单个子命令
+    内部而非父子命令之间。这条与上面那条各守一头。
+    """
+
+    def _bundle_with(self, tmp_path: Path, break_it: str) -> Path:
+        """造一个装好的包，再按 `break_it` 破坏 prefix。"""
+        sys.path.insert(0, str(REPO / "tests"))
+        from test_phase3 import make_app, make_bmp_frame, make_ico
+        from wepack.package import build_bundle
+
+        app_dir = make_app(tmp_path, app_name="Demo")
+        ico = make_ico(tmp_path / "s.ico", [(64, 64, make_bmp_frame(64))])
+        build_bundle(app_dir, app_name="Demo", bundle_id="com.wexe.win.demo.demo",
+                     version="1.0", entry="drive_c/App/app.exe",
+                     icon_source=ico, register=False)
+        private = app_dir / "Contents/Resources/Private"
+        if break_it == "registry":
+            for name in ("system.reg", "user.reg", "userdef.reg"):
+                (private / name).unlink()
+        elif break_it == "system32":
+            import shutil
+            target = private / "drive_c/windows/system32"
+            shutil.rmtree(target)
+            target.mkdir()
+        return app_dir
+
+    def test_failed_package_writes_single_document(self) -> None:
+        """校验失败 → 退出码 7，且 stdout 只有一段 JSON。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = self._bundle_with(Path(tmp), "registry")
+            r = _run("package", str(app_dir), "--no-register", "--json")
+            self.assertEqual(r.returncode, 7, r.stderr)
+
+            decoder = json.JSONDecoder()
+            text = r.stdout.strip()
+            self.assertTrue(text, "stdout 不能为空")
+            first, end = decoder.raw_decode(text)
+            rest = text[end:].strip()
+            self.assertEqual(rest, "",
+                             f"stdout 里还有第 2 段：{rest[:80]!r}")
+            self.assertFalse(first["ok"])
+            self.assertEqual(first["exit_code"], 7)
+            self.assertIn("prefix.valid", first["error"])
+
+    def test_failed_package_reports_each_prefix_problem(self) -> None:
+        """错误信息必须点名到底缺什么，不能只说「校验未通过」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = self._bundle_with(Path(tmp), "system32")
+            r = _run("package", str(app_dir), "--no-register", "--json")
+            self.assertEqual(r.returncode, 7, r.stderr)
+            payload = json.loads(r.stdout)
+            self.assertIn("system32", payload["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

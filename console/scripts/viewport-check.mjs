@@ -92,6 +92,25 @@ export const LONG_PATH = `/${'very-long-directory-name/'.repeat(3)}payload/MyApp
  */
 export const MIN_TOUCH_TARGET = 44
 
+/**
+ * 压测覆盖的容器 —— 真实渲染路径里会放用户路径或安装器输出的位置。
+ *
+ * 这份清单必须与 `app.js` 的渲染点一致：多列一个不存在的选择器会让
+ * 检查报「元素缺失」，少列一个则那处永远不被量。测试
+ * `viewport-check.test.mjs` 逐一核对它与 `app.js` 里的类名对得上。
+ */
+export const LONG_TEXT_SELECTORS = [
+  '.dir-summary',
+  '.stage-name',
+  '.stage-msg',
+  '.check-name',
+  '.check-detail',
+  '.error-msg',
+  '.error-hint',
+  '.result-val',
+  '.contract-problem',
+]
+
 // ---------------------------------------------------------------------------
 // 找 Chrome
 // ---------------------------------------------------------------------------
@@ -366,6 +385,98 @@ function measureInPage() {
 }
 
 /**
+ * 在页面里量长串的**断行质量**（会被序列化后送进浏览器执行）。
+ *
+ * ## 为什么「不溢出」还不够
+ *
+ * `overflow-wrap: anywhere` 能把任何一个长串压进容器，代价是**断在任意
+ * 字符之间**。实测 375px 下 `Electron/runtime.tar.zst` 被劈成 `Elec|tron`、
+ * `dir|ectory`，读的人得在两行之间自己拼回一个单词。页面不溢出、不失真、
+ * 测试全绿 —— 只有真正读它的人受影响。
+ *
+ * ## 口径
+ *
+ * 一次断行算「断在词中间」，当且仅当断点**前一个字符**与**后一个字符**
+ * 都属于 `[A-Za-z0-9._]`：
+ *
+ *   - 中文在字间断行是正常排版，不算；
+ *   - 断在 `/` `\` `-` `空格` `:` 之后是路径与标识符的天然边界，不算；
+ *   - `dir|ectory` 这种把一个不可分词劈成两半，才是真缺陷。
+ *
+ * ## 为什么要逐字符量
+ *
+ * 行尾字符不可能从 `Range.getClientRects()` 直接读到 —— 那些矩形只给
+ * 位置不给内容。所以逐字符建 range、按 `top` 归行，再把每行还原成字符串。
+ * 一个 139 字符的串只有几百次 range 操作，代价可忽略；换来的是「断在哪
+ * 个字上」这个能直接读懂的结论。
+ *
+ * @param {string[]} selectors 要检查的容器选择器
+ * @returns {{selector: string, missing?: boolean, lines: number, dirty: number, samples: string[]}[]}
+ */
+function measureLineBreaksInPage(selectors) {
+  /** 不可分词字符集。两侧都命中才算词被劈开。 */
+  const ATOMIC = /[A-Za-z0-9._]/u
+
+  const describe = (element) => {
+    const cls = typeof element.className === 'string' && element.className !== ''
+      ? `.${element.className.trim().split(/\s+/u).join('.')}`
+      : ''
+    return `${element.tagName.toLowerCase()}${cls}`
+  }
+
+  /** 逐字符取位置，再按 top 归行，返回每行的文本。 */
+  const linesOf = (host) => {
+    const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT)
+    const chars = []
+    let textNode = walker.nextNode()
+    while (textNode !== null) {
+      for (let i = 0; i < textNode.data.length; i += 1) {
+        const range = document.createRange()
+        range.setStart(textNode, i)
+        range.setEnd(textNode, i + 1)
+        const rect = range.getBoundingClientRect()
+        // <wbr> 自身不产生字形，两侧字符的 top 相同，不影响归行
+        if (rect.width === 0 && rect.height === 0) continue
+        chars.push({ ch: textNode.data[i], top: Math.round(rect.top) })
+      }
+      textNode = walker.nextNode()
+    }
+
+    const lines = []
+    let current = null
+    for (const c of chars) {
+      if (current === null || Math.abs(current.top - c.top) > 2) {
+        current = { top: c.top, text: c.ch }
+        lines.push(current)
+      } else {
+        current.text += c.ch
+      }
+    }
+    return lines
+  }
+
+  const out = []
+  for (const selector of selectors) {
+    const host = document.querySelector(selector)
+    if (host === null) {
+      out.push({ selector, missing: true, lines: 0, dirty: 0, samples: [] })
+      continue
+    }
+    const lines = linesOf(host)
+    const dirty = []
+    for (let i = 0; i < lines.length - 1; i += 1) {
+      const before = lines[i].text.slice(-1)
+      const after = lines[i + 1].text.slice(0, 1)
+      if (ATOMIC.test(before) && ATOMIC.test(after)) {
+        dirty.push(`${lines[i].text.slice(-6)}|${lines[i + 1].text.slice(0, 6)}`)
+      }
+    }
+    out.push({ selector, element: describe(host), lines: lines.length, dirty: dirty.length, samples: dirty.slice(0, 4) })
+  }
+  return out
+}
+
+/**
  * 在页面里量可点元素的命中区尺寸（会被序列化后送进浏览器执行）。
  *
  * ## 口径
@@ -438,12 +549,32 @@ function measureTouchTargetsInPage(min) {
  * 注入的每个位置都对应真实渲染路径里会放用户路径或安装器输出的地方。
  */
 const STRESS_SNIPPET = `
-(() => {
+(async () => {
   const path = ${JSON.stringify(LONG_PATH)}
+  /*
+   * 断行由**产品自己的** \`writeText\` 来写，这里不另写一份等价逻辑。
+   *
+   * 为什么这条不能省：压测注入的节点本来就绕过了 app.js 的渲染路径，
+   * 如果连「把文本写进节点」这一步也自己实现，那么产品代码改坏了
+   * （比如退回 \`textContent\`）压测照样全绿 —— 实测过，确实如此。
+   * 用 \`import('./app.js')\` 取的是页面已加载的那个模块实例，
+   * 不会重复执行 init，拿到的是真正在跑的那份实现。
+   *
+   * 「app.js 的渲染点确实调了 writeText」这一步压测管不到，由
+   * \`viewport-check.test.mjs\` 的静态守卫盯着，两头合起来才闭环。
+   */
+  const { writeText } = await import('./app.js')
   const make = (tag, cls, text) => {
     const node = document.createElement(tag)
     if (cls !== '') node.className = cls
     if (text !== undefined) node.textContent = text
+    return node
+  }
+  /** 造一个 span/div，把长串交给产品的 writeText 写进去。 */
+  const write = (node, prefix = '') => {
+    node.replaceChildren()
+    if (prefix !== '') node.append(document.createTextNode(prefix))
+    writeText(node, path)
     return node
   }
 
@@ -470,7 +601,7 @@ const STRESS_SNIPPET = `
       dirs.append(card)
     }
     for (const node of dirs.querySelectorAll('.dir-summary')) {
-      node.textContent = '把 macOS 应用打包成 Windows 可执行文件：' + path
+      write(node, '把 macOS 应用打包成 Windows 可执行文件：')
     }
   }
 
@@ -482,9 +613,9 @@ const STRESS_SNIPPET = `
       const row = make('div', 'stage failed')
       row.append(
         make('span', 'stage-mark', '✗'),
-        make('span', 'stage-name', path),
+        write(make('span', 'stage-name')),
         make('span', 'stage-time', '12345ms'),
-        make('span', 'stage-msg', path),
+        write(make('span', 'stage-msg')),
       )
       stages.append(row)
     }
@@ -498,8 +629,8 @@ const STRESS_SNIPPET = `
       const row = make('div', 'check fail')
       row.append(
         make('span', 'check-mark', '✗'),
-        make('span', 'check-name', path),
-        make('span', 'check-detail', path),
+        write(make('span', 'check-name')),
+        write(make('span', 'check-detail')),
       )
       checks.append(row)
     }
@@ -513,7 +644,7 @@ const STRESS_SNIPPET = `
       const row = make('div', 'history-row fail')
       row.append(
         make('span', 'check-mark', '✗'),
-        make('span', 'history-label', 'mac2win build ' + path),
+        write(make('span', 'history-label'), 'mac2win build '),
         make('span', 'history-time', '13:43:42'),
         make('span', 'history-meta', '37719ms · 1 个产物'),
       )
@@ -528,13 +659,13 @@ const STRESS_SNIPPET = `
     const box = make('div', 'error-box')
     box.append(
       make('span', 'error-code', 'E-4001'),
-      make('span', 'error-msg', '找不到运行时可执行文件：' + path),
-      make('span', 'error-hint', '请检查 ' + path + ' 是否存在'),
+      write(make('span', 'error-msg'), '找不到运行时可执行文件：'),
+      write(make('span', 'error-hint'), '请检查 '),
     )
     result.append(box)
     for (let i = 0; i < 2; i += 1) {
       const line = make('div', 'result-line')
-      line.append(make('span', 'result-key', '产物'), make('span', 'result-val fail', path))
+      line.append(make('span', 'result-key', '产物'), write(make('span', 'result-val fail')))
       result.append(line)
     }
   }
@@ -551,7 +682,7 @@ const STRESS_SNIPPET = `
       const scenario = make('div', 'contract-scenario')
       scenario.append(make('span', 'check-mark', '✗'), make('span', '', 'build 最小项目'))
       block.append(scenario)
-      block.append(make('div', 'contract-problem', '[exit-code] 报告里的 exitCode 与进程实际退出码不一致：' + path))
+      block.append(write(make('div', 'contract-problem'), '[exit-code] 报告里的 exitCode 与进程实际退出码不一致：'))
     }
     contract.append(block)
   }
@@ -693,7 +824,20 @@ async function measureAllViewports(ctx) {
       await client.send('Emulation.setTouchEmulationEnabled', { enabled: false }, sessionId)
       await new Promise((r) => { setTimeout(r, 120) })
 
-      results.push({ viewport: viewport.name, width: viewport.width, baseline, stress, touch, touchOverflow })
+      /*
+       * 第四段：长串的断行质量。
+       *
+       * 放在触控段之后、退回到细指针再量 —— 粗指针会把按钮撑宽，
+       * 挤压文本列宽，量出来的断行形态与真实鼠标环境不同。这一节
+       * 针对的是「读不读得懂」，细指针下的列宽才是基线。
+       *
+       * 三段都通过、唯独断行在词中间，是「页面没坏但读不了」的形态：
+       * 它不会被前三段抓到，所以必须单列一段。
+       */
+      const lineBreaks = await evaluate(client, sessionId,
+        `(${String(measureLineBreaksInPage)})(${JSON.stringify(LONG_TEXT_SELECTORS)})`)
+
+      results.push({ viewport: viewport.name, width: viewport.width, baseline, stress, touch, touchOverflow, lineBreaks })
     }
 
     return { results, noSandbox: browser.noSandbox }
@@ -754,7 +898,10 @@ export async function runViewportCheck(options = {}) {
       && row.stress.pageOverflow <= 0 && row.stress.offenders.length === 0
       && row.touchOverflow.pageOverflow <= 0 && row.touchOverflow.offenders.length === 0
       && row.touch.pointerCoarse === true
-      && row.touch.undersized.length === 0)
+      && row.touch.undersized.length === 0
+      // 断行质量：任何一处「断在词中间」都算失败。missing 也算 —— 选择器
+      // 失效会让整节静默空转，与「压测注入到空集合」是同一类坑。
+      && row.lineBreaks.every((item) => item.missing !== true && item.dirty === 0))
 
     return {
       ok,
@@ -822,8 +969,22 @@ function formatReport(payload) {
     if (touch.undersized.length > 5) {
       lines.push(`    …另有 ${String(touch.undersized.length - 5)} 个`)
     }
+
+    const breaks = row.lineBreaks
+    const missing = breaks.filter((item) => item.missing === true)
+    const dirty = breaks.filter((item) => item.dirty > 0)
+    const totalLines = breaks.reduce((sum, item) => sum + item.lines, 0)
+    lines.push(`  断行质量：共 ${String(breaks.length)} 个容器 / ${String(totalLines)} 行，断在词中间 ${String(dirty.reduce((sum, item) => sum + item.dirty, 0))} 处`)
+    for (const bad of dirty) {
+      lines.push(`    · ${bad.selector} 断开 ${String(bad.dirty)} 处：${bad.samples.join(' , ')}`)
+    }
+    for (const gone of missing) {
+      lines.push(`    · ${gone.selector} 元素不存在，本节对它是空转`)
+    }
   }
-  lines.push(payload.ok ? '✓ 三档视口均无溢出，触控目标均达标' : '✗ 存在溢出或触控目标过小，见上')
+  lines.push(payload.ok
+    ? '✓ 三档视口均无溢出，触控目标与断行位置均达标'
+    : '✗ 存在溢出、触控目标过小或断在词中间，见上')
   return lines.join('\n')
 }
 

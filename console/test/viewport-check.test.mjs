@@ -281,3 +281,110 @@ describe('长串换行规则', () => {
     assert.match(block[2], /overflow-wrap:\s*anywhere/u, '分组里要有 overflow-wrap: anywhere')
   })
 })
+
+describe('长串断行质量（第 4 段）', () => {
+  test('pathSegments 只在分隔符后给断点，且不丢字符', async () => {
+    const { pathSegments } = await import('../web/report-view.mjs')
+    const path = '/a/b-c\\d'
+    const segments = pathSegments(path)
+    assert.deepEqual(segments, [
+      { text: '/', breakAfter: true },
+      { text: 'a/', breakAfter: true },
+      { text: 'b-', breakAfter: true },
+      { text: 'c\\', breakAfter: true },
+      { text: 'd', breakAfter: false },
+    ])
+    /*
+     * 拼回去必须与原文一字不差 —— 断点只是**机会**，不是字符。
+     * 这条是「复制出来的路径还能用」的地基。
+     */
+    assert.equal(segments.map((s) => s.text).join(''), path)
+    assert.equal(segments.filter((s) => s.breakAfter).length, 4)
+  })
+
+  test('pathSegments 对空串与非字符串不抛异常', async () => {
+    const { pathSegments } = await import('../web/report-view.mjs')
+    assert.deepEqual(pathSegments(''), [])
+    assert.deepEqual(pathSegments(null), [])
+    assert.deepEqual(pathSegments(undefined), [])
+    assert.deepEqual(pathSegments(42), [])
+  })
+
+  test('pathSegments 对无分隔符的串返回单段', async () => {
+    const { pathSegments } = await import('../web/report-view.mjs')
+    // SHA-256、UUID 这类没有天然边界的串，只能整段给出去
+    const sha = 'a'.repeat(64)
+    assert.deepEqual(pathSegments(sha), [{ text: sha, breakAfter: false }])
+  })
+
+  test('压测调用产品的 writeText，不自己另写一份断行逻辑', () => {
+    /*
+     * ## 这条守的是什么（本轮实测踩的坑）
+     *
+     * 压测注入的节点本来就绕过了 app.js 的渲染路径。最初压测**自己**在页面里
+     * 实现了一遍「插入 <wbr>」，于是把产品的 `writeText` 退回 `textContent`
+     * 做负向验证时，脚本仍报「断在词中间 0 处」、退出码 0 —— 压测量的是它
+     * 自己的实现，产品坏了照样绿。
+     *
+     * 改成 `import('./app.js')` 取页面已加载的那份真实模块后，同一次负向
+     * 验证立刻报 15 处、退出码 1。
+     */
+    assert.match(scriptCode, /import\(['"]\.\/app\.js['"]\)/u,
+      '压测必须 import 页面上真实的 app.js 模块')
+    assert.match(scriptCode, /writeText/u, '压测要用产品的 writeText 写文本')
+    assert.doesNotMatch(scriptCode, /createElement\(['"]wbr['"]\)[\s\S]{0,200}?const segments/u,
+      '压测不应自己切分文本')
+  })
+
+  test('app.js 的写入入口是 writeText，且被 export 给压测复用', () => {
+    const appJs = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8')
+    const appCode = appJs.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '')
+    assert.match(appCode, /export function writeText\(/u,
+      'writeText 必须 export，压测才能复用同一份实现')
+    assert.match(appCode, /pathSegments/u, 'writeText 要用 pathSegments 切分')
+    assert.match(appCode, /createElement\(['"]wbr['"]\)/u, '要真的插入 <wbr>')
+    /*
+     * `el()` 是创建元素的唯一入口。它若绕过 writeText 直接 `textContent`，
+     * 所有由 el() 造出来的容器（阶段名、校验详情、错误提示…）就全退回硬断。
+     */
+    const elBody = /function el\([\s\S]{0,400}?\n\}/u.exec(appCode)
+    assert.notEqual(elBody, null, '应能找到 el 函数')
+    assert.match(elBody[0], /writeText\(/u, 'el() 必须走 writeText')
+    assert.doesNotMatch(elBody[0], /\.textContent\s*=/u, 'el() 不应直接写 textContent')
+  })
+
+  test('style.css 不再用 word-break: break-all 处理长串', () => {
+    /*
+     * `break-all` 会**无视** `<wbr>`。实测同一个 139 字符路径，加不加 `<wbr>`
+     * 断行位置完全一致（223px 容器下 4 处硬断照旧）。`<wbr>` 要生效，承载它的
+     * 容器必须是 `overflow-wrap: anywhere`。
+     */
+    const resultVal = /\.result-val\s*\{([^}]*)\}/u.exec(css)
+    assert.notEqual(resultVal, null, '应有 .result-val 规则')
+    assert.doesNotMatch(resultVal[1], /word-break:\s*break-all/u,
+      'break-all 会让 <wbr> 失效，必须换成 overflow-wrap: anywhere')
+    assert.match(resultVal[1], /overflow-wrap:\s*anywhere/u, '.result-val 要用 anywhere')
+    assert.match(resultVal[1], /min-width:\s*0/u, '.result-val 也要 min-width: 0')
+  })
+
+  test('选择器清单里的每一项都在 app.js 的真实渲染点里', () => {
+    /*
+     * 清单多一项 → 检查报「元素不存在」；少一项 → 那处永远不被量。
+     * 两边都是静默失效，所以逐项核对类名确实出现在 app.js 里。
+     */
+    const appJs = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8')
+    const listed = [...script.matchAll(/^\s{2}'\.([a-z-]+)',$/gmu)].map((m) => m[1])
+    assert.ok(listed.length >= 9, `选择器清单应至少 9 项，实际 ${String(listed.length)}`)
+    for (const cls of listed) {
+      assert.match(appJs, new RegExp(`['"\`]${cls}['"\` ]`, 'u'),
+        `.${cls} 在 app.js 里找不到对应渲染点`)
+    }
+  })
+
+  test('判定里包含断行质量与「元素缺失」两条', () => {
+    assert.match(scriptCode, /row\.lineBreaks/u, '判定要读 lineBreaks')
+    assert.match(scriptCode, /item\.dirty === 0/u, '断在词中间必须判失败')
+    assert.match(scriptCode, /item\.missing !== true/u,
+      '选择器失效必须判失败，否则整节静默空转')
+  })
+})

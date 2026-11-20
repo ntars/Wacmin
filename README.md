@@ -324,7 +324,7 @@ MSI 的回退流程是三步：7-Zip 解出内嵌 `cab`、展开每个 `cab`、�
 | 汇总自检 | `doctor` 并行跑四个方向的 `doctor` | 完成 |
 | 契约检查 | `contract` 真实调用各方向，验证报告合规 | 完成 |
 | Web 看板 | 本地服务 + SSE 进度推送 + 历史落盘 | 完成 |
-| 视口实测 | `scripts/viewport-check.mjs` 起真实 Chrome 量三档视口（375 / 768 / 1440） | 完成 |
+| 视口实测 | `scripts/viewport-check.mjs` 起真实 Chrome 量三档视口（375 / 768 / 1440），四段：基线 / 压测 / 触控目标 / 断行质量 | 完成 |
 
 测试全部通过。职责边界只有三件事：找到某方向的 CLI 起子进程调用、读回 `--report` 的 JSON 渲染、检查四个方向是否真的遵守契约。其中 17 项专门守「本模块的契约检查器与 `contracts/validate.mjs` 对同一份报告必须结论一致」—— 两个校验器各写一份实现，必然分叉，只是时间问题。
 
@@ -682,7 +682,7 @@ trace:font:insert_face_in_family_list Original font L"\\??\\C:\\windows\\fonts\\
 
 复现：`node console/scripts/viewport-check.mjs`（人读表格）、`--json`（stdout 只有 JSON）。退出码 `0` 无溢出 / `1` 有溢出 / `2` 找不到 Chrome —— 分开是因为这两种情况的处置完全不同，混成一个码会让人把环境问题当代码缺陷去查。
 
-这个脚本要跑十几秒、依赖本机装浏览器，不适合进 `npm test`。于是加 `console/test/viewport-check.test.mjs` 静态守三件最容易坏的事：压测串仍是 139 字符、测量同时覆盖外框与字形框、`style.css` 那组类仍带 `min-width: 0` 与 `overflow-wrap: anywhere`。第三条是真价值 —— 谁哪天顺手删了这两行，`npm test` 立刻红，而不是等用户在窄屏上发现路径被裁掉。
+这个脚本要跑十几秒、依赖本机装浏览器，不适合进 `npm test`。于是加 `console/test/viewport-check.test.mjs` 静态守最容易坏的几件事：压测串仍是 139 字符、测量同时覆盖外框与字形框、`style.css` 那组类仍带 `min-width: 0` 与 `overflow-wrap: anywhere`、压测必须 `import` 产品的 `writeText` 而不是自己另写一份断行逻辑。第三条与第四条是真价值 —— 谁哪天顺手删了那两行 CSS 或让 `el()` 绕开 `writeText`，`npm test` 立刻红，而不是等用户在窄屏上发现路径被裁掉或断在词中间。
 
 ### 4.5 ai
 
@@ -2209,7 +2209,7 @@ Wacmin/
 │   └── package.json
 ├── console/                   四方向统一入口（CLI + Web 看板）
 │   ├── bin/wacmin-console.mjs 可执行入口（薄壳，只解析 argv 与打印）
-│   ├── scripts/               viewport-check.mjs（三档视口实测）
+│   ├── scripts/               viewport-check.mjs（三档视口实测，四段判定）
 │   ├── src/                    directions.mjs / server.mjs / contract-check.mjs
 │   ├── web/
 │   ├── test/
@@ -2404,10 +2404,10 @@ $INSTDIR/
 | exeonmac | 461 项 | 约 2 分 30 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
-| console | 235 项 | 约 19 秒 | |
+| console | 243 项 | 约 19 秒 | 含 8 项断行质量守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1334 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1342 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3060,6 +3060,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 契约缺 `3000` 段（运行时）的退出码声明 | `M2W_3001/3002/3003` 在代码里映射到退出码 5，而契约 `exit 5` 只声明 `2001/2002` | 契约文件维护滞后于实现：三个方向都预留了运行时错误码，mac2win 真的在用（Electron/NW.js 下载与架构校验），但没人回来补契约 | 本轮**未改契约**（改契约属于对外承诺变更，需人工确认），已在 15.9 列为待决项 |
 | launcher 收不到 SIGTERM，只能 `kill -9` | 关掉 ExeOnMac 产物时进程不退出；实测 SIGTERM 后 90 秒仍在运行，`launcher.log` 里连「收到信号」都没有 | `DispatchSource.makeSignalSource(queue: .main)`：`.main` 队列的 handler 由 **main run loop** 调度，而 `WineRunner.run` 用 `Thread.sleep(0.2)` 轮询子进程、一路不跑 run loop。`signal(sig, SIG_IGN)` 又把默认处置吃掉了，于是信号既不触发 handler 也不终止进程。**每个用例因此白等 60 秒兜底超时，测试还一直是绿的** | 信号源改挂独立串行队列（`DispatchQueue(label: "com.wexe.launcher.signal")`）。实测 SIGTERM 后 **0.19 秒**退出、日志出现「收到信号 15」与「wine 退出 status=15」；测试从 63.3 秒降到 3.1 秒。补两层守卫：`test_phase0` 静态断言队列不是 `.main`（防写法回退），`test_phase3` 断言「日志出现收到信号」+「20 秒内退出」（防行为回退），两者均做过负向验证 |
 | 打包对「半坏 prefix」照样报成功 | `system.reg` / `user.reg` / `userdef.reg` 全删、或 `system32` 被清空、或 `dosdevices/c:` 换成普通文件之后，`wepack package` 仍 `EXIT=0`、`ok=true`、校验 10/10 全绿；而同一份 prefix 交给 wine 直接 `could not load kernel32.dll, status c0000135`（rc=53） | 装配侧第 7 项校验只断言 `Private/drive_c` **是个目录**。prefix 是否可用，`install` 侧一直用 `prefix.validate_prefix()` 判（五项），装配侧却另写了一套更宽松的判据 —— 同一条业务规则两套实现，宽松那套恰在最后一道关口上（§5.3 红线）。测试夹具也只建 `drive_c/App/`，造出来的 prefix 本身起不来，两边一起宽松所以永远绿 | 第 7 项改为调 `prefix.validate_prefix()`，项名 `prefix.drive_c` → `prefix.valid`，失败时逐项点名缺失。补 7 项回归锁（5 项判据 + 2 项 stdout 契约），注回旧判据 5 项全红。「健康判过」那条同时防矫枉过正。夹具按 `validate_prefix` 的最低要求造齐（system32 非空、`dosdevices/c:` 相对软链、三个 `.reg` 非空） |
+| 长路径断在词中间 | 页面不溢出、测试全绿，但 139 字符路径在 375px 下被断成 4–5 行，断点落在 `Framewo\|rks`、`dir\|ectory` 这类词正中间；三档合计 **15 处**（口径：断点两侧都属于 `[A-Za-z0-9._]`） | 为解决溢出用了 `overflow-wrap: anywhere`，它只在**任意字符之间**找断点，不利用 `/` `\\` `-` 这些天然边界；`.result-val` 还额外带 `word-break: break-all`，它**无视** `<wbr>` | 新增纯函数 `pathSegments()` 按分隔符切片、`app.js` 的 `writeText()` 逐片 `append(Text)` 并在分隔符后插 `<wbr>`，`el()` 统一走它；`.result-val` 的 `break-all` 换成 `overflow-wrap: anywhere`。修后三档 0 处。压测改为 `import('./app.js')` 调产品函数，否则压测量的是它自己 |
 | `package --json` 失败时 stdout 两段 JSON | `wepack package <坏包> --json` 的 stdout 是「完整 payload + main 的 error 段」两段拼接，`json.load` 抛 `Extra data: line 79`，管道交给 `jq` 也直接失败 | `cmd_package` 无条件 `_emit(payload)` 之后才 `raise VerifyFailed`。与 W-02 修过的「`build --json` 两段 JSON」同因，只是发生在单个子命令内部而非父子命令之间 | 改为先判 `report.ok`：失败时只由 `main()` 输出单一段 error（带 `message` 与 `exit_code`），详细 checks 走 stderr 与 `--report`。`raw_decode` 实测修复前段数 2 → 修复后 1；回归锁 2 项，注回旧顺序即变红 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
@@ -3653,7 +3654,71 @@ report.checks.append(Check("prefix.valid", not prefix_problems,
 
 **⑨ 顺带堵掉一个静默口子。** 粗指针若没生效，按钮仍是 24px，`undersized` 理论上非空从而失败 —— 但那是**间接**失败：只要 `MIN_TOUCH_TARGET` 被调小，或页面碰巧有个别大按钮，这一节就会静默通过。已加直接断言 `row.touch.pointerCoarse === true`，把空转堵在入口。
 
-**⑩ 仍未验证的边界**：(a) **触控目标只是尺寸达标，没有验证真机手指操作的准确率** —— 本机是无头 Chrome 模拟，物理屏的 DPI、防误触策略、系统级手势区都会影响实际体验；(b) **长路径在 375px 下折 4 行、断在词中间**（`very-/long-/directo/ry-...`），这是 `overflow-wrap: anywhere` 的既定行为 —— 可读性可以更好（横向滚动容器或路径省略），但那是另一种取舍，未在本轮改动；(c) `pointer: coarse` 在老旧浏览器（Safari < 9）不被识别，那类环境会退回原尺寸 —— 属预期降级，未做特性检测兜底。
+**⑩ 仍未验证的边界**：(a) **触控目标只是尺寸达标，没有验证真机手指操作的准确率** —— 本机是无头 Chrome 模拟，物理屏的 DPI、防误触策略、系统级手势区都会影响实际体验；(b) **长路径在 375px 下折 4 行、断在词中间**（`very-/long-/directo/ry-...`）—— 本条已于优化循环第 5 轮修掉，见 **15.17**；(c) `pointer: coarse` 在老旧浏览器（Safari < 9）不被识别，那类环境会退回原尺寸 —— 属预期降级，未做特性检测兜底。
+
+### 15.17 长路径断在词中间：不溢出、不报错，但读不出来（2026-11-21 实测，已修）
+
+**这一节与 15.16 同源：页面完全正常，测试全绿，只有真正去读那行路径的人受影响。** 入口由 15.16⑩(b) 指定。
+
+**① 问题形态。** `overflow-wrap: anywhere` 解决了「长串撑破容器」，代价是**断在任意字符之间**。实测 375px 下，139 字符的深目录路径被断成 4–5 行，断点落在词正中间：
+
+```
+/very-long-directory-name/.../Framewo|rks/Electron/run|time.tar.zst
+把 macOS 应用打包成 Windows 可执行文件：…/Electr|on/runtime.tar.zst
+```
+
+读者得在两行之间自己把一个单词拼回去。`/` `\` `-` 这些天然边界全部没被利用。
+
+**② 先量，再改。** 逐字符建 `Range`、按 `top` 归行、把每行还原成字符串，得到「断在哪个字上」这个可读的结论。判定口径是这一条：**断点两侧都属于 `[A-Za-z0-9._]` 才算断在词中间** —— 中文在字间断行是正常排版，断在 `/` `-` 之后是天然边界，都不算。
+
+三档基线（用本节的检查脚本把 `writeText` 退回 `textContent` 复现修改前状态，同一压测串）：
+
+| 视口 | 检查容器 | 总行数 | 断在词中间 |
+|---|---|---|---|
+| 375 | 9 个 | 38 | **9 处** |
+| 768 | 9 个 | 24 | **3 处** |
+| 1440 | 9 个 | 19 | **3 处** |
+| 合计 | — | 81 | **15 处** |
+
+**③ 三个关键事实，都是实测的，决定了修法。**
+
+| 事实 | 怎么验的 | 结论 |
+|---|---|---|
+| `<wbr>` 不占宽度、**不进剪贴板** | 造 `/a/b<wbr>c/d`，`getSelection().toString()` | 得到 `"/a/bc/d"`，复制路径照常可用 |
+| `word-break: break-all` **无视** `<wbr>` | 同一串加/不加 `<wbr>`，223px 容器 | 5 行 4 处硬断，两者完全一致 |
+| `overflow-wrap: anywhere` **优先**用 `<wbr>` | 四种配置 × 四档宽度对比 | 硬断 1→0、3→0、2→0，全线归零 |
+
+第二条是最容易漏的：`.result-val` 原本写着 `word-break: break-all`，光插 `<wbr>` 一点用都没有。**必须同时改 CSS。**
+
+**④ 修法（两处，各管一头）。**
+
+- `console/web/report-view.mjs` 新增 `pathSegments(text)`：纯函数，把串按 `/` `\` `-` 切成 `{text, breakAfter}` 片段。纯函数才能在 Node 里测，也才能被压测复用。
+- `console/web/app.js` 新增 `export function writeText(node, text)`：**全页唯一**往 DOM 写长篇文本的入口，逐片段 `append(Text)` + 分隔符后插 `<wbr>`，不碰 `innerHTML`。`el()` 改为调它。
+- `console/web/style.css`：`.result-val` 的 `word-break: break-all` → `overflow-wrap: anywhere` + `min-width: 0`。
+
+**⑤ 修后实测（同一脚本、同一压测串）。** 三档 9 个容器共 **82 行，断在词中间 0 处**；横向溢出仍为 0px、触控目标仍 12/12 达 44px —— 修可读性没有换来布局回归。
+
+**⑥ 判定进了脚本，成为第 4 段。** `viewport-check.mjs` 由「基线 + 压测 + 触控」扩为「基线 + 压测 + 触控 + **断行质量**」。第四段放在触控段之后、退回细指针再量：粗指针会把按钮撑宽、挤压文本列宽，量出来的形态与真实鼠标环境不同。
+
+**⑦ 本轮踩的坑（必须记）：压测自己写了一份断行逻辑，于是它是空转的。** 压测注入的节点本来就绕过了 `app.js` 的渲染路径。初版让压测**自己**在页面里插 `<wbr>`，结果把产品的 `writeText` 退回 `textContent` 做负向验证时，脚本仍报「断在词中间 0 处」、退出码 **0** —— 压测量的是它自己的实现。改成 `import('./app.js')` 取页面上已加载的那份真实模块后，同一次负向验证立刻报 **15 处**、退 **1**。
+
+这与 15.16⑧ 是同一形态的第三次复发：**检查必须落在真正生效的那段代码上**。区别是这次不是「注释满足了断言」，而是「压测复制了被测逻辑」。
+
+**⑧ 负向验证六次，全部有效。**
+
+| 破坏方式 | 结果 |
+|---|---|
+| `writeText` 退回 `textContent` | 三档 **15 处**断在词中间并逐个点名，退 **1** |
+| `.result-val` 加回 `word-break: break-all` | 三档 **4 处**（只点 `.result-val`），退 **1** |
+| 选择器清单里写一个不存在的类 | 报「元素不存在，本节对它是空转」，退 **1** |
+| `el()` 绕过 `writeText` | 静态守卫 1 项红（23 项中 fail 1） |
+| 压测改回自写断行逻辑 | 静态守卫 1 项红 |
+| CSS 恢复 `break-all` | 静态守卫 1 项红 |
+
+**⑨ 新增 8 项守卫**（`console/test/viewport-check.test.mjs`，15 → 23 项）：`pathSegments` 的断点位置与「拼回原文一字不差」、空串/非字符串不抛、无分隔符串返回单段、压测必须 `import('./app.js')`、`el()` 必须走 `writeText` 且不直接写 `textContent`、`.result-val` 不得用 `break-all`、选择器清单每一项都在 `app.js` 里有对应渲染点、判定里含 `dirty === 0` 与 `missing !== true`。
+
+**⑩ 仍未验证 / 未处理**：(a) 只测了「断点位置」，**没测超长串是否会因此多折一行** —— 实测 `.result-val` 在 375px 下从 5 行变成 6 行，是 `<wbr>` 让断点更碎的正常代价，但极端窄屏（< 300px）未测；(b) 横向滚动容器 / 首尾省略（`…/last/two/segments`）是另一种取舍，本轮未做 —— 前者引入双向滚动，后者会隐藏用户最需要核对的中段；(c) Windows 路径 `C:\Users\...` 的双反斜杠已在分隔符集里，但 `\\?\C:\` 这类前缀未单独测。
+
 
 ---
 

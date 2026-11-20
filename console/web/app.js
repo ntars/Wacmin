@@ -42,7 +42,7 @@
 
 import {
   artifactRows, checkRows, checksSummary, contractRows,
-  errorBox, historyRow, progressText, stageRows, toText, warningRows,
+  errorBox, historyRow, pathSegments, progressText, stageRows, toText, warningRows,
 } from './report-view.mjs'
 
 const $ = (id) => document.getElementById(id)
@@ -573,14 +573,43 @@ function renderContract(result) {
 /**
  * 创建元素。
  *
- * 第三个参数是文本内容，用 `textContent` 写入 —— 不用 innerHTML。
- * 后端来的字符串可能含用户路径、安装器输出，拼接进 HTML 会有注入风险。
+ * 第三个参数是文本内容 —— 不用 innerHTML。后端来的字符串可能含用户路径、
+ * 安装器输出，拼接进 HTML 会有注入风险。
+ *
+ * ## 为什么走 `writeText` 而不是直接 `textContent`
+ *
+ * 报告里的路径是长串，`overflow-wrap: anywhere` 会在任意字符间硬断
+ * （实测 `Elec|tron`、`dir|ectory`）。`writeText` 在 `/` `\` `-` 之后插入
+ * `<wbr>`，让浏览器优先在天然边界断行。复制时 `<wbr>` 不进剪贴板，
+ * 原文不受影响（`report-view.mjs` 的 `pathSegments` 有实测说明）。
  */
 function el(tag, className, text) {
   const node = document.createElement(tag)
   if (className !== '') node.className = className
-  if (text !== undefined) node.textContent = text
+  if (text !== undefined) writeText(node, text)
   return node
+}
+
+/**
+ * 往元素里写文本，在路径分隔符后可断行。
+ *
+ * 只用 `Text` 节点与 `<wbr>` 元素，不碰 `innerHTML` —— 任何来自后端的
+ * 字符都只是文本内容，没有注入面。
+ *
+ * ## 为什么是 export
+ *
+ * 它是全页**唯一**往 DOM 写长篇文本的入口，因此也是「断行质量」唯一的
+ * 判定点。`viewport-check.mjs` 的压测会 import 本函数来造压测节点，
+ * 而不是自己另写一份等价逻辑 —— 否则压测量的是压测自己的实现，产品
+ * 代码改坏了它照样绿。实测过：把这里退回 `textContent`，用自写逻辑的
+ * 压测仍报「断在词中间 0 处」。
+ */
+export function writeText(node, text) {
+  const value = String(text)
+  for (const segment of pathSegments(value)) {
+    node.append(document.createTextNode(segment.text))
+    if (segment.breakAfter) node.append(document.createElement('wbr'))
+  }
 }
 
 /** 追加日志，自动滚到底。 */

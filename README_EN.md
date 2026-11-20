@@ -324,7 +324,7 @@ The single point of definition for consistent external behaviour across the four
 | Aggregate self-check | `doctor` runs all four directions' `doctor` in parallel | Complete |
 | Contract checking | `contract` really invokes each direction and validates report compliance | Complete |
 | Web dashboard | Local service + SSE progress push + history persistence | Complete |
-| Viewport measurement | `scripts/viewport-check.mjs` drives a real Chrome across three viewports (375 / 768 / 1440) | Complete |
+| Viewport measurement | `scripts/viewport-check.mjs` drives a real Chrome across three viewports (375 / 768 / 1440) in four stages: baseline / stress / touch targets / line-break quality | Complete |
 
 All tests pass. The responsibility boundary covers exactly three things: locate a direction's CLI and spawn it as a subprocess, read back its `--report` JSON and render it, and check whether the four directions genuinely honour the contract. Seventeen of those tests guard that this module's contract checker and `contracts/validate.mjs` must reach the same verdict on the same report — two independent implementations will diverge, it is only a matter of time.
 
@@ -682,7 +682,7 @@ The fix is to stop rewriting text and instead create nodes matching `app.js`'s r
 
 Reproduce with `node console/scripts/viewport-check.mjs` (human-readable table) or `--json` (JSON only on stdout). Exit codes: `0` no overflow / `1` overflow / `2` no Chrome found—separated because the two situations call for completely different responses, and merging them makes people investigate an environment problem as a code defect.
 
-This script takes a dozen seconds and depends on a locally installed browser, so it does not belong in `npm test`. Instead `console/test/viewport-check.test.mjs` statically guards the three things most likely to rot: the stress string is still 139 characters, the measurement still covers both boxes and glyph rects, and the `style.css` group still carries `min-width: 0` and `overflow-wrap: anywhere`. The third is the real value—if someone deletes those two lines in passing, `npm test` goes red immediately rather than waiting for a user on a narrow screen to find the paths clipped.
+This script takes a dozen seconds and depends on a locally installed browser, so it does not belong in `npm test`. Instead `console/test/viewport-check.test.mjs` statically guards the things most likely to rot: the stress string is still 139 characters, the measurement still covers both boxes and glyph rects, the `style.css` group still carries `min-width: 0` and `overflow-wrap: anywhere`, and the stress injector must `import` the product's `writeText` rather than reimplementing line breaking. The third and fourth are the real value—delete those two CSS lines in passing, or let `el()` bypass `writeText`, and `npm test` goes red immediately rather than waiting for a user on a narrow screen to find the paths clipped or split mid-word.
 
 ### 4.5 ai
 
@@ -2209,7 +2209,7 @@ Wacmin/
 │   └── package.json
 ├── console/                   Unified entry for the four directions (CLI + web dashboard)
 │   ├── bin/wacmin-console.mjs Executable entry (thin shell: parses argv and prints only)
-│   ├── scripts/               viewport-check.mjs (three-viewport measurement)
+│   ├── scripts/               viewport-check.mjs (three-viewport measurement, four-stage verdict)
 │   ├── src/                   directions.mjs / server.mjs / contract-check.mjs
 │   ├── web/
 │   ├── test/
@@ -2405,10 +2405,10 @@ Performance in each direction is determined by its foundation; this project only
 | exeonmac | 461 | about 2m30s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
-| console | 235 | about 19 seconds | |
+| console | 243 | about 19 seconds | Includes 8 line-break quality guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1334** | — | See "0 skipped repository-wide" below |
+| **Total** | **1342** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3040,6 +3040,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | Contract lacks an exit-code declaration for segment `3000` (runtime) | `M2W_3001/3002/3003` map to exit code 5 in code while contract `exit 5` only declares `2001/2002` | The contract file lags behind the implementation: all three directions reserve runtime codes and mac2win genuinely uses them (Electron/NW.js download and architecture checks), but nobody came back to update the contract | The contract was **not** changed this round (changing it alters an external promise and needs human sign-off); tracked in 15.9 |
 | launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
 | `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
+| Long paths break mid-word | No overflow, all tests green, yet a 139-character path is split into 4–5 lines at 375px with breaks landing inside words (`Framewo\|rks`, `dir\|ectory`); **15** occurrences across three viewports (criterion: both sides of the break belong to `[A-Za-z0-9._]`) | `overflow-wrap: anywhere` fixed the overflow but only looks for breaks **between arbitrary characters**, never using the natural `/` `\` `-` boundaries; `.result-val` additionally carried `word-break: break-all`, which **ignores** `<wbr>` | New pure function `pathSegments()` slices on separators, `app.js`'s `writeText()` appends `Text` per slice and inserts `<wbr>` after each separator, and `el()` routes everything through it; `.result-val`'s `break-all` became `overflow-wrap: anywhere`. Zero occurrences after the fix. The stress injector now `import('./app.js')` and calls the product function — otherwise it measures itself |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -3632,7 +3633,71 @@ The narrowest is `exeonmac`'s "层" (layers) button at **29×24px**. The four di
 
 **⑨ A silent hole was also plugged.** If coarse pointer were not active, buttons stay 24px and `undersized` would theoretically be non-empty, failing the run — but that is an **indirect** failure: shrink `MIN_TOUCH_TARGET` or have one large button on the page and the section passes silently. A direct assertion `row.touch.pointerCoarse === true` now blocks the no-op at the entrance.
 
-**⑩ Still unverified**: (a) **the targets only meet a size threshold; real-finger accuracy on a physical device is untested** — this is headless Chrome emulation, and physical DPI, anti-mistouch policies and system gesture zones all affect the actual experience; (b) **long paths wrap to 4 lines at 375px and break mid-word** (`very-/long-/directo/ry-...`), which is `overflow-wrap: anywhere` working as designed — readability could be better (a horizontal scroll container, or path truncation), but that is a different trade-off and was not changed this round; (c) `pointer: coarse` is unrecognised by very old browsers (Safari < 9), which fall back to the original size — an expected degradation, with no feature-detection shim.
+**⑩ Still unverified**: (a) **the targets only meet a size threshold; real-finger accuracy on a physical device is untested** — this is headless Chrome emulation, and physical DPI, anti-mistouch policies and system gesture zones all affect the actual experience; (b) **long paths wrap to 4 lines at 375px and break mid-word** (`very-/long-/directo/ry-...`) — this was fixed in optimisation round 5, see **15.17**; (c) `pointer: coarse` is unrecognised by very old browsers (Safari < 9), which fall back to the original size — an expected degradation, with no feature-detection shim.
+
+### 15.17 Long paths break mid-word: no overflow, no error, but unreadable (measured 2026-11-21, fixed)
+
+**This section shares its origin with 15.16: the page is perfectly healthy, the tests are green, and only the person actually reading that path is affected.** The entry point was specified by 15.16 ⑩(b).
+
+**① The shape of the problem.** `overflow-wrap: anywhere` solved "a long string bursts the container", at the cost of **breaking between arbitrary characters**. At 375px, a 139-character deep directory path was split into 4–5 lines, with break points landing inside words:
+
+```
+/very-long-directory-name/.../Framewo|rks/Electron/run|time.tar.zst
+把 macOS 应用打包成 Windows 可执行文件：…/Electr|on/runtime.tar.zst
+```
+
+The reader has to stitch a word back together across two lines. The natural boundaries — `/` `\` `-` — were all left unused.
+
+**② Measure first, then change.** Building a `Range` per character, grouping by `top`, and reassembling each line into a string yields a readable conclusion: *which character* the break landed on. The criterion is exactly one rule: **a break counts as mid-word only when both the preceding and following characters belong to `[A-Za-z0-9._]`** — CJK wrapping between characters is normal typesetting, and breaking right after `/` or `-` is a natural boundary, so neither counts.
+
+Baseline across three viewports (reproduced by reverting `writeText` to `textContent` under this section's checker, same stress string):
+
+| Viewport | Containers checked | Total lines | Mid-word breaks |
+|---|---|---|---|
+| 375 | 9 | 38 | **9** |
+| 768 | 9 | 24 | **3** |
+| 1440 | 9 | 19 | **3** |
+| Total | — | 81 | **15** |
+
+**③ Three key facts, all measured, that decided the fix.**
+
+| Fact | How it was verified | Conclusion |
+|---|---|---|
+| `<wbr>` adds no width and **never enters the clipboard** | Built `/a/b<wbr>c/d`, then `getSelection().toString()` | Returns `"/a/bc/d"` — copying a path still works |
+| `word-break: break-all` **ignores** `<wbr>` | Same string with and without `<wbr>`, 223px container | 5 lines, 4 hard breaks — byte-for-byte identical |
+| `overflow-wrap: anywhere` **prefers** `<wbr>` | Four configurations × four widths | Hard breaks 1→0, 3→0, 2→0 — all cleared |
+
+The second fact is the easy one to miss: `.result-val` carried `word-break: break-all`, and inserting `<wbr>` alone did nothing at all. **The CSS had to change with it.**
+
+**④ The fix (two places, each covering one end).**
+
+- `console/web/report-view.mjs` gains `pathSegments(text)`: a pure function splitting on `/` `\` `-` into `{text, breakAfter}` slices. Pure so it is testable in Node and reusable by the stress injector.
+- `console/web/app.js` gains `export function writeText(node, text)`: the **single** entry point for writing long text into the DOM, appending `Text` plus a `<wbr>` after each separator, never touching `innerHTML`. `el()` now routes through it.
+- `console/web/style.css`: `.result-val`'s `word-break: break-all` → `overflow-wrap: anywhere` plus `min-width: 0`.
+
+**⑤ After the fix (same script, same stress string).** Nine containers across three viewports, **82 lines, 0 mid-word breaks**; horizontal overflow still 0px and touch targets still 12/12 at 44px — readability was bought without a layout regression.
+
+**⑥ The criterion moved into the script as a fourth stage.** `viewport-check.mjs` grows from "baseline + stress + touch" to "baseline + stress + touch + **line-break quality**". The fourth stage runs after the touch stage, with the pointer reset to fine: coarse pointer widens buttons and squeezes the text column, so the break pattern it produces is not the one a mouse user sees.
+
+**⑦ A trap this round set for itself (must be recorded): the stress injector wrote its own line-breaking logic, so it measured nothing.** Injected nodes bypass the `app.js` render path by design. The first version had the injector insert `<wbr>` **itself** in the page; reverting the product's `writeText` to `textContent` then still reported "0 mid-word breaks" with exit code **0** — the check was measuring its own implementation. Switching to `import('./app.js')` (the already-loaded module instance on the page) made the identical negative test report **15 breaks**, exit **1**.
+
+This is the third recurrence of the 15.16⑧ shape: **the check must land on the code that actually takes effect.** The difference is that this time it was not "a comment satisfied the assertion" but "the stress harness duplicated the logic under test".
+
+**⑧ Six negative tests, all effective.**
+
+| Sabotage | Result |
+|---|---|
+| Revert `writeText` to `textContent` | **15** mid-word breaks across three viewports, each named; exit **1** |
+| Put `word-break: break-all` back on `.result-val` | **4** breaks, all in `.result-val`; exit **1** |
+| Put a non-existent class in the selector list | Reports "element missing, this section is a no-op for it"; exit **1** |
+| Have `el()` bypass `writeText` | 1 static guard red (1 of 23 failing) |
+| Revert the injector to its own logic | 1 static guard red |
+| Restore `break-all` in CSS | 1 static guard red |
+
+**⑨ Eight new guards** (`console/test/viewport-check.test.mjs`, 15 → 23): `pathSegments` break positions and "rejoining yields the original byte for byte", empty/non-string inputs never throw, a separator-free string yields one slice, the injector must `import('./app.js')`, `el()` must use `writeText` and must not assign `textContent`, `.result-val` must not use `break-all`, every selector in the list has a matching render site in `app.js`, and the verdict includes `dirty === 0` plus `missing !== true`.
+
+**⑩ Still unverified / not handled**: (a) only *break positions* were measured — **whether `<wbr>` makes very long strings wrap to an extra line** was not measured in general; `.result-val` does go from 5 to 6 lines at 375px, a normal cost of finer break points, but extreme widths (< 300px) were not tested; (b) a horizontal scroll container or head/tail truncation (`…/last/two/segments`) is a different trade-off, not done here — the former introduces two-axis scrolling, the latter hides the middle segment users most need to verify; (c) Windows paths `C:\Users\...` are covered by the separator set, but prefixes like `\\?\C:\` were not separately tested.
+
 
 ---
 

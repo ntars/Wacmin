@@ -81,6 +81,58 @@ export function toText(value) {
 }
 
 /**
+ * 把长串按「路径分隔符」切成可断行的片段。
+ *
+ * ## 解决什么
+ *
+ * 报告里的产物路径、错误消息里的路径，是**不含空格**的长串。它们必须在
+ * 容器内换行（否则被 `.panel` 的 `overflow: hidden` 静默裁掉），而
+ * `overflow-wrap: anywhere` 满足了「能断」，代价是**断在任意字符之间**：
+ * 实测 375px 下 `Electron/runtime.tar.zst` 被劈成 `Elec|tron`、`dir|ectory`，
+ * 读的人得在两行之间自己拼。三档视口合计 17 处（见 README 15.17）。
+ *
+ * ## 怎么解决
+ *
+ * 在 `/` `\` `-` 这些**天然边界之后**插入 `<wbr>`（零宽断行机会）。浏览器
+ * 会优先在这些位置断行，只有整段长到一行放不下时才退回字符间硬断。
+ *
+ * 三个关键事实，都是实测的（`node console/scripts/viewport-check.mjs`）：
+ *
+ *   1. `<wbr>` **不占宽度、不进剪贴板**：`getSelection().toString()` 得到
+ *      原文（实测 `/a/b<cwbr>c/d` → `"/a/bc/d"`），所以复制路径照样可用。
+ *   2. 只有 `overflow-wrap: anywhere` 会**优先**用 `<wbr>`；
+ *      `word-break: break-all` 会**无视**它（实测同一串加不加 `<wbr>`
+ *      结果完全一致，4 处硬断照旧）。所以 `.result-val` 的
+ *      `break-all` 必须换成 `anywhere`。
+ *   3. `<wbr>` 只在有真正长 token 时才有意义。给每个 `/` 都插一个，
+ *      对短路径没影响 —— 浏览器不会为 `<wbr>` 主动换行，除非需要。
+ *
+ * ## 为什么返回片段数组而不是拼 HTML
+ *
+ * 渲染层只用 `textContent` 与 `append(Text)` 写 DOM，不用 `innerHTML`
+ * （见 `app.js` 头部「安全」一节）。返回 `{ text, breakAfter }` 的切片，
+ * 让渲染层自己决定插不插 `<wbr>`，这里保持纯函数、可在 Node 里测。
+ *
+ * @param {string} text
+ * @param {{ separators?: RegExp }} [options] 断点字符集，默认 `/ \ -`
+ * @returns {Array<{text: string, breakAfter: boolean}>}
+ */
+export function pathSegments(text, options = {}) {
+  const separators = options.separators ?? /[/\\-]/u
+  if (typeof text !== 'string' || text === '') return []
+
+  const segments = []
+  let start = 0
+  for (let i = 0; i < text.length; i += 1) {
+    if (!separators.test(text[i])) continue
+    segments.push({ text: text.slice(start, i + 1), breakAfter: true })
+    start = i + 1
+  }
+  if (start < text.length) segments.push({ text: text.slice(start), breakAfter: false })
+  return segments
+}
+
+/**
  * 阶段行。
  *
  * @param {object|null} report

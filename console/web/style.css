@@ -446,7 +446,20 @@ html, body {
   font-family: var(--sans);
 }
 
-.result-val { color: var(--fg); word-break: break-all; }
+/*
+ * 用 `overflow-wrap: anywhere` 而不是 `word-break: break-all`。
+ *
+ * `break-all` 会**无视**渲染层插入的 `<wbr>` 断点 —— 实测同一个 139 字符
+ * 路径，加不加 `<wbr>` 断行位置完全一致（223px 容器下 4 处硬断照旧）。
+ * 而 `anywhere` 会优先在 `<wbr>` 处断，只有整段放不下时才退回字符间硬断。
+ *
+ * 这也要求本节同时进上面那组「长串换行」规则拿 `min-width: 0`。
+ */
+.result-val {
+  color: var(--fg);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .result-val.ok { color: var(--ok); }
 .result-val.fail { color: var(--fail); }

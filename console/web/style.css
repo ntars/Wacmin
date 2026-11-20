@@ -151,6 +151,28 @@ html, body {
   cursor: not-allowed;
 }
 
+/*
+ * 忙碌态。
+ *
+ * 「契约检查」跑的时候用它代替 `disabled`。起因是 `disabled` 在 click
+ * 处理函数里一设，真实键盘回车的 keyup 就无处投递，浏览器把焦点退回
+ * `<body>` —— 键盘用户当场丢掉位置。`aria-disabled` 只改语义不改
+ * 可聚焦性，所以焦点留得住，但视觉上必须照样看得出来「正在忙、别重复点」，
+ * 否则用户会以为按钮还能按。
+ *
+ * `cursor: progress` 而不是 `not-allowed`：这不是「你不能用」，是
+ * 「已经在跑了」。
+ */
+.btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: progress;
+}
+
+.btn[aria-disabled="true"]:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
 .btn-ghost {
   border-color: transparent;
   background: transparent;
@@ -173,6 +195,21 @@ html, body {
   border-radius: var(--radius);
   background: var(--bg-elevated);
   overflow: hidden;
+}
+
+/*
+ * 程序化移焦点的容器要给可见反馈。
+ *
+ * 契约面板带 `tabindex="-1"`，检查完成后 `focus()` 会把它变成
+ * `document.activeElement`。它不是可操作控件，所以不套整块蓝框 —— 但
+ * **也不能一点标记都不给**：焦点落在看不见的地方，等于没有焦点。
+ *
+ * 用左侧一道内嵌色条：足够被看见，又不会被误会成「这块面板能按」。
+ * 形状选 inset 是为了不越过 `.panel` 的 `overflow: hidden`。
+ */
+.panel:focus {
+  outline: none;
+  box-shadow: inset 3px 0 0 var(--info);
 }
 
 .panel-head {

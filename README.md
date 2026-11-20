@@ -2404,10 +2404,10 @@ $INSTDIR/
 | exeonmac | 461 项 | 约 2 分 30 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
-| console | 243 项 | 约 19 秒 | 含 8 项断行质量守卫 |
+| console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1342 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1353 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3058,6 +3058,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | `contracts/validate.mjs` 把范围写法切成两个端点 | 一份 `exitCode: 6` 配 `M2W_4002` 的报告被判「退出码与错误码不一致」，而 4002 完全合法 | 用 `split(/[/-]/)` 解析 `errorSegment`：`"4001-5002"` 被切成 `['4001','5002']`，范围内的中值既不等于下界也不等于上界。长期未发现是因为真实报告多命中端点（4001 / 5002），端点恰好就是切分结果 | 抽出 `segmentAllows()` 分别处理 `-` 与 `/`；测试不只测 4002，而是把 `4001/4002/4003/5001/5002` 与 `6001/6002/6003` 全部跑一遍 —— 只测端点等于没测 |
 | `win2mac --strict-host` 的报告自相矛盾 | `--strict-host` 退出码 2 配 `W2M_1001`，而契约 13 条退出码里没有任何一条声明过 1001 | 抛的是 `HOST_UNSUPPORTED`（1001），`exitCodeFor` 按段位兜底给出 2。用户收到的信号是「参数错误」，会去查路径拼写，真因是「这台机器不能干这件事」 | 改抛 `UNSUPPORTED`（1005 → 退出码 4，明确不支持）；`doctor` 的失败归码同理由 1001 改为 `TOOL_OUTDATED`（2002 → 退出码 5，doctor 的唯一失败原因就是 Node 版本过低）。`apponwin doctor` 同一处同形态缺陷一并修掉 |
 | 契约缺 `3000` 段（运行时）的退出码声明 | `M2W_3001/3002/3003` 在代码里映射到退出码 5，而契约 `exit 5` 只声明 `2001/2002` | 契约文件维护滞后于实现：三个方向都预留了运行时错误码，mac2win 真的在用（Electron/NW.js 下载与架构校验），但没人回来补契约 | 本轮**未改契约**（改契约属于对外承诺变更，需人工确认），已在 15.9 列为待决项 |
+| 契约检查按钮在 click 里设 `disabled`，键盘回车当场丢焦点 | 鼠标点得动，键盘按回车后焦点掉到 `<body>`、读屏从头重念；要够到面板里的「关闭」得再按 12 次 Tab；关闭后同样掉回 `body`。前三段视口检查全绿 | `Enter` 是 keydown → click → keyup 三步，click 里设 `disabled` 让元素不再是焦点目标，浏览器把焦点退回文档根，紧随的 keyup 无处投递。程序化 `.click()` 没有后续 keyup，所以复现不出来，此前所有测试都绿着 | 防重入改用布尔量 + `aria-disabled`（只改语义、不改可聚焦性）；面板加 `tabindex="-1"` 并在检查完成后 `panel.focus()`；关闭时主动把焦点交回触发按钮。判据进 `viewport-check.mjs` 第 5 段，用真实按键 + 全程 `focusin`/`focusout` 轨迹判 |
 | launcher 收不到 SIGTERM，只能 `kill -9` | 关掉 ExeOnMac 产物时进程不退出；实测 SIGTERM 后 90 秒仍在运行，`launcher.log` 里连「收到信号」都没有 | `DispatchSource.makeSignalSource(queue: .main)`：`.main` 队列的 handler 由 **main run loop** 调度，而 `WineRunner.run` 用 `Thread.sleep(0.2)` 轮询子进程、一路不跑 run loop。`signal(sig, SIG_IGN)` 又把默认处置吃掉了，于是信号既不触发 handler 也不终止进程。**每个用例因此白等 60 秒兜底超时，测试还一直是绿的** | 信号源改挂独立串行队列（`DispatchQueue(label: "com.wexe.launcher.signal")`）。实测 SIGTERM 后 **0.19 秒**退出、日志出现「收到信号 15」与「wine 退出 status=15」；测试从 63.3 秒降到 3.1 秒。补两层守卫：`test_phase0` 静态断言队列不是 `.main`（防写法回退），`test_phase3` 断言「日志出现收到信号」+「20 秒内退出」（防行为回退），两者均做过负向验证 |
 | 打包对「半坏 prefix」照样报成功 | `system.reg` / `user.reg` / `userdef.reg` 全删、或 `system32` 被清空、或 `dosdevices/c:` 换成普通文件之后，`wepack package` 仍 `EXIT=0`、`ok=true`、校验 10/10 全绿；而同一份 prefix 交给 wine 直接 `could not load kernel32.dll, status c0000135`（rc=53） | 装配侧第 7 项校验只断言 `Private/drive_c` **是个目录**。prefix 是否可用，`install` 侧一直用 `prefix.validate_prefix()` 判（五项），装配侧却另写了一套更宽松的判据 —— 同一条业务规则两套实现，宽松那套恰在最后一道关口上（§5.3 红线）。测试夹具也只建 `drive_c/App/`，造出来的 prefix 本身起不来，两边一起宽松所以永远绿 | 第 7 项改为调 `prefix.validate_prefix()`，项名 `prefix.drive_c` → `prefix.valid`，失败时逐项点名缺失。补 7 项回归锁（5 项判据 + 2 项 stdout 契约），注回旧判据 5 项全红。「健康判过」那条同时防矫枉过正。夹具按 `validate_prefix` 的最低要求造齐（system32 非空、`dosdevices/c:` 相对软链、三个 `.reg` 非空） |
 | 长路径断在词中间 | 页面不溢出、测试全绿，但 139 字符路径在 375px 下被断成 4–5 行，断点落在 `Framewo\|rks`、`dir\|ectory` 这类词正中间；三档合计 **15 处**（口径：断点两侧都属于 `[A-Za-z0-9._]`） | 为解决溢出用了 `overflow-wrap: anywhere`，它只在**任意字符之间**找断点，不利用 `/` `\\` `-` 这些天然边界；`.result-val` 还额外带 `word-break: break-all`，它**无视** `<wbr>` | 新增纯函数 `pathSegments()` 按分隔符切片、`app.js` 的 `writeText()` 逐片 `append(Text)` 并在分隔符后插 `<wbr>`，`el()` 统一走它；`.result-val` 的 `break-all` 换成 `overflow-wrap: anywhere`。修后三档 0 处。压测改为 `import('./app.js')` 调产品函数，否则压测量的是它自己 |
@@ -3720,6 +3721,73 @@ report.checks.append(Check("prefix.valid", not prefix_problems,
 **⑩ 仍未验证 / 未处理**：(a) 只测了「断点位置」，**没测超长串是否会因此多折一行** —— 实测 `.result-val` 在 375px 下从 5 行变成 6 行，是 `<wbr>` 让断点更碎的正常代价，但极端窄屏（< 300px）未测；(b) 横向滚动容器 / 首尾省略（`…/last/two/segments`）是另一种取舍，本轮未做 —— 前者引入双向滚动，后者会隐藏用户最需要核对的中段；(c) Windows 路径 `C:\Users\...` 的双反斜杠已在分隔符集里，但 `\\?\C:\` 这类前缀未单独测。
 
 
+### 15.18 键盘用户按回车就丢焦点：鼠标点得动、键盘摸不着（2026-11-21 实测，已修）
+
+**这一节是 15.16 / 15.17 的第三种形态：页面不溢出、文字不断词、按钮够大，前三段检查全绿 —— 只有用键盘的人做不到。**
+
+**① 问题形态。** 顶栏「契约检查」是个普通 `<button>`，鼠标点一次跑一次，看上去毫无问题。真实键盘按回车之后：
+
+- 焦点**立刻掉到 `<body>`**，页面上看不见任何位置标记；
+- 读屏从文档开头重新念；
+- 要够到刚打开的面板里的「关闭」，得再按 **12 次 Tab**（面板在 DOM 里排在方向网格之后，视觉顺序也是这样）。
+
+关掉面板之后同样掉回 `<body>`。整条链路上，键盘用户三次失去位置感。
+
+**② 根因：在 click 处理里设 `disabled`。** 原实现是 `button.disabled = true` / `finally disabled = false`，用来防重入。四组对照把因果关系切开了（同一页面、同一按钮、同一台机器）：
+
+| 场景 | 触发方式 | 之后焦点在 |
+|---|---|---|
+| 产品现状（handler 里设 `disabled`） | 真实 `Enter` | **`<body>`** |
+| 同样的 handler | 程序化 `.click()` | 按钮上 |
+| 拦截 click、handler 不执行 | 真实 `Enter` | 按钮上 |
+| 拦截 click、手动只设 `disabled` | 真实 `Enter` | **`<body>`** |
+
+差别在事件序列：**`Enter` 是 keydown → click → keyup 三步**。click 里把按钮设成 `disabled`，元素立刻不再是焦点目标，浏览器把焦点退回文档根，紧接着的 `keyup` 已无接收者。程序化 `.click()` 没有后续 keyup，所以复现不出来 —— **这就是这条缺陷此前所有测试都绿着的原因**。焦点轨迹实测（`focusin` / `focusout` 全程记录）：
+
+```
+修复后： in:section#contract-panel  →  out→:section#contract-panel
+修复前： out→:body                 →  in:section#contract-panel
+```
+
+**③ 修法（三处，各管一头）。**
+
+- `console/web/app.js`：防重入改用布尔量 `contractBusy`，忙碌态用 `aria-disabled` / `aria-busy` 表达。`aria-disabled` 只影响语义（读屏念「不可用」），**不影响可聚焦性**，焦点因此留得住。`runContractCheck` 末尾 `panel.focus()` 把焦点交给结果面板 —— 结果在页面下方（375px 下 top=601px），不移焦点用户既不知道开始没开始、也不知道结果在哪。
+- `console/web/app.js` 新增 `closeContractPanel()`：收起面板后 `$('btn-contract').focus()`。面板一收，里面的「关闭」随 `hidden` 祖先一起离开无障碍树，不主动交回焦点就必然掉到 `<body>`。
+- `console/web/index.html`：面板加 `tabindex="-1"` + `role="region"` + `aria-label`。`-1` 让它能接受程序化焦点但不进 Tab 序列；`role="region"` 让读屏能报「契约一致性 区域」而不是「区域」。
+- `console/web/style.css`：`aria-disabled` 的忙碌态样式（`opacity: .45` + `cursor: progress`），以及 `.panel:focus { outline: none; box-shadow: inset 3px 0 0 var(--info) }`。
+
+**④ 本轮自己踩的坑（必须记）：修完第一版被判红，判红是对的。** 第一版写的是 `.panel:focus { outline: none }` —— 挪了焦点却**不给任何可见标记**，等于把「焦点在面板上」变成看不见的事实。检查当场报红：三档各 1 条「焦点在 section#contract-panel 上但没有可见焦点环」。这与本条要修的问题是同一形态（**焦点落在看不见的地方等于没有焦点**），只是从「丢焦点」变成「焦点隐形」。改成左侧内嵌色条后通过。
+
+**⑤ 第二个坑：判据第一版太软，负向验证抓不住。** 判据最初只看末态快照（「回车后焦点在哪」「检查完在哪」）。把产品注回 `disabled` 做负向验证时，**浏览器复跑仍然三档全绿** —— 因为 `runContractCheck` 末尾那次 `panel.focus()` 把焦点又挪回来了，中途掉到 `<body>` 的那一瞬间被末态盖住了。加上「`focusin`/`focusout` 全程轨迹里不许出现 `body`」这一条后，同一份负向代码立刻三档变红、退 **1**。
+
+这与 15.16⑧、15.17⑦ 是同一形态的第四次复发：**检查必须落在真正生效的那段上**。这次的形态是「末态掩盖了过程」。
+
+**⑥ 另一个纠正：Tab 距离的判据原本写错了，已改。** 初版断言「从触发按钮按 Tab 进入面板 ≤ 3 次」，实测恒为 12 次 —— 但那**不是缺陷**：契约面板在 DOM 里位于方向网格之后，视觉顺序也如此，12 次恰好是「Tab 序列与眼睛看到的位置一致」。为了让它变短而把面板挪到 DOM 前面，反而会让键盘走位与视觉错开。改为断言「**焦点已被第一段交进面板后**，Tab 到『关闭』≤ 2 次」—— 实测 1 次。
+
+**⑦ 修后实测（真实 Chrome，三档）。**
+
+| 视口 | 回车后焦点 | 焦点环 | 面板内到「关闭」 | 关闭后焦点 | 焦点轨迹含 body |
+|---|---|---|---|---|---|
+| 375 | `section#contract-panel` | 有 | 1 次 | `button#btn-contract` | 否 |
+| 768 | `section#contract-panel` | 有 | 1 次 | `button#btn-contract` | 否 |
+| 1440 | `section#contract-panel` | 有 | 1 次 | `button#btn-contract` | 否 |
+
+同一次运行里前三段未回归：三档基线 / 压测 / 触控横向溢出均 **0px**、越界元素 **0** 处、断在词中间 **0** 处、触控目标 15 个中 0 个小于 44px。
+
+**⑧ 负向验证四次，全部有效。**
+
+| 破坏方式 | 浏览器实测 | 静态守卫 |
+|---|---|---|
+| `aria-disabled` 改回 `disabled` | 三档轨迹含 `out→:body`，退 **1** | 1 项红 |
+| 删掉关闭后的 `focus()` | 三档关闭后焦点为 `body#`，退 **1** | 1 项红 |
+| `.panel:focus` 去掉 `box-shadow`（只留 `outline: none`） | 三档 `ring=false`，退 **1** | — |
+| 面板去掉 `tabindex="-1"` | 三档回车后焦点仍在触发按钮，退 **1** | 1 项红 |
+
+**⑨ 新增 11 项守卫**（`console/test/viewport-check.test.mjs`，23 → 34 项）：`judgeKeyboardFocus` 正常数据判通过、两处 `body` 各自点名、隐藏区与无焦点环均判失败、关闭后落点必须是触发按钮、面板 0 节点判「空转」、面板内 Tab 超 2 步判失败、判定必须接进 `runViewportCheck` 的 `ok`、产品代码不许用 `button.disabled =`、`closeContractPanel` 必须交回焦点、面板必须有 `tabindex="-1"` 与 `role`/`aria-label`、`.panel:focus` 必须有可见替代标记。
+
+**⑩ 仍未验证 / 未处理**：(a) **只测了 Chrome**，Safari / Firefox 对「disabled 元素丢焦点」的实现是否一致未验；(b) 历史行「回看」的焦点链路本轮未单独测 —— 它同样会重置面板，但走的是 SSE 而不是 fetch；(c) 读屏软件的实际朗读顺序未人工核听，只静态核对了 `role` / `aria-label` / `aria-busy` 的存在性；(d) `aria-busy` 加在按钮上是否符合规范有争议，规范推荐加在被更新的**容器**上，本轮按「表达按钮自身忙碌」处理。
+
+
 ---
 
 ## 十六、更新日志
@@ -3743,6 +3811,7 @@ README 描述项目当前状态，发行版记录每次改了什么，两者不�
 | 3 | Win2Mac 装配式打包 | 已完成 | 保留权限位的 zip 写入器、plist 生成与校验 |
 | 4 | AppOnWin 运行能力 | **环境不具备** | 2026-11-19 实测：门槛 1、2 因宿主非 Windows 而 `blocked`，门槛 3 通过，整体 `unverified` / 退出码 5。结论既非通过也非证伪，需 Windows + WSL2 + Darling 重跑，见 3.4 与 5.1.2 |
 | 5 | console 全功能看板 | 已完成 | 四方向统一入口（CLI + Web）、历史持久化、进度推送全部落地；三档视口（375 / 768 / 1440）由 `console/scripts/viewport-check.mjs` 实测无溢出，负向验证可复现 |
+| 5b | console 键盘可达性 | 已完成 | 焦点链路由 `viewport-check.mjs` 第 5 段用真实按键实测：触发、读结果、关闭三步均不丢焦点，见 15.18 |
 | 6 | Tauri Rust 壳端到端验证 | **部分成立** | 2026-11-19 实测：Rust 链与 tauri 2.12.7 整棵依赖树在 arm64 macOS 上均能编成 `PE32/i386`（`linkprobe.exe` 1096192 字节）。完整项目卡在 `llvm-rc`——`tauri-winres` 编资源节要用，本机未装；`brew install llvm` 会提供它。**不是**架构限制，也**不是**「必换 Windows 机器」。见 15.10 |
 | 7 | 代码签名支持 | **已评估（2026-11-19）** | 结论：可行，且不需要 Windows 机器——`osslsigncode` 在本机签 PE。瓶颈是证书与硬件令牌。**同时发现现有 ExeOnMac 产物签名不一致**（`codesign -v` 退 1），且因 prefix 在 bundle 内而无法以签名修复。见 15.11；决策待人工 |
 | 8 | macOS 侧签名与公证 | **已评估（2026-11-19）** | 结论：Win2Mac 可行，需 Apple Developer ID（$99/年）+ 四个公证前置条件；**ExeOnMac 在当前布局下不可行**——prefix 在 bundle 内被原地写，签名必被破坏。见 15.11；决策待人工 |

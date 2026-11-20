@@ -8,13 +8,18 @@
  * 脚本没有进仓库 —— 结论没有复现路径，等于没有证据。
  *
  * 这个脚本把那次测量固化下来：起一个真实的 console 服务，用真实的
- * 无头 Chrome 渲染真实页面，在三档视口下量三件事：
+ * 无头 Chrome 渲染真实页面，在三档视口下量五件事：
  *
  *   1. **基线**：页面按真实数据渲染时，有没有元素跑出容器。
  *   2. **压测**：往报告类元素里注入 139 字符的深目录路径（macOS 常见），
  *      看长串会不会撑破布局。
  *   3. **触控**：模拟粗指针（手指）设备后，可点元素的命中区够不够大，
  *      以及放大后的按钮有没有反过来撑破布局。
+ *   4. **断行**：长串被压进容器时，断点有没有落在词正中间。
+ *   5. **键盘**：发真实按键走「触发 → 读结果 → 关闭」，焦点有没有中途丢失。
+ *
+ * 后两节是「页面没坏但用不了」的形态：不溢出不报错，前三节全绿，只有
+ * 真正读那行字、真正用键盘的人受影响。
  *
  * ## 为什么第 3 项不能用视口宽度判断
  *
@@ -531,6 +536,251 @@ function measureTouchTargetsInPage(min) {
 }
 
 /**
+ * 读当前焦点元素的身份与视觉状态（会被序列化后送进浏览器执行）。
+ *
+ * ## 为什么要连「焦点环有没有画出来」一起读
+ *
+ * 焦点落在某处、但屏幕上没有任何标记，对键盘用户等于没落 —— 他按 Tab
+ * 之后不知道该按下一格还是往回退。`:focus-visible` 为真只说明浏览器
+ * **认为**该显示焦点指示，不代表样式真的给了；两者都得查。
+ *
+ * `onBody` 单列出来：焦点掉到 `<body>` 是「按了 Tab 但什么都没发生」的
+ * 典型形态，得能和「焦点在某个不显眼的 div 上」区分开。
+ */
+const ACTIVE_PROBE = `(() => {
+  const el = document.activeElement
+  if (el === null) return { none: true }
+  const cs = getComputedStyle(el)
+  const cls = typeof el.className === 'string' && el.className !== ''
+    ? '.' + el.className.trim().split(/\\s+/u).join('.')
+    : ''
+  return {
+    tag: el.tagName.toLowerCase(),
+    id: el.id || '',
+    cls,
+    text: (el.textContent || '').trim().replace(/\\s+/gu, ' ').slice(0, 20),
+    onBody: el === document.body || el === document.documentElement,
+    inHidden: el.closest('[hidden]') !== null,
+    focusVisible: el.matches(':focus-visible'),
+    ring: !(cs.outlineStyle === 'none' || cs.outlineWidth === '0px') || cs.boxShadow !== 'none',
+  }
+})()`
+
+/**
+ * 键盘焦点链路实测：用**真实键盘事件**走一遍「触发 → 读结果 → 关闭」。
+ *
+ * ## 为什么这一节必须有
+ *
+ * 前三节量的是「布局对不对」，第四节量的是「文字读不读得懂」。这一节量
+ * 的是「键盘用户能不能把这件事做完」—— 它不会被前三节里任何一条抓到：
+ * 元素没溢出、文字没断词、按钮也够大，但焦点在按下回车的那一刻就没了。
+ *
+ * ## 为什么必须发真实键事件，而不是调 `.click()`
+ *
+ * 实测差别就在这里：同一个按钮，`el.click()` 之后焦点留在按钮上，
+ * 真实 `Enter` 之后焦点掉到 `<body>`。差别在于 Enter 是
+ * keydown → click → keyup 三步，而 handler 在 click 里把按钮设成
+ * `disabled`；元素一旦 disabled 就不再是焦点目标，紧随其后的 keyup
+ * 无处可落，浏览器把焦点退回文档根。用 `.click()` 复现不出来，
+ * 所以这条缺陷此前所有测试都是绿的。
+ *
+ * @param {CdpClient} client
+ * @param {string} sessionId
+ * @param {string} url 要测的页面地址
+ * @returns {Promise<object>}
+ */
+async function measureKeyboardFocus(client, sessionId, url) {
+  /** 页面内求值，只取返回值。 */
+  const read = async (expression) => {
+    const { result, exceptionDetails } = await client.send('Runtime.evaluate', {
+      expression, returnByValue: true, awaitPromise: true,
+    }, sessionId)
+    if (exceptionDetails !== undefined) {
+      throw new Error(`页面内执行失败：${exceptionDetails.text ?? '未知异常'}`)
+    }
+    return result.value
+  }
+
+  /** 发一次真实按键。`text` 只有可打印键才需要，Tab 靠默认行为移动焦点。 */
+  const press = async (key, { text, virtualKeyCode }) => {
+    const base = { key, code: key, windowsVirtualKeyCode: virtualKeyCode, nativeVirtualKeyCode: virtualKeyCode }
+    await client.send('Input.dispatchKeyEvent', { type: 'keyDown', ...(text === undefined ? {} : { text, unmodifiedText: text }), ...base }, sessionId)
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, sessionId)
+  }
+
+  const load = async () => {
+    const loaded = client.once('Page.loadEventFired')
+    await client.send('Page.navigate', { url }, sessionId)
+    await loaded
+    // init() 是 async：方向列表与历史各一个 fetch，早读会拿到占位块
+    await new Promise((r) => { setTimeout(r, 1200) })
+  }
+
+  await load()
+
+  /*
+   * 先装焦点轨迹探针，再动手。
+   *
+   * ## 为什么末态快照不够（本轮实测踩的坑）
+   *
+   * 判据第一版只看「回车后焦点在哪」「检查完焦点在哪」。把产品代码注回
+   * `disabled` 做负向验证时，浏览器复跑仍然 **三档全绿** —— 因为
+   * `runContractCheck` 末尾那次 `panel.focus()` 把焦点又挪回来了，
+   * 中途掉到 `<body>` 的那一瞬间被末态盖住了。
+   *
+   * 但那一瞬间是真实的：keyup 无处投递、读屏从文档开头重念、用户以为
+   * 按错了。所以要用 `focusin` / `focusout` 记**全程轨迹**，判「有没有
+   * 任何一刻落到 body」。加上这条之后，同一份负向代码立刻变红。
+   */
+  await read(`(() => {
+    window.__focusTrace = []
+    const describe = (el) => el === null
+      ? 'null'
+      : el.tagName.toLowerCase() + (el.id === '' || el.id === undefined ? '' : '#' + el.id)
+    const push = (kind) => window.__focusTrace.push(kind + ':' + describe(document.activeElement))
+    document.addEventListener('focusin', () => { push('in') }, true)
+    // focusout 时 activeElement 还没更新，延到下一轮任务才读得准
+    document.addEventListener('focusout', () => { setTimeout(() => { push('out→') }, 0) }, true)
+    return 1
+  })()`)
+
+  /* ── 第一段：真实回车触发 ── */
+  await read(`document.getElementById('btn-contract').focus(); window.__focusTrace = []; 1`)
+  const beforeActivate = await read(ACTIVE_PROBE)
+  await press('Enter', { text: '\r', virtualKeyCode: 13 })
+  await new Promise((r) => { setTimeout(r, 250) })
+  const afterActivate = await read(ACTIVE_PROBE)
+
+  // 等契约检查真的跑完（四个方向的 doctor，最慢的一个约 1.5s）
+  await new Promise((r) => { setTimeout(r, 3000) })
+  const afterDone = await read(`(() => {
+    const panel = document.getElementById('contract-panel')
+    const rect = panel.getBoundingClientRect()
+    return {
+      panelHidden: panel.hidden,
+      panelInViewport: rect.top < innerHeight && rect.bottom > 0,
+      bodyNodes: document.querySelectorAll('#contract-body *').length,
+      active: ${ACTIVE_PROBE},
+    }
+  })()`)
+  const focusTrace = await read(`window.__focusTrace`)
+
+  /* ── 第二段：焦点已在面板内时，几步能到「关闭」 ── */
+  /*
+   * 这里**不**从顶栏的触发按钮数 Tab 次数。
+   *
+   * 契约面板在 DOM 里位于方向网格之后，视觉上也在它下面。所以从触发
+   * 按钮按 Tab 必然先走完 12 个方向按钮才到面板 —— 那是**正确**的
+   * 顺序，Tab 序列与视觉顺序一致，为了让它变短而把面板挪到 DOM 前面，
+   * 反而会让键盘走位与眼睛看到的位置错开。
+   *
+   * 真正该问的是：焦点既然已经由第一段交进面板了，那面板里的第一个
+   * 可操作元素离它多远。超过 2 次就说明中间塞了不该聚焦的东西。
+   */
+  await read(`document.getElementById('contract-panel').focus(); 1`)
+  let panelTabToClose = -1
+  for (let i = 1; i <= 5; i += 1) {
+    await press('Tab', { virtualKeyCode: 9 })
+    await new Promise((r) => { setTimeout(r, 50) })
+    const id = await read(`document.activeElement === null ? '' : (document.activeElement.id || document.activeElement.tagName)`)
+    if (id === 'btn-contract-close') { panelTabToClose = i; break }
+  }
+
+  /* ── 第三段：关闭后焦点该回到触发它的那个按钮 ── */
+  await read(`(() => { const b = document.getElementById('btn-contract-close'); if (b !== null) b.focus(); return 1 })()`)
+  const beforeClose = await read(ACTIVE_PROBE)
+  await press('Enter', { text: '\r', virtualKeyCode: 13 })
+  await new Promise((r) => { setTimeout(r, 200) })
+  const afterClose = await read(`(() => {
+    const panel = document.getElementById('contract-panel')
+    return { panelHidden: panel.hidden, active: ${ACTIVE_PROBE} }
+  })()`)
+
+  return {
+    beforeActivate,
+    afterActivate,
+    afterDone,
+    focusTrace,
+    panelTabToClose,
+    beforeClose,
+    afterClose,
+  }
+}
+
+/**
+ * 判定键盘焦点链路是否合格。
+ *
+ * 抽成纯函数是为了能在 Node 里直接用造出来的数据测判定本身 —— 否则
+ * 「判定写错了」只能靠起浏览器才发现，而判定最容易错的地方恰恰是
+ * 它看起来永远通过（`ok = true` 写死也不会有人察觉）。
+ *
+ * @param {object} keyboard `measureKeyboardFocus` 的返回值
+ * @returns {{ok: boolean, problems: string[]}}
+ */
+export function judgeKeyboardFocus(keyboard) {
+  const problems = []
+
+  // 防空转：一次真实检查都没跑出内容时，后面几条断言都会被一个空页面满足
+  if (!(keyboard.afterDone.bodyNodes > 0)) {
+    problems.push(`契约面板没有渲染出任何内容（节点 ${String(keyboard.afterDone.bodyNodes)} 个），本节对它是空转`)
+  }
+  if (keyboard.afterDone.panelHidden !== false) {
+    problems.push('回车后契约面板仍是隐藏的，检查没有真正触发')
+  }
+
+  /*
+   * 触发之后焦点必须在「可继续操作的位置」上。
+   *
+   * 落到 `<body>` 是最坏形态：读屏会从文档开头重新念，键盘也得从第一个
+   * 元素重新 Tab。实测时从触发器到「关闭」要走 12 次 Tab。
+   */
+  for (const [stage, snapshot] of [['回车触发后', keyboard.afterActivate], ['检查完成后', keyboard.afterDone.active]]) {
+    if (snapshot.onBody === true) {
+      problems.push(`${stage}焦点掉到 body —— 键盘用户要从头 Tab 回来`)
+    } else if (snapshot.inHidden === true) {
+      problems.push(`${stage}焦点落在隐藏区域里（${snapshot.tag}#${snapshot.id}${snapshot.cls}）`)
+    } else if (snapshot.ring !== true) {
+      problems.push(`${stage}焦点在 ${snapshot.tag}#${snapshot.id}${snapshot.cls} 上但没有可见焦点环`)
+    }
+  }
+
+  /*
+   * 全程轨迹里任何一刻落到 body 都算失败。
+   *
+   * 末态快照会被「事后补一次 focus()」抹平 —— 实测过：产品注回 `disabled`
+   * 之后三档末态都正常，只有轨迹里留着一条 `out→:body`。那一瞬间用户看到
+   * 的是焦点凭空消失，读屏从文档开头重念，不能因为后面被挪回来就不算。
+   */
+  const bodyMoments = (Array.isArray(keyboard.focusTrace) ? keyboard.focusTrace : [])
+    .filter((line) => line.endsWith(':body') || line.endsWith(':html'))
+  if (bodyMoments.length > 0) {
+    problems.push(`焦点轨迹里有 ${String(bodyMoments.length)} 次落到 body（${bodyMoments.join(' , ')}）`)
+  }
+
+  /*
+   * 焦点进了面板之后，到「关闭」不该绕路。
+   *
+   * 面板头部只有「关闭」一个按钮，正常情况下 1 次 Tab 就到。给到 2 是
+   * 留一点余量（比如将来在头部加一个次要按钮），超过 2 说明面板里塞了
+   * 不该聚焦的东西 —— 焦点交进来了，用户却要摸一会儿才找得到出口。
+   */
+  if (!(keyboard.panelTabToClose >= 1 && keyboard.panelTabToClose <= 2)) {
+    problems.push(`焦点在面板内时，按 Tab 到「关闭」需 ${keyboard.panelTabToClose === -1 ? '5 次以上' : `${String(keyboard.panelTabToClose)} 次`}（上限 2 次）`)
+  }
+
+  // 关闭之后焦点该回到打开它的那个按钮，而不是掉到文档根
+  if (keyboard.afterClose.panelHidden !== true) {
+    problems.push('按「关闭」后面板没有收起来')
+  }
+  if (keyboard.afterClose.active.id !== 'btn-contract') {
+    const where = keyboard.afterClose.active.onBody === true ? 'body' : `${keyboard.afterClose.active.tag}#${keyboard.afterClose.active.id}${keyboard.afterClose.active.cls}`
+    problems.push(`关闭后焦点应回到「契约检查」按钮，实际在 ${where}`)
+  }
+
+  return { ok: problems.length === 0, problems }
+}
+
+/**
  * 压测注入：把报告类容器填成最坏情况。
  *
  * ## 为什么必须造节点，而不是改现有元素的文字
@@ -837,7 +1087,16 @@ async function measureAllViewports(ctx) {
       const lineBreaks = await evaluate(client, sessionId,
         `(${String(measureLineBreaksInPage)})(${JSON.stringify(LONG_TEXT_SELECTORS)})`)
 
-      results.push({ viewport: viewport.name, width: viewport.width, baseline, stress, touch, touchOverflow, lineBreaks })
+      /*
+       * 第五段：键盘焦点链路。
+       *
+       * 放在最后，因为它自己会重新导航一次页面 —— 压测注入的节点会被
+       * 冲刷掉，放在前面等于把前四段的夹具弄坏。也正因为要重新导航，
+       * 这一节量的是**干净页面**上的真实交互，不掺压测节点的干扰。
+       */
+      const keyboard = await measureKeyboardFocus(client, sessionId, `http://127.0.0.1:${String(ctx.server.port)}/`)
+
+      results.push({ viewport: viewport.name, width: viewport.width, baseline, stress, touch, touchOverflow, lineBreaks, keyboard })
     }
 
     return { results, noSandbox: browser.noSandbox }
@@ -901,7 +1160,9 @@ export async function runViewportCheck(options = {}) {
       && row.touch.undersized.length === 0
       // 断行质量：任何一处「断在词中间」都算失败。missing 也算 —— 选择器
       // 失效会让整节静默空转，与「压测注入到空集合」是同一类坑。
-      && row.lineBreaks.every((item) => item.missing !== true && item.dirty === 0))
+      && row.lineBreaks.every((item) => item.missing !== true && item.dirty === 0)
+      // 键盘焦点链路：判定逻辑在 judgeKeyboardFocus 里，可单独测
+      && judgeKeyboardFocus(row.keyboard).ok)
 
     return {
       ok,
@@ -981,10 +1242,25 @@ function formatReport(payload) {
     for (const gone of missing) {
       lines.push(`    · ${gone.selector} 元素不存在，本节对它是空转`)
     }
+
+    const keyboard = row.keyboard
+    const verdict = judgeKeyboardFocus(keyboard)
+    const where = (snapshot) => (snapshot.onBody === true
+      ? 'body（焦点丢失）'
+      : `${snapshot.tag}#${snapshot.id}${snapshot.cls}`)
+    lines.push(`  键盘焦点：${verdict.ok ? '合格' : `不合格（${String(verdict.problems.length)} 条）`}`)
+    lines.push(`    · 回车触发后焦点在 ${where(keyboard.afterActivate)}`)
+    lines.push(`    · 检查完成后焦点在 ${where(keyboard.afterDone.active)}`)
+    lines.push(`    · 焦点轨迹：${Array.isArray(keyboard.focusTrace) && keyboard.focusTrace.length > 0 ? keyboard.focusTrace.join(' → ') : '（无记录）'}`)
+    lines.push(`    · 焦点在面板内时，Tab 到「关闭」：${keyboard.panelTabToClose === -1 ? '5 次以上仍未到' : `${String(keyboard.panelTabToClose)} 次`}`)
+    lines.push(`    · 关闭后焦点在 ${where(keyboard.afterClose.active)}`)
+    for (const problem of verdict.problems) {
+      lines.push(`    ✗ ${problem}`)
+    }
   }
   lines.push(payload.ok
-    ? '✓ 三档视口均无溢出，触控目标与断行位置均达标'
-    : '✗ 存在溢出、触控目标过小或断在词中间，见上')
+    ? '✓ 三档视口均无溢出，触控目标、断行位置与键盘焦点链路均达标'
+    : '✗ 存在溢出、触控目标过小、断在词中间或键盘焦点丢失，见上')
   return lines.join('\n')
 }
 

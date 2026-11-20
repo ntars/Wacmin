@@ -388,3 +388,178 @@ describe('长串断行质量（第 4 段）', () => {
       '选择器失效必须判失败，否则整节静默空转')
   })
 })
+
+describe('键盘焦点链路（第 5 段）', () => {
+  /*
+   * 这一组守的是一个「所有测试都绿着、只有键盘用户受害」的缺陷。
+   *
+   * 实测到的形态：`btn-contract` 的 click 处理里 `disabled = true`，鼠标
+   * 点击看不出问题；真实回车之后焦点掉到 `<body>`，键盘用户要按 12 次
+   * Tab 才够得到「关闭」。程序化 `.click()` 复现不出来 —— 差别在
+   * Enter 是 keydown → click → keyup 三步，disabled 之后 keyup 无处可落。
+   */
+
+  test('judgeKeyboardFocus 对正常结果判通过', async () => {
+    const { judgeKeyboardFocus } = await import('../scripts/viewport-check.mjs')
+    const verdict = judgeKeyboardFocus({
+      afterActivate: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true },
+      afterDone: {
+        panelHidden: false,
+        panelInViewport: true,
+        bodyNodes: 65,
+        active: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true },
+      },
+      panelTabToClose: 1,
+      afterClose: {
+        panelHidden: true,
+        active: { tag: 'button', id: 'btn-contract', cls: '.btn', onBody: false, inHidden: false, ring: true },
+      },
+    })
+    assert.equal(verdict.ok, true, `不该有问题，实际：${verdict.problems.join(' / ')}`)
+    assert.deepEqual(verdict.problems, [])
+  })
+
+  test('焦点掉到 body 判失败（两处都要查）', async () => {
+    /*
+     * 只查「检查完成后」会漏掉触发瞬间那次丢失：如果代码在 finally 里
+     * 把焦点补回按钮，末态看着正常，但用户在检查跑的那几秒里是无位置感
+     * 的。所以两个时点各断言一次。
+     */
+    const { judgeKeyboardFocus } = await import('../scripts/viewport-check.mjs')
+    const base = {
+      afterDone: { panelHidden: false, panelInViewport: true, bodyNodes: 65, active: { tag: 'button', id: 'btn-contract', cls: '.btn', onBody: false, inHidden: false, ring: true } },
+      panelTabToClose: 1,
+      afterClose: { panelHidden: true, active: { tag: 'button', id: 'btn-contract', cls: '.btn', onBody: false, inHidden: false, ring: true } },
+    }
+    const body = { tag: 'body', id: '', cls: '', onBody: true, inHidden: false, ring: false }
+
+    const onActivate = judgeKeyboardFocus({ ...base, afterActivate: body })
+    assert.equal(onActivate.ok, false, '触发瞬间的焦点丢失必须判失败')
+    assert.ok(onActivate.problems.some((p) => p.includes('回车触发后') && p.includes('body')),
+      `问题里应点名「回车触发后」，实际：${onActivate.problems.join(' / ')}`)
+
+    const onDone = judgeKeyboardFocus({
+      ...base,
+      afterActivate: base.afterDone.active,
+      afterDone: { ...base.afterDone, active: body },
+    })
+    assert.equal(onDone.ok, false, '检查完成后的焦点丢失必须判失败')
+    assert.ok(onDone.problems.some((p) => p.includes('检查完成后') && p.includes('body')),
+      `问题里应点名「检查完成后」，实际：${onDone.problems.join(' / ')}`)
+  })
+
+  test('焦点落在隐藏区域或没有可见焦点环都判失败', async () => {
+    const { judgeKeyboardFocus } = await import('../scripts/viewport-check.mjs')
+    const base = {
+      afterDone: { panelHidden: false, panelInViewport: true, bodyNodes: 65, active: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true } },
+      panelTabToClose: 1,
+      afterClose: { panelHidden: true, active: { tag: 'button', id: 'btn-contract', cls: '.btn', onBody: false, inHidden: false, ring: true } },
+    }
+
+    const inHidden = judgeKeyboardFocus({
+      ...base,
+      afterActivate: { tag: 'button', id: 'btn-contract-close', cls: '.btn', onBody: false, inHidden: true, ring: true },
+    })
+    assert.equal(inHidden.ok, false, '焦点在隐藏区里必须判失败')
+
+    const noRing = judgeKeyboardFocus({
+      ...base,
+      afterActivate: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: false },
+    })
+    assert.equal(noRing.ok, false,
+      '焦点落在看不见的地方等于没有焦点，必须判失败（本轮第一版修法就踩了这条：outline: none 没给替代标记）')
+  })
+
+  test('关闭后焦点必须回到触发按钮', async () => {
+    const { judgeKeyboardFocus } = await import('../scripts/viewport-check.mjs')
+    const verdict = judgeKeyboardFocus({
+      afterActivate: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true },
+      afterDone: { panelHidden: false, panelInViewport: true, bodyNodes: 65, active: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true } },
+      panelTabToClose: 1,
+      afterClose: {
+        panelHidden: true,
+        active: { tag: 'button', id: 'btn-contract-close', cls: '.btn', onBody: false, inHidden: true, ring: false },
+      },
+    })
+    assert.equal(verdict.ok, false)
+    assert.ok(verdict.problems.some((p) => p.includes('关闭后') && p.includes('btn-contract')),
+      `应点名关闭后的落点，实际：${verdict.problems.join(' / ')}`)
+  })
+
+  test('面板没渲染出内容时判失败，防止整节空转', async () => {
+    /*
+     * 最危险的一种「绿」：检查根本没触发，面板里 0 个节点，于是「焦点
+     * 在面板上」「关闭后回到按钮」全都能被一个空页面满足。这条守的是
+     * 与「压测注入到空集合」同类的坑。
+     */
+    const { judgeKeyboardFocus } = await import('../scripts/viewport-check.mjs')
+    const verdict = judgeKeyboardFocus({
+      afterActivate: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true },
+      afterDone: { panelHidden: false, panelInViewport: true, bodyNodes: 0, active: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true } },
+      panelTabToClose: 1,
+      afterClose: { panelHidden: true, active: { tag: 'button', id: 'btn-contract', cls: '.btn', onBody: false, inHidden: false, ring: true } },
+    })
+    assert.equal(verdict.ok, false, '面板 0 个节点必须判失败')
+    assert.ok(verdict.problems.some((p) => p.includes('空转')), verdict.problems.join(' / '))
+  })
+
+  test('面板内到「关闭」的 Tab 距离超过 2 步判失败', async () => {
+    const { judgeKeyboardFocus } = await import('../scripts/viewport-check.mjs')
+    const verdict = judgeKeyboardFocus({
+      afterActivate: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true },
+      afterDone: { panelHidden: false, panelInViewport: true, bodyNodes: 65, active: { tag: 'section', id: 'contract-panel', cls: '.panel', onBody: false, inHidden: false, ring: true } },
+      panelTabToClose: -1,
+      afterClose: { panelHidden: true, active: { tag: 'button', id: 'btn-contract', cls: '.btn', onBody: false, inHidden: false, ring: true } },
+    })
+    assert.equal(verdict.ok, false, '走不到「关闭」必须判失败')
+  })
+
+  test('判定被接进 ok 总判，不是孤立函数', () => {
+    assert.match(scriptCode, /judgeKeyboardFocus\(row\.keyboard\)\.ok/u,
+      'judgeKeyboardFocus 必须进 runViewportCheck 的 ok 判定，否则测了不判')
+  })
+
+  test('产品代码不用 disabled 防重入（会丢键盘焦点）', () => {
+    /*
+     * 这条是本轮缺陷的直接回归锁。`disabled` 在 click 处理里一设，
+     * 真实回车的 keyup 无处投递，焦点退回 body —— 实测四组对照确认。
+     */
+    const appJs = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8')
+    const appCode = appJs.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '')
+    assert.doesNotMatch(appCode, /button\.disabled\s*=/u,
+      '契约检查按钮不许用 disabled 防重入 —— 真实回车会丢焦点，改用 aria-disabled + 布尔量')
+    assert.match(appCode, /button\.setAttribute\(\s*'aria-disabled'/u,
+      '忙碌态应通过 aria-disabled 表达')
+    assert.match(appCode, /let contractBusy = false/u,
+      '防重入应有独立的布尔标记，不依赖 DOM 属性')
+  })
+
+  test('关闭面板后把焦点交回触发按钮', () => {
+    const appJs = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8')
+    const closeFn = /function closeContractPanel\(\)[\s\S]{0,400}?\n\}/u.exec(appJs)
+    assert.notEqual(closeFn, null, '应有 closeContractPanel 函数')
+    assert.match(closeFn[0], /'btn-contract'\)\.focus\(\)/u,
+      '关闭后必须把焦点交回触发按钮，否则掉到 body')
+    assert.match(closeFn[0], /hidden = true/u, '关闭要把面板收起')
+  })
+
+  test('契约面板可被程序化聚焦（tabindex="-1"）', () => {
+    const html = readFileSync(join(ROOT, 'web', 'index.html'), 'utf8')
+    const panelTag = /<section[^>]*id="contract-panel"[^>]*>/u.exec(html)
+    assert.notEqual(panelTag, null, '应有 contract-panel 章节')
+    assert.match(panelTag[0], /tabindex="-1"/u,
+      '面板要能接受程序化焦点，但 -1 不进 Tab 序列')
+    assert.match(panelTag[0], /role="region"/u, '面板应有 region 语义')
+    assert.match(panelTag[0], /aria-label=/u, 'region 必须有可读名称，否则读屏念「区域」')
+  })
+
+  test('程序化聚焦的面板有可见反馈', () => {
+    /*
+     * 第一版修法写的是 `.panel:focus { outline: none }` —— 挪了焦点却不
+     * 给任何标记，等于把「焦点在面板上」变成看不见的事实。检查当场报红
+     * （实测三档各 1 条）。这条锁住「必须有替代标记」。
+     */
+    assert.match(css, /\.panel:focus\s*\{[^}]*box-shadow/u,
+      '程序化聚焦的面板必须给可见标记（outline: none 之后要有 box-shadow 或 border 替代）')
+  })
+})

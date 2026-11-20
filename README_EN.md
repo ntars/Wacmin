@@ -2405,10 +2405,10 @@ Performance in each direction is determined by its foundation; this project only
 | exeonmac | 461 | about 2m30s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
-| console | 243 | about 19 seconds | Includes 8 line-break quality guards |
+| console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1342** | — | See "0 skipped repository-wide" below |
+| **Total** | **1353** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3041,6 +3041,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
 | `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
 | Long paths break mid-word | No overflow, all tests green, yet a 139-character path is split into 4–5 lines at 375px with breaks landing inside words (`Framewo\|rks`, `dir\|ectory`); **15** occurrences across three viewports (criterion: both sides of the break belong to `[A-Za-z0-9._]`) | `overflow-wrap: anywhere` fixed the overflow but only looks for breaks **between arbitrary characters**, never using the natural `/` `\` `-` boundaries; `.result-val` additionally carried `word-break: break-all`, which **ignores** `<wbr>` | New pure function `pathSegments()` slices on separators, `app.js`'s `writeText()` appends `Text` per slice and inserts `<wbr>` after each separator, and `el()` routes everything through it; `.result-val`'s `break-all` became `overflow-wrap: anywhere`. Zero occurrences after the fix. The stress injector now `import('./app.js')` and calls the product function — otherwise it measures itself |
+| The contract-check button sets `disabled` inside its click handler, so a keyboard Enter drops focus instantly | Clicking with a mouse works fine; pressing Enter on a keyboard sends focus to `<body>`, a screen reader restarts from the top, reaching the panel's "close" button takes 12 more Tabs, and closing the panel drops focus to `body` again. The first three viewport stages stay fully green | `Enter` is keydown → click → keyup. Setting `disabled` inside click makes the element stop being a focus target, so the browser returns focus to the document root and the trailing keyup has no receiver. A programmatic `.click()` has no trailing keyup, so the defect never reproduced and every existing test was green | Re-entry is guarded by a boolean plus `aria-disabled` (semantics only, focusability intact); the panel gains `tabindex="-1"` and gets `panel.focus()` after the check completes; closing hands focus back to the trigger. The criterion became stage 5 of `viewport-check.mjs`, using real key events plus a full `focusin`/`focusout` trace |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -3697,6 +3698,73 @@ This is the third recurrence of the 15.16⑧ shape: **the check must land on the
 **⑨ Eight new guards** (`console/test/viewport-check.test.mjs`, 15 → 23): `pathSegments` break positions and "rejoining yields the original byte for byte", empty/non-string inputs never throw, a separator-free string yields one slice, the injector must `import('./app.js')`, `el()` must use `writeText` and must not assign `textContent`, `.result-val` must not use `break-all`, every selector in the list has a matching render site in `app.js`, and the verdict includes `dirty === 0` plus `missing !== true`.
 
 **⑩ Still unverified / not handled**: (a) only *break positions* were measured — **whether `<wbr>` makes very long strings wrap to an extra line** was not measured in general; `.result-val` does go from 5 to 6 lines at 375px, a normal cost of finer break points, but extreme widths (< 300px) were not tested; (b) a horizontal scroll container or head/tail truncation (`…/last/two/segments`) is a different trade-off, not done here — the former introduces two-axis scrolling, the latter hides the middle segment users most need to verify; (c) Windows paths `C:\Users\...` are covered by the separator set, but prefixes like `\\?\C:\` were not separately tested.
+
+
+### 15.18 Keyboard users lose focus the moment they press Enter: clickable with a mouse, unreachable by keyboard (measured 2026-11-21, fixed)
+
+**This is the third shape of the 15.16 / 15.17 family: nothing overflows, no word is split, every button is big enough, and the first three stages are fully green — only keyboard users cannot complete the task.**
+
+**① The shape.** The "contract check" button in the top bar is an ordinary `<button>`; clicking it with a mouse runs a check and looks flawless. Pressing Enter on a real keyboard:
+
+- focus **drops to `<body>` immediately**, with no position marker anywhere on screen;
+- a screen reader restarts from the top of the document;
+- reaching the "close" button inside the panel that just appeared takes **12 more Tabs** (the panel sits after the direction grid in the DOM, and that matches the visual order).
+
+Closing the panel also drops focus to `<body>`. Three separate losses of position along one chain.
+
+**② Root cause: setting `disabled` inside the click handler.** The original code used `button.disabled = true` / `finally disabled = false` to prevent re-entry. Four control groups separate cause from correlation (same page, same button, same machine):
+
+| Scenario | Trigger | Focus ends up on |
+|---|---|---|
+| Product as it was (handler sets `disabled`) | real `Enter` | **`<body>`** |
+| Same handler | programmatic `.click()` | the button |
+| Click intercepted, handler never runs | real `Enter` | the button |
+| Click intercepted, `disabled` set manually | real `Enter` | **`<body>`** |
+
+The difference is the event sequence: **`Enter` is keydown → click → keyup**. Setting `disabled` inside click makes the element stop being a focus target, so the browser returns focus to the document root, and the keyup that follows has no receiver. A programmatic `.click()` has no trailing keyup, which is why this never reproduced — **and why every existing test was green**. A full focus trace (`focusin` / `focusout`) shows it directly:
+
+```
+Fixed:   in:section#contract-panel  →  out→:section#contract-panel
+Before:  out→:body                 →  in:section#contract-panel
+```
+
+**③ The fix (four places, each covering one gap).**
+
+- `console/web/app.js`: re-entry is guarded by a boolean `contractBusy`, and the busy state is expressed with `aria-disabled` / `aria-busy`. `aria-disabled` changes semantics only (a screen reader reads "unavailable") and **does not affect focusability**, so focus survives. `runContractCheck` ends with `panel.focus()` so focus moves to the result panel — the results render below the fold (top = 601px at 375px), and without moving focus the user knows neither that the check started nor where the output is.
+- A new `closeContractPanel()`: hides the panel, then `$('btn-contract').focus()`. Once the panel is hidden, the "close" button leaves the accessibility tree with it; without handing focus back explicitly it necessarily lands on `<body>`.
+- `console/web/index.html`: the panel gains `tabindex="-1"`, `role="region"` and `aria-label`. `-1` lets it receive programmatic focus without entering the Tab order; `role="region"` lets a screen reader announce "Contract consistency, region" rather than just "region".
+- `console/web/style.css`: styling for the `aria-disabled` busy state (`opacity: .45`, `cursor: progress`) and `.panel:focus { outline: none; box-shadow: inset 3px 0 0 var(--info) }`.
+
+**④ A trap this round set for itself (must be recorded): the first fix was flagged red, and it deserved to be.** It said `.panel:focus { outline: none }` — moving focus while **giving no visible marker at all**, which turns "focus is on the panel" into an invisible fact. The check failed immediately: one problem per viewport, "focus is on section#contract-panel but there is no visible focus ring". That is the same shape as the defect being fixed (**focus in an invisible place is no focus at all**), merely changed from "focus lost" to "focus invisible". It passes after switching to an inset bar on the left edge.
+
+**⑤ A second trap: the first version of the criterion was too soft for a negative test to catch.** The verdict originally read end-state snapshots only ("where is focus after Enter", "where after the check"). Reverting the product to `disabled` for a negative test left **all three viewports green in the browser** — because the trailing `panel.focus()` inside `runContractCheck` moved focus back, hiding the instant it had dropped to `<body>`. Adding "the `focusin`/`focusout` trace must never contain `body`" turned the same sabotage red on all three viewports, exit **1**.
+
+This is the fourth recurrence of the 15.16⑧ / 15.17⑦ shape: **the check must land on the code that actually takes effect.** This time the form was "the end state concealed the process".
+
+**⑥ Another correction: the Tab-distance criterion was simply wrong and has been replaced.** The first version asserted "at most 3 Tabs from the trigger into the panel", and the measurement was a constant 12 — but that is **not a defect**: the contract panel sits after the direction grid in the DOM and visually, so 12 is exactly "the Tab order matches what the eye sees". Moving the panel earlier in the DOM to shorten it would make the keyboard walk and the visual layout disagree. The assertion is now "**once focus has been handed into the panel by stage one**, at most 2 Tabs to reach close" — measured 1.
+
+**⑦ Post-fix measurement (real Chrome, three viewports).**
+
+| Viewport | Focus after Enter | Focus ring | Tabs to close inside panel | Focus after close | Trace contains body |
+|---|---|---|---|---|---|
+| 375 | `section#contract-panel` | yes | 1 | `button#btn-contract` | no |
+| 768 | `section#contract-panel` | yes | 1 | `button#btn-contract` | no |
+| 1440 | `section#contract-panel` | yes | 1 | `button#btn-contract` | no |
+
+The first three stages did not regress in the same run: horizontal overflow 0px in baseline / stress / touch on all three viewports, 0 offending elements, 0 mid-word breaks, and 0 of 15 touch targets under 44px.
+
+**⑧ Four negative tests, all effective.**
+
+| Sabotage | Browser measurement | Static guard |
+|---|---|---|
+| `aria-disabled` reverted to `disabled` | trace contains `out→:body` on all three viewports, exit **1** | 1 red |
+| The post-close `focus()` removed | focus after close is `body#` on all three, exit **1** | 1 red |
+| `.panel:focus` loses `box-shadow` (only `outline: none` remains) | `ring=false` on all three, exit **1** | — |
+| The panel loses `tabindex="-1"` | focus stays on the trigger after Enter on all three, exit **1** | 1 red |
+
+**⑨ Eleven new guards** (`console/test/viewport-check.test.mjs`, 23 → 34): `judgeKeyboardFocus` passes on healthy data; each of the two `body` moments is named separately; a hidden region and a missing focus ring both fail; the post-close landing spot must be the trigger button; a panel with 0 nodes fails as "no-op"; more than 2 Tabs inside the panel fails; the verdict must feed the `ok` result of `runViewportCheck`; the product must not use `button.disabled =`; `closeContractPanel` must hand focus back; the panel must carry `tabindex="-1"` plus `role`/`aria-label`; `.panel:focus` must have a visible substitute marker.
+
+**⑩ Still unverified / not handled**: (a) **Chrome only** — whether Safari / Firefox implement "a disabled element loses focus" identically is untested; (b) the history-row "replay" focus chain was not measured separately this round — it also resets the panel, but goes through SSE rather than fetch; (c) the actual announcement order of a screen reader was not listened to by a human, only the presence of `role` / `aria-label` / `aria-busy` was checked statically; (d) putting `aria-busy` on a button is debatable — the spec prefers the **container being updated**; this round treats it as "the button itself is busy".
 
 
 ---

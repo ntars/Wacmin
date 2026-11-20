@@ -76,6 +76,8 @@ let activeSource = null
 let activeTimer = null
 /** 当前任务的 ID，用于拼产物下载地址。 */
 let currentJobId = null
+/** 契约检查是否正在跑。用布尔量防重入，不用 `disabled`（会丢键盘焦点）。 */
+let contractBusy = false
 
 // ---------------------------------------------------------------------------
 // 启动
@@ -85,10 +87,8 @@ init()
 
 async function init() {
   $('host-info').textContent = `${navigator.platform || '本机'} · ${new Date().toLocaleString('zh-CN')}`
-  $('btn-contract').addEventListener('click', runContractCheck)
-  $('btn-contract-close').addEventListener('click', () => {
-    $('contract-panel').hidden = true
-  })
+  $('btn-contract').addEventListener('click', () => { runContractCheck() })
+  $('btn-contract-close').addEventListener('click', () => { closeContractPanel() })
   await loadDirections()
   await loadHistory()
 }
@@ -509,14 +509,43 @@ function resultLine(key, value, kind = '') {
 // 契约检查
 // ---------------------------------------------------------------------------
 
+/**
+ * 跑一次契约检查，并把焦点交给结果面板。
+ *
+ * ## 为什么不用 `button.disabled = true` 防重入（重要）
+ *
+ * 早先这里是 `disabled = true` / `finally disabled = false`。鼠标点击
+ * 看不出问题，但**用键盘按回车会当场丢掉焦点**：
+ *
+ *   1. 回车在浏览器里是 keydown → click → keyup 三步；
+ *   2. click 处理函数里把按钮设成 `disabled`，元素立刻不再是焦点目标，
+ *      浏览器把焦点退回 `<body>`；
+ *   3. 紧接着的 keyup 已经没有接收者。
+ *
+ * 实测四组对照（同一页面、同一按钮）：程序化 `.click()` 焦点留在按钮上；
+ * 真实 Enter 之后焦点在 `body`；只拦截 click、不设 `disabled` 时焦点也
+ * 留在按钮上。所以是「在 click 里设 disabled」这一条在丢焦点，不是
+ * 检查逻辑本身。键盘用户此刻要按 12 次 Tab 才能重新够到「关闭」。
+ *
+ * 改成用 `aria-disabled` + 自己守一道重入标记：`aria-disabled` 只影响
+ * 语义（读屏会念「不可用」），**不影响可聚焦性**，所以焦点不会丢；
+ * 防重入靠 `contractBusy` 这个布尔量，本来也不该依赖样式层。
+ *
+ * ## 为什么查完把焦点移到面板
+ *
+ * 结果出现在页面**下方**（375px 下 top=601px），触发按钮还在顶栏。不移
+ * 焦点的话，用户既不知道检查有没有开始，也不知道结果在哪 —— 读屏更
+ * 是完全感知不到页面上多了一块内容。
+ */
 async function runContractCheck() {
+  if (contractBusy) return
+  contractBusy = true
+
   const panel = $('contract-panel')
   const body = $('contract-body')
   panel.hidden = false
   body.replaceChildren(el('div', 'loading', '正在检查四个方向…'))
-
-  const button = $('btn-contract')
-  button.disabled = true
+  setContractBusyState(true)
 
   try {
     const response = await fetch('./api/contract')
@@ -525,8 +554,30 @@ async function runContractCheck() {
   } catch (error) {
     body.replaceChildren(el('div', 'loading', `检查失败：${String(error)}`))
   } finally {
-    button.disabled = false
+    contractBusy = false
+    setContractBusyState(false)
   }
+
+  // 结果已经在 DOM 里，焦点交给面板本身（tabindex="-1"，不进 Tab 序列）
+  panel.focus()
+}
+
+/** 用 `aria-disabled` 表达忙碌态 —— 它不改可聚焦性，因此不会丢焦点。 */
+function setContractBusyState(busy) {
+  const button = $('btn-contract')
+  button.setAttribute('aria-disabled', busy ? 'true' : 'false')
+  button.setAttribute('aria-busy', busy ? 'true' : 'false')
+}
+
+/** 收起契约面板，并把焦点交回触发它的按钮。 */
+function closeContractPanel() {
+  $('contract-panel').hidden = true
+  /*
+   * 面板一收，里面的「关闭」按钮就随 `hidden` 祖先一起从无障碍树里消失。
+   * 不主动移焦点的话，焦点会掉到 `<body>`（实测），键盘用户得从页首
+   * 重新 Tab。交回触发按钮才是这个动作的语义终点。
+   */
+  $('btn-contract').focus()
 }
 
 function renderContract(result) {

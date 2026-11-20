@@ -2401,13 +2401,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 461 项 | 约 2 分 30 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
+| exeonmac | 472 项 | 约 2 分 45 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1353 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1364 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3062,6 +3062,9 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | launcher 收不到 SIGTERM，只能 `kill -9` | 关掉 ExeOnMac 产物时进程不退出；实测 SIGTERM 后 90 秒仍在运行，`launcher.log` 里连「收到信号」都没有 | `DispatchSource.makeSignalSource(queue: .main)`：`.main` 队列的 handler 由 **main run loop** 调度，而 `WineRunner.run` 用 `Thread.sleep(0.2)` 轮询子进程、一路不跑 run loop。`signal(sig, SIG_IGN)` 又把默认处置吃掉了，于是信号既不触发 handler 也不终止进程。**每个用例因此白等 60 秒兜底超时，测试还一直是绿的** | 信号源改挂独立串行队列（`DispatchQueue(label: "com.wexe.launcher.signal")`）。实测 SIGTERM 后 **0.19 秒**退出、日志出现「收到信号 15」与「wine 退出 status=15」；测试从 63.3 秒降到 3.1 秒。补两层守卫：`test_phase0` 静态断言队列不是 `.main`（防写法回退），`test_phase3` 断言「日志出现收到信号」+「20 秒内退出」（防行为回退），两者均做过负向验证 |
 | 打包对「半坏 prefix」照样报成功 | `system.reg` / `user.reg` / `userdef.reg` 全删、或 `system32` 被清空、或 `dosdevices/c:` 换成普通文件之后，`wepack package` 仍 `EXIT=0`、`ok=true`、校验 10/10 全绿；而同一份 prefix 交给 wine 直接 `could not load kernel32.dll, status c0000135`（rc=53） | 装配侧第 7 项校验只断言 `Private/drive_c` **是个目录**。prefix 是否可用，`install` 侧一直用 `prefix.validate_prefix()` 判（五项），装配侧却另写了一套更宽松的判据 —— 同一条业务规则两套实现，宽松那套恰在最后一道关口上（§5.3 红线）。测试夹具也只建 `drive_c/App/`，造出来的 prefix 本身起不来，两边一起宽松所以永远绿 | 第 7 项改为调 `prefix.validate_prefix()`，项名 `prefix.drive_c` → `prefix.valid`，失败时逐项点名缺失。补 7 项回归锁（5 项判据 + 2 项 stdout 契约），注回旧判据 5 项全红。「健康判过」那条同时防矫枉过正。夹具按 `validate_prefix` 的最低要求造齐（system32 非空、`dosdevices/c:` 相对软链、三个 `.reg` 非空） |
 | 长路径断在词中间 | 页面不溢出、测试全绿，但 139 字符路径在 375px 下被断成 4–5 行，断点落在 `Framewo\|rks`、`dir\|ectory` 这类词正中间；三档合计 **15 处**（口径：断点两侧都属于 `[A-Za-z0-9._]`） | 为解决溢出用了 `overflow-wrap: anywhere`，它只在**任意字符之间**找断点，不利用 `/` `\\` `-` 这些天然边界；`.result-val` 还额外带 `word-break: break-all`，它**无视** `<wbr>` | 新增纯函数 `pathSegments()` 按分隔符切片、`app.js` 的 `writeText()` 逐片 `append(Text)` 并在分隔符后插 `<wbr>`，`el()` 统一走它；`.result-val` 的 `break-all` 换成 `overflow-wrap: anywhere`。修后三档 0 处。压测改为 `import('./app.js')` 调产品函数，否则压测量的是它自己 |
+| 注册表文件「存在且非空」就判健康 | 把 `system.reg` 换成 35 字节纯文本，`validate_prefix` 返回 `[]`、打包校验 10/10 全绿；同一份 prefix 交给 wine 直接 `system.reg is not a valid registry file` + 「32-bit installation」、`rc=1`。`user.reg` 坏掉更隐蔽：`reg add` 返 0 但键没落盘 | 判据只看 `is_file()` 与 `st_size > 0`，从不读内容。测试夹具写的也是坏格式（UTF-16LE+BOM、无 `#arch`），**夹具造出的 prefix 自己就跑不起来** —— 判据与夹具一起宽松，缺陷永远绿 | 新增 `_check_reg_file()`：首行必须是 `WINE REGISTRY Version 2`（三个文件都查），`system.reg` 另须含 `#arch=win64`。三档致命程度实测分开，`user.reg`/`userdef.reg` 不要求 arch（否则误报）。两条夹具一并改正，常量从 `wepack.prefix` 导入 |
+| 占位注册表写的是 wine 不收的格式 | `prefix._write_placeholder_regs` 写的占位表让 wine 报 `not a valid registry file` + 「32-bit installation」、`rc=1` —— 占位表的存在意义正是「让 wine 能起来」 | 自述「wine 的 .reg 是 UTF-16LE + BOM」，而那句话只对 `regedit /E` 的**导出**文件成立；prefix 里的存储格式是纯 ASCII，且必须带 `#arch=win64` | 改纯 ASCII + `#arch=win64`。实测 `rc=0`，wine 自己把占位补全成 20 万字节完整注册表 |
+| 重启拦截的 `.reg` 从来没生效过 | `suppress_restart` 日志写 `reboot.suppressed`，实际一个键都没写进去；导入后 `reg query` 查不到 `NoClose` | 用 wine **内部**存储格式（`WINE REGISTRY Version 2` + 相对路径 `[Software\\...]`）喂 `regedit /S`，而它只认 **Windows 导出**格式。实测喂错格式时**退出码 0、stderr 空、零写入** —— 三组对照才切开 | 改 `Windows Registry Editor Version 5.00` + 绝对键路径；导入后回查目标键，查不到写 `WARN reboot.suppress_ineffective` 而非 INFO。`regedit /S` 静默失败，「没抛异常」不能证明生效 |
 | `package --json` 失败时 stdout 两段 JSON | `wepack package <坏包> --json` 的 stdout 是「完整 payload + main 的 error 段」两段拼接，`json.load` 抛 `Extra data: line 79`，管道交给 `jq` 也直接失败 | `cmd_package` 无条件 `_emit(payload)` 之后才 `raise VerifyFailed`。与 W-02 修过的「`build --json` 两段 JSON」同因，只是发生在单个子命令内部而非父子命令之间 | 改为先判 `report.ok`：失败时只由 `main()` 输出单一段 error（带 `message` 与 `exit_code`），详细 checks 走 stderr 与 `--report`。`raw_decode` 实测修复前段数 2 → 修复后 1；回归锁 2 项，注回旧顺序即变红 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
@@ -3786,6 +3789,82 @@ report.checks.append(Check("prefix.valid", not prefix_problems,
 **⑨ 新增 11 项守卫**（`console/test/viewport-check.test.mjs`，23 → 34 项）：`judgeKeyboardFocus` 正常数据判通过、两处 `body` 各自点名、隐藏区与无焦点环均判失败、关闭后落点必须是触发按钮、面板 0 节点判「空转」、面板内 Tab 超 2 步判失败、判定必须接进 `runViewportCheck` 的 `ok`、产品代码不许用 `button.disabled =`、`closeContractPanel` 必须交回焦点、面板必须有 `tabindex="-1"` 与 `role`/`aria-label`、`.panel:focus` 必须有可见替代标记。
 
 **⑩ 仍未验证 / 未处理**：(a) **只测了 Chrome**，Safari / Firefox 对「disabled 元素丢焦点」的实现是否一致未验；(b) 历史行「回看」的焦点链路本轮未单独测 —— 它同样会重置面板，但走的是 SSE 而不是 fetch；(c) 读屏软件的实际朗读顺序未人工核听，只静态核对了 `role` / `aria-label` / `aria-busy` 的存在性；(d) `aria-busy` 加在按钮上是否符合规范有争议，规范推荐加在被更新的**容器**上，本轮按「表达按钮自身忙碌」处理。
+
+
+### 15.19 注册表文件「存在且非空」不等于「wine 能读」（2026-11-21 实测，已修）
+
+**这一节是 15.15 的下一层。** 15.15 证明「prefix 结构半坏必须在打包时失败」，修法是把装配侧判据改为复用 `validate_prefix()`。但那个判据本身只看 `.reg` **存在且非空** —— 于是只要文件还在、字节数不为 0，内容写成什么都能过。这一节把判据补到内容层，并顺带查出写注册表的两处代码一直在写 wine 不收的格式。
+
+**① 缺陷：35 字节的纯文本照样判健康。** 造一个健康 prefix，把 `system.reg` 换成一行 `this is not a registry`（35 字节）：
+
+```
+validate_prefix(...)     ->  []                          # 判定健康
+wine64 cmd /c "echo hi"  ->  rc=1
+    system.reg is not a valid registry file
+    wine: '...' is a 32-bit installation, it cannot support 64-bit applications.
+```
+
+打包侧第 7 项 `prefix.valid` 调的正是这个函数，所以这种 prefix 会被打成 `.app` 放行 —— 用户拿到的是「打包成功、双击毫无反应」，与 15.15 的形态相同，只是入口从「结构」换到了「内容」。
+
+**② 三个文件的致命程度不同，判据必须分开。** 对 9 种畸形文件逐个跑真实 wine（wine-11.21），按「进程能否起来」与「写入能否落盘」两栏记录：
+
+| 文件 | 首行不对 | 缺 `#arch=win64` |
+|---|---|---|
+| `system.reg` | `rc=1`，起不来 | **`rc=1`**，报「32-bit installation」，而文件语法完全合法 |
+| `user.reg` | **`rc=0`，但 HKCU 写入静默丢失** | `rc=0`，无影响 |
+| `userdef.reg` | `rc=0`，仅新用户默认值丢失 | `rc=0`，无影响 |
+
+中档那条最阴：`user.reg` 写成 `garbage` 之后，`reg add HKCU\...` **返回 0**，紧接着 `reg query` 查不到刚写的键，`user.reg` 体积从 119640 掉回 8 字节。也就是说安装器会「成功」装完，注册的路径与序列号全没落盘，第二次启动才失效 —— **退出码、stderr 全都干净**。
+
+所以首行检查三个文件都做，`#arch` 只对 `system.reg` 做。对另外两个要求 arch 是误报（实测它们缺 arch 完全无影响）。
+
+**③ 首行与 arch 的实测边界**（都实测，不是查文档）：
+
+| 写法 | 结果 |
+|---|---|
+| `REGEDIT4` / `Version 1` / `Version 3` / 前置空行 | 全部 `not a valid registry file`、`rc=1` |
+| `Windows Registry Editor Version 5.00` | 同样 `rc=1` —— 那是 `regedit /E` 的**导出**格式，不是 prefix 里的存储格式 |
+| 缺 `#arch=win64` | `rc=1`，报「32-bit installation」 |
+| `#arch=win32` / `#ARCH=win64` | 同一条错误 → 精确匹配，大小写不符也无效 |
+| arch 在第 3 行 / 第 6 行 / 空行之后 / CRLF / 行尾无换行 | 全部 `rc=0` → 位置不限 |
+| section 里写半行 `"a"="b`（`Malformed value`） | **`rc=0`**，程序照常跑 → 只是丢一个值，不能据此判 prefix 不健康 |
+
+最后一行决定了判据**不能**做全语法校验：那样会把「丢一个值」误判成「prefix 坏了」。
+
+**④ 顺带查出两处代码一直在写 wine 不收的格式。** 两处都自述「wine 的 .reg 是 UTF-16LE + BOM」，而实测那句话只对 `regedit /E` 的**导出**文件成立：
+
+- `prefix._write_placeholder_regs`：base 层没带 `.reg` 时写的占位表是 UTF-16LE+BOM 且**没有 `#arch`**。实测 `rc=1`、`system.reg is not a valid registry file` —— **占位表本身就是坏的**，而它的存在意义正是「让 wine 能起来」。改成纯 ASCII + `#arch=win64` 后 `rc=0`，wine 自己把占位补全成 20 万字节的完整注册表。
+- `install.RESTART_SUPPRESS_REG`：用的是 wine **内部**存储格式（`WINE REGISTRY Version 2` + 相对键路径 `[Software\\...]`），而 `regedit /S` 只认 **Windows 导出**格式。实测喂它内部格式 **退出码 0、stderr 空、一个键都没写进去**。同一 prefix、同一条命令的三组对照：
+
+| 文件内容 | 导入后 `reg query` |
+|---|---|
+| `Windows Registry Editor Version 5.00` + `[HKEY_CURRENT_USER\...]` | 键在，三个 dword 齐备 |
+| `WINE REGISTRY Version 2` + 相对路径 `[Software\...]` | 键不存在 |
+| `WINE REGISTRY Version 2` + `[HKEY_CURRENT_USER\...]` | 键不存在 |
+
+即「重启拦截」从来没有生效过，而日志里一直写着 `reboot.suppressed`。改成导出格式后三个值实测写入成功。
+
+**⑤ 修法四处，各管一头。**
+
+- `prefix/__init__.py` 新增常量 `REG_HEADER` / `REG_ARCH_64` 与 `_check_reg_file()`：读前 64 KB，判首行与（仅 `system.reg`）arch。`validate_prefix` 在「非空」之后调它。
+- `prefix._write_placeholder_regs`：改纯 ASCII + arch 行。
+- `install.RESTART_SUPPRESS_REG`：改 Windows 导出格式与绝对键路径。
+- `install.suppress_restart`：导入后回查 `RESTART_POLICY_KEY`，查不到就写 `WARN reboot.suppress_ineffective`。**`regedit /S` 对格式错的文件不报错，所以「命令跑完没抛异常」不能证明生效** —— 至少让日志说实话。
+
+**⑥ 测试夹具与判据一起翻新（这是缺陷藏住的另一半原因）。** `make_fake_layer()` 与 `test_phase3.make_app()` 早先写的都是 UTF-16LE+BOM 且无 arch，**夹具造出的 prefix 自己就跑不起来**。判据只看「存在且非空」，夹具刚好能过，两边一起宽松所以永远绿。现在两处夹具都按新判据造齐，常量从 `wepack.prefix` 导入而不是各背一份字面串。
+
+**⑦ 新增 11 项测试**（`test_phase2.py`）：`TestValidatePrefixRegContent` 9 项（纯文本 system.reg / 缺 arch / `#arch=win32` / UTF-16 BOM / 坏 user.reg / 坏 userdef.reg 均被判出；user 两件缺 arch **不**判错、arch 位置四种写法**不**误报、`Malformed value` **不**误报 —— 后三项防矫枉过正）；`TestRestartSuppressionTakesEffect` 2 项（假 wine 让 `reg query` 报找不到 → 必须落 WARN 而非 INFO；回查得到 `NoClose` → 必须落 INFO，防矫枉过正）。另修 `test_placeholder_regs_written_when_missing` 与 `test_reg_file_is_utf16` 两条**把错误格式写进断言**的旧测试。
+
+**⑧ 负向验证（注回旧实现）。**
+
+| 破坏方式 | 结果 |
+|---|---|
+| `validate_prefix` 去掉 `_check_reg_file` 调用 | 6 项变红（纯文本 / 缺 arch / win32 / BOM / user / userdef 各一） |
+| `_write_placeholder_regs` 改回 UTF-16LE+BOM 无 arch | 占位表测试变红 |
+| `RESTART_SUPPRESS_REG` 改回 `WINE REGISTRY Version 2` | 格式断言变红 |
+| `suppress_restart` 去掉回查、无条件写 INFO | 「未生效必须落 WARN」变红 |
+
+**⑨ 仍未验证 / 未处理**：(a) **只测了 wine-11.21**，其他版本对首行与 arch 的宽容度未验；(b) 判据只覆盖「wine 读得进去」，**不覆盖「读进去之后注册表内容是否语义正确」** —— 例如键值被改成垃圾值，wine 照样起来，这种只能靠实跑业务程序发现；(c) 32 位 prefix（`WINEARCH=win32`）本仓库不支持，故 `#arch=win32` 一律判错，若将来要支持需改这一条；(d) `regedit /S` 的静默失败是否也影响其他 `.reg` 导入路径未系统排查，目前只查了 `suppress_restart` 这一处。
 
 
 ---

@@ -28,6 +28,7 @@ sys.path.insert(0, str(REPO))
 
 from wepack.errors import UsageError, VerifyFailed  # noqa: E402
 from wepack.models import CompatConfig, InstallerKind, InstallerRecord  # noqa: E402
+from wepack.prefix import REG_ARCH_64, REG_HEADER  # noqa: E402
 from wepack.package import (  # noqa: E402
     build_bundle, bundle_dir_name, ensure_skeleton, repackage,
 )
@@ -144,10 +145,13 @@ def make_app(tmp: Path, *, entry: str = "drive_c/App/app.exe",
         c_link.unlink()
     os.symlink("../drive_c", c_link)          # 相对路径，包可移动
 
-    # wine 的 .reg 是 UTF-16LE + BOM，非空即可（内容由 wine 自己补全）
+    # 注册表按 validate_prefix 的判据造齐：纯 ASCII、首行是版本行、
+    # system.reg 带 #arch=win64。早先写的是 UTF-16LE+BOM 且无 arch，
+    # 那个文件 wine 实测判「not a valid registry file」+「32 位安装」、rc=1
+    # —— 夹具造出来的 prefix 自己就跑不起来，判据跟着一起宽松，缺陷才绿着。
     for name in ("system.reg", "user.reg", "userdef.reg"):
         (private / name).write_bytes(
-            b"\xff\xfe" + "WINE REGISTRY Version 2\n".encode("utf-16-le"))
+            f"{REG_HEADER}\n;; test fixture\n{REG_ARCH_64}\n".encode("ascii"))
 
     entry_path = private / entry
     entry_path.parent.mkdir(parents=True, exist_ok=True)

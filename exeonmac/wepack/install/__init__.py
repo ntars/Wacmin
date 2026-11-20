@@ -286,11 +286,26 @@ class _Log:
 
 #: 让 wine 把"重启请求"变成无害的成功返回。
 #: 原理：安装器调 ExitWindowsEx 或 InitiateSystemShutdown 时，wine 侧
-#: 由 explorer.exe 处理；把 shell 换成内置的，并禁用关机权限检查。
-RESTART_SUPPRESS_REG = """WINE REGISTRY Version 2
-;; ExeOnMac: 拦截安装器的重启请求，假装重启成功
-[Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\Explorer]
-" NoDriveTypeAutoRun"=dword:00000000
+#: 由 explorer.exe 处理；禁用 explorer 的相关策略项即可拦下。
+#:
+#: ## 为什么是 Windows 导出格式，而不是 prefix 里的 `WINE REGISTRY Version 2`
+#:
+#: `regedit /S` 导入的是 **Windows 导出格式**。用 wine 内部存储格式
+#: （`WINE REGISTRY Version 2` + `[Software\\...]` 相对路径）喂给它，
+#: **退出码仍是 0、stderr 空、一个键都没写进去**（2026-11-21 实测，三份
+#: 变体全部如此）。早先这里正是那种写法，于是「重启拦截」从来没有生效过，
+#: 而日志里写着 `reboot.suppressed`。
+#:
+#: 对照实验（同一 prefix、同一条 `regedit /S`）：
+#:   `Windows Registry Editor Version 5.00` + `[HKEY_CURRENT_USER\...]` → 写入成功
+#:   `WINE REGISTRY Version 2` + 相对路径                              → 键不存在
+#:   `WINE REGISTRY Version 2` + `[HKEY_CURRENT_USER\...]`             → 键不存在
+#:
+#: 早先测试只断言「文件是 UTF-16 且含 WINE REGISTRY」，把错的格式写进了断言。
+RESTART_SUPPRESS_REG = """Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer]
+"NoDriveTypeAutoRun"=dword:00000000
 "NoRun"=dword:00000000
 "NoClose"=dword:00000000
 """
@@ -301,9 +316,16 @@ def suppress_restart(prefix: Path, log: _Log | None = None) -> Path:
 
     铁律 7：不直接改注册表二进制，只写 .reg 文件再让 wine regedit 导入。
     文件保留在 prefix 里，便于审计与回滚。
+
+    ## 为什么导入后要回查一次
+
+    `regedit /S` 对格式不对的文件**不报错**（退出码 0、stderr 空，见上），
+    所以「命令跑完没抛异常」不能证明拦截生效。这里导入后 `reg query`
+    目标键，查不到就写一条 WARN —— 至少让日志说实话。
     """
     reg_path = Path(prefix) / "exeonmac-suppress-restart.reg"
-    # wine 的 regedit 接受 UTF-16LE + BOM
+    # `regedit /S` 接受 UTF-16LE + BOM 与纯 ASCII 两种编码（都实测过）。
+    # 用 UTF-16LE 与 Windows 上导出的文件形态一致，便于人工比对。
     reg_path.write_bytes(b"\xff\xfe" + RESTART_SUPPRESS_REG.encode("utf-16-le"))
 
     wine = wine_binary()
@@ -311,12 +333,33 @@ def suppress_restart(prefix: Path, log: _Log | None = None) -> Path:
     try:
         subprocess.run([str(wine), "regedit", "/S", str(reg_path)],
                        capture_output=True, **TEXT_MODE, timeout=120, env=env)
-        if log:
-            log.add("INFO", "reboot.suppressed", str(reg_path))
     except (OSError, subprocess.SubprocessError) as exc:
         if log:
             log.add("WARN", "reboot.suppress_failed", str(exc)[:200])
+        return reg_path
+
+    if log and not _policy_imported(wine, env):
+        log.add("WARN", "reboot.suppress_ineffective",
+                "regedit 退出码为 0，但目标键查不到：拦截未生效")
+    elif log:
+        log.add("INFO", "reboot.suppressed", str(reg_path))
     return reg_path
+
+
+#: 重启拦截要写入的键，用于导入后回查
+RESTART_POLICY_KEY = ("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\"
+                      "CurrentVersion\\Policies\\Explorer")
+
+
+def _policy_imported(wine: Path, env: dict[str, str]) -> bool:
+    """回查拦截键是否真的写进去了。查不到返回 False，命令失败也返回 False。"""
+    try:
+        result = subprocess.run([str(wine), "reg", "query", RESTART_POLICY_KEY],
+                                capture_output=True, **TEXT_MODE,
+                                timeout=120, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "NoClose" in (result.stdout or "")
 
 
 # --------------------------------------------------------------------------
@@ -1011,7 +1054,7 @@ __all__ = [
     "silent_args_for", "default_install_dir", "run_install",
     "write_install_log", "suppress_restart", "wine_binary",
     "wineboot_init", "kill_prefix_processes", "run_in_prefix",
-    "host_to_wine_path",
+    "host_to_wine_path", "RESTART_SUPPRESS_REG", "RESTART_POLICY_KEY",
 ]
 
 #: 公开别名。**同一个对象**，不是副本 —— 两套判据必然漂移，

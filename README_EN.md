@@ -2402,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 461 | about 2m30s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
+| exeonmac | 472 | about 2m45s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1353** | — | See "0 skipped repository-wide" below |
+| **Total** | **1364** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3041,6 +3041,9 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
 | `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
 | Long paths break mid-word | No overflow, all tests green, yet a 139-character path is split into 4–5 lines at 375px with breaks landing inside words (`Framewo\|rks`, `dir\|ectory`); **15** occurrences across three viewports (criterion: both sides of the break belong to `[A-Za-z0-9._]`) | `overflow-wrap: anywhere` fixed the overflow but only looks for breaks **between arbitrary characters**, never using the natural `/` `\` `-` boundaries; `.result-val` additionally carried `word-break: break-all`, which **ignores** `<wbr>` | New pure function `pathSegments()` slices on separators, `app.js`'s `writeText()` appends `Text` per slice and inserts `<wbr>` after each separator, and `el()` routes everything through it; `.result-val`'s `break-all` became `overflow-wrap: anywhere`. Zero occurrences after the fix. The stress injector now `import('./app.js')` and calls the product function — otherwise it measures itself |
+| A registry file that merely "exists and is non-empty" is judged healthy | Replacing `system.reg` with 35 bytes of plain text leaves `validate_prefix` returning `[]` and packaging verification at 10/10 green; the same prefix handed to wine produces `system.reg is not a valid registry file` plus "32-bit installation", `rc=1`. A broken `user.reg` is subtler: `reg add` returns 0 but the key never lands | The check only looked at `is_file()` and `st_size > 0`, never at content. The test fixture wrote the same broken format (UTF-16LE + BOM, no `#arch`), so **the fixture could not produce a prefix that even boots** — check and fixture were loose together, which is why the defect stayed green forever | Added `_check_reg_file()`: the first line must be `WINE REGISTRY Version 2` (all three files), and `system.reg` must also carry `#arch=win64`. The three files were measured to have different fatality levels; `user.reg` / `userdef.reg` are deliberately not required to carry arch (that would be a false positive). Both fixtures fixed, constants imported from `wepack.prefix` |
+| The placeholder registry is written in a format wine rejects | `prefix._write_placeholder_regs` produced a placeholder that made wine report `not a valid registry file` plus "32-bit installation", `rc=1` — yet the whole point of the placeholder is to let wine boot | It claimed "wine's .reg is UTF-16LE + BOM", which is only true for files **exported** by `regedit /E`; the on-disk format inside a prefix is plain ASCII and must carry `#arch=win64` | Switched to plain ASCII plus `#arch=win64`. Measured `rc=0`, after which wine expands the placeholder itself into a complete 200 KB registry |
+| The restart-suppression `.reg` never took effect | `suppress_restart` logged `reboot.suppressed` while writing zero keys; `reg query` after import finds no `NoClose` | It fed wine's **internal** storage format (`WINE REGISTRY Version 2` with relative `[Software\\...]` paths) to `regedit /S`, which only accepts the **Windows export** format. Measured: wrong format yields **exit code 0, empty stderr, zero writes** — it took a three-way comparison to pin down | Switched to `Windows Registry Editor Version 5.00` with absolute key paths; the import is now followed by a query of the target key, logging `WARN reboot.suppress_ineffective` instead of INFO when it is absent. `regedit /S` fails silently, so "no exception thrown" proves nothing |
 | The contract-check button sets `disabled` inside its click handler, so a keyboard Enter drops focus instantly | Clicking with a mouse works fine; pressing Enter on a keyboard sends focus to `<body>`, a screen reader restarts from the top, reaching the panel's "close" button takes 12 more Tabs, and closing the panel drops focus to `body` again. The first three viewport stages stay fully green | `Enter` is keydown → click → keyup. Setting `disabled` inside click makes the element stop being a focus target, so the browser returns focus to the document root and the trailing keyup has no receiver. A programmatic `.click()` has no trailing keyup, so the defect never reproduced and every existing test was green | Re-entry is guarded by a boolean plus `aria-disabled` (semantics only, focusability intact); the panel gains `tabindex="-1"` and gets `panel.focus()` after the check completes; closing hands focus back to the trigger. The criterion became stage 5 of `viewport-check.mjs`, using real key events plus a full `focusin`/`focusout` trace |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
@@ -3765,6 +3768,82 @@ The first three stages did not regress in the same run: horizontal overflow 0px 
 **⑨ Eleven new guards** (`console/test/viewport-check.test.mjs`, 23 → 34): `judgeKeyboardFocus` passes on healthy data; each of the two `body` moments is named separately; a hidden region and a missing focus ring both fail; the post-close landing spot must be the trigger button; a panel with 0 nodes fails as "no-op"; more than 2 Tabs inside the panel fails; the verdict must feed the `ok` result of `runViewportCheck`; the product must not use `button.disabled =`; `closeContractPanel` must hand focus back; the panel must carry `tabindex="-1"` plus `role`/`aria-label`; `.panel:focus` must have a visible substitute marker.
 
 **⑩ Still unverified / not handled**: (a) **Chrome only** — whether Safari / Firefox implement "a disabled element loses focus" identically is untested; (b) the history-row "replay" focus chain was not measured separately this round — it also resets the panel, but goes through SSE rather than fetch; (c) the actual announcement order of a screen reader was not listened to by a human, only the presence of `role` / `aria-label` / `aria-busy` was checked statically; (d) putting `aria-busy` on a button is debatable — the spec prefers the **container being updated**; this round treats it as "the button itself is busy".
+
+
+### 15.19 "Exists and is non-empty" does not mean "wine can read it" (measured 2026-11-21, fixed)
+
+**This section is the layer below 15.15.** 15.15 established that a structurally half-broken prefix must fail at packaging time, and the fix was to make the packaging check reuse `validate_prefix()`. But that check itself only looked at whether the `.reg` files **exist and are non-empty** — so as long as the bytes were there and the size was not zero, the content could be anything. This section extends the criterion to content, and in doing so found that two pieces of code had been writing registry data in a format wine does not accept.
+
+**① The defect: 35 bytes of plain text passed as healthy.** Building a healthy prefix and replacing `system.reg` with a single line, `this is not a registry` (35 bytes):
+
+```
+validate_prefix(...)     ->  []                          # judged healthy
+wine64 cmd /c "echo hi"  ->  rc=1
+    system.reg is not a valid registry file
+    wine: '...' is a 32-bit installation, it cannot support 64-bit applications.
+```
+
+Check 7 on the packaging side, `prefix.valid`, calls exactly this function, so such a prefix gets packed into a `.app` and shipped — the user receives "packaging succeeded, double-click does nothing", the same shape as 15.15, with the entry point moved from structure to content.
+
+**② The three files differ in fatality and must be judged separately.** Nine malformed files were run against real wine (wine-11.21), recorded on two axes — whether the process boots and whether writes persist:
+
+| File | Wrong first line | Missing `#arch=win64` |
+|---|---|---|
+| `system.reg` | `rc=1`, will not boot | **`rc=1`**, reports "32-bit installation", while the file is syntactically valid |
+| `user.reg` | **`rc=0`, but HKCU writes are silently lost** | `rc=0`, no effect |
+| `userdef.reg` | `rc=0`, only new-user defaults are lost | `rc=0`, no effect |
+
+The middle row is the nastiest: with `user.reg` replaced by `garbage`, `reg add HKCU\...` **returns 0**, the immediately following `reg query` cannot find the key just written, and `user.reg` shrinks from 119640 bytes to 8. The installer therefore "succeeds", the registered paths and serial numbers never reach disk, and the second launch fails — **with a clean exit code and clean stderr**.
+
+So the first-line check runs on all three files, while `#arch` applies only to `system.reg`. Requiring arch on the other two would be a false positive (measured: they work fine without it).
+
+**③ Measured boundaries for the first line and arch** (all measured, not copied from documentation):
+
+| Form | Result |
+|---|---|
+| `REGEDIT4` / `Version 1` / `Version 3` / a leading blank line | all `not a valid registry file`, `rc=1` |
+| `Windows Registry Editor Version 5.00` | also `rc=1` — that is the **export** format of `regedit /E`, not the on-disk format inside a prefix |
+| Missing `#arch=win64` | `rc=1`, reports "32-bit installation" |
+| `#arch=win32` / `#ARCH=win64` | the same error → exact match, wrong case is equivalent to absent |
+| arch on line 3 / line 6 / after a blank line / CRLF / no trailing newline | all `rc=0` → position does not matter |
+| A half-written `"a"="b` inside a section (`Malformed value`) | **`rc=0`**, the program runs normally → one value lost, not a reason to call the prefix unhealthy |
+
+That last row is why the check must **not** validate full syntax: doing so would turn "one value lost" into "the prefix is broken".
+
+**④ Two pieces of code had been writing a format wine rejects.** Both asserted "wine's .reg is UTF-16LE + BOM", a claim that only holds for files **exported** by `regedit /E`:
+
+- `prefix._write_placeholder_regs`: the placeholder written when a base layer ships no `.reg` files was UTF-16LE+BOM and had **no `#arch`**. Measured `rc=1` with `system.reg is not a valid registry file` — **the placeholder itself was broken**, and its entire purpose is to let wine boot. After switching to plain ASCII plus `#arch=win64` it returned `rc=0` and wine expanded the placeholder into a complete 200 KB registry on its own.
+- `install.RESTART_SUPPRESS_REG`: it used wine's **internal** storage format (`WINE REGISTRY Version 2` with relative key paths `[Software\\...]`), while `regedit /S` only accepts the **Windows export** format. Measured: feeding it the internal format yields **exit code 0, empty stderr, zero keys written**. Three variants against the same prefix and the same command:
+
+| File content | `reg query` after import |
+|---|---|
+| `Windows Registry Editor Version 5.00` + `[HKEY_CURRENT_USER\...]` | key present, all three dwords in place |
+| `WINE REGISTRY Version 2` + relative `[Software\...]` | key absent |
+| `WINE REGISTRY Version 2` + `[HKEY_CURRENT_USER\...]` | key absent |
+
+In other words, "restart suppression" had never taken effect, while the log kept saying `reboot.suppressed`. After switching to the export format all three values were measured to land.
+
+**⑤ Four fixes, each covering one aspect.**
+
+- `prefix/__init__.py` gains the constants `REG_HEADER` / `REG_ARCH_64` and `_check_reg_file()`: it reads the first 64 KB and checks the first line plus (for `system.reg` only) arch. `validate_prefix` calls it after the non-empty check.
+- `prefix._write_placeholder_regs`: plain ASCII plus the arch line.
+- `install.RESTART_SUPPRESS_REG`: the Windows export format with absolute key paths.
+- `install.suppress_restart`: after the import it queries `RESTART_POLICY_KEY` and logs `WARN reboot.suppress_ineffective` when absent. **`regedit /S` does not fail on a malformed file, so "no exception thrown" proves nothing** — at the very least the log should tell the truth.
+
+**⑥ The test fixtures were loose in the same way (the other half of why the defect stayed hidden).** Both `make_fake_layer()` and `test_phase3.make_app()` wrote UTF-16LE+BOM without arch, so **the fixtures could not produce a prefix that even boots**. The check only looked at "exists and non-empty", the fixtures happened to pass, and both sides were loose together — hence permanently green. Both fixtures now build according to the new criterion, importing the constants from `wepack.prefix` rather than each carrying its own literal.
+
+**⑦ Eleven new tests** (`test_phase2.py`): `TestValidatePrefixRegContent` with 9 (plain-text system.reg / missing arch / `#arch=win32` / UTF-16 BOM / broken user.reg / broken userdef.reg are all flagged; the two user files without arch are **not** flagged, four arch positions are **not** false-flagged, and `Malformed value` is **not** false-flagged — the last three guard against over-correction); `TestRestartSuppressionTakesEffect` with 2 (a fake wine whose `reg query` reports not-found must produce WARN rather than INFO; a query returning `NoClose` must produce INFO, guarding the other direction). In addition, `test_placeholder_regs_written_when_missing` and `test_reg_file_is_utf16` — two old tests that had **baked the wrong format into their assertions** — were corrected.
+
+**⑧ Negative verification (old implementations re-injected).**
+
+| Break | Result |
+|---|---|
+| Remove the `_check_reg_file` call from `validate_prefix` | 6 tests turn red (plain text / missing arch / win32 / BOM / user / userdef) |
+| Revert `_write_placeholder_regs` to UTF-16LE+BOM without arch | the placeholder test turns red |
+| Revert `RESTART_SUPPRESS_REG` to `WINE REGISTRY Version 2` | the format assertion turns red |
+| Drop the post-import query and always log INFO | "ineffective must log WARN" turns red |
+
+**⑨ Still unverified / not handled**: (a) **wine-11.21 only** — how other versions tolerate the first line and arch is untested; (b) the criterion covers "wine can read it in", **not "the registry content is semantically correct"** — a key whose value was replaced with garbage still boots wine, and only running the actual application would surface it; (c) 32-bit prefixes (`WINEARCH=win32`) are unsupported in this repository, so `#arch=win32` is always an error; supporting them would require changing that rule; (d) whether `regedit /S`'s silent failure affects other `.reg` import paths was not surveyed systematically — only `suppress_restart` was examined.
 
 
 ---

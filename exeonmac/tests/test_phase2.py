@@ -32,6 +32,7 @@ from wepack.install import (  # noqa: E402
     InstallRun, silent_args_for, write_install_log,
 )
 from wepack.models import Detection, InstallerKind  # noqa: E402
+from wepack import prefix as prefix_mod  # noqa: E402
 from wepack.prefix import (  # noqa: E402
     clone_tree, create_prefix, free_space, prefix_disk_usage, validate_prefix,
 )
@@ -96,8 +97,32 @@ def make_nsis_installer() -> bytes:
     return build_min_pe(machine=0x14C, overlay=build_nsis_overlay())
 
 
+def valid_reg_bytes(*, arch: str = "win64") -> bytes:
+    """造一份 wine 真能接受的 prefix 注册表内容（纯 ASCII、带 arch 行）。
+
+    判据来自 `wepack.prefix.REG_HEADER` / `REG_ARCH_64`，不在这里另写字面串 ——
+    夹具与被测代码各背一份常量，改一处就会漂。
+    """
+    body = f"{prefix_mod.REG_HEADER}\n;; test fixture\n"
+    if arch:
+        body += f"#arch={arch}\n"
+    return body.encode("ascii")
+
+
 def make_fake_layer(root: Path, name: str = "base") -> Path:
-    """造一个结构合法的假 base 层（含 system32 与注册表）。"""
+    """造一个结构合法的假 base 层（含 system32 与注册表）。
+
+    ## 注册表为什么不能随便写
+
+    早先这里写的是 `b"\\xff\\xfe" + "WINE REGISTRY Version 2\\n".encode("utf-16-le")`
+    —— 带 BOM 的 UTF-16LE、且没有 `#arch` 行。那个文件 wine 直接判
+    `system.reg is not a valid registry file` 加「32-bit installation」、
+    `rc=1`，也就是**夹具造出的层自己就跑不起来**。校验器当时只看
+    「存在且非空」，两边一起宽松，缺陷就永远绿着。
+
+    现在按 `prefix.validate_prefix` 判据造齐：首行是
+    `WINE REGISTRY Version 2`、纯 ASCII、`system.reg` 带 `#arch=win64`。
+    """
     layer = root / name
     system32 = layer / "drive_c" / "windows" / "system32"
     system32.mkdir(parents=True)
@@ -105,8 +130,7 @@ def make_fake_layer(root: Path, name: str = "base") -> Path:
     (system32 / "user32.dll").write_bytes(b"MZ" + b"\0" * 100)
     (layer / "drive_c" / "windows" / "Fonts").mkdir(parents=True)
     for reg in ("system.reg", "user.reg", "userdef.reg"):
-        header = "WINE REGISTRY Version 2\n"
-        (layer / reg).write_bytes(b"\xff\xfe" + header.encode("utf-16-le"))
+        (layer / reg).write_bytes(valid_reg_bytes())
     return layer
 
 
@@ -505,8 +529,12 @@ class TestCreatePrefix(IsolatedWexe):
             path = private / reg
             self.assertTrue(path.is_file())
             self.assertGreater(path.stat().st_size, 0)
-            # wine 的 .reg 必须是 UTF-16LE + BOM
-            self.assertEqual(path.read_bytes()[:2], b"\xff\xfe")
+            # 占位必须是纯 ASCII 且带 arch 行 —— 早先写的是 UTF-16LE+BOM
+            # 且无 arch，wine 实测判「not a valid registry file」+「32 位安装」。
+            raw = path.read_bytes()
+            self.assertEqual(raw[:2], b"WI", "占位注册表不能带 UTF-16 BOM")
+            self.assertTrue(raw.decode("ascii").startswith(prefix_mod.REG_HEADER))
+            self.assertIn(prefix_mod.REG_ARCH_64, raw.decode("ascii"))
 
     def test_layer_file_copy_failure_is_not_reported_as_success(self) -> None:
         """合并层时复制失败必须让 mount 失败，不能悄悄少文件。
@@ -582,6 +610,128 @@ class TestValidatePrefix(IsolatedWexe):
         make_fake_layer(wexe_paths.layers_root(), "base")
         private = self.tmp / "private"
         create_prefix(private, layers=["base"])
+        self.assertEqual(validate_prefix(private), [])
+
+
+class TestValidatePrefixRegContent(IsolatedWexe):
+    """注册表「存在且非空」不等于「wine 能读」。
+
+    ## 这条锁住的是什么
+
+    早先 `validate_prefix` 对 `.reg` 只判 `is_file()` 与 `st_size > 0`。
+    把 `system.reg` 写成一行 35 字节的纯文本，校验返回 `[]`（健康），
+    而同一份 prefix 交给真实 wine：
+
+        wine64 cmd /c "echo hi"  ->  rc=1
+            system.reg is not a valid registry file
+            wine: '...' is a 32-bit installation, it cannot support 64-bit applications.
+
+    打包侧第 7 项 `prefix.valid` 调的就是这个函数，所以这种 prefix 会被
+    打成 `.app` 放行 —— 用户拿到「打包成功、双击毫无反应」的产物。
+
+    ## 三个文件的致命程度不同（逐个跑真实 wine 实测，2026-11-21）
+
+    - `system.reg` 首行不对 → rc=1 起不来
+    - `system.reg` 缺 `#arch=win64` → rc=1，报「32-bit installation」
+    - `user.reg` 首行不对 → **rc=0 但 HKCU 写入静默丢失**（`reg add` 返 0、
+      `reg query` 查不到，`user.reg` 从 119640 掉回 8 字节）
+    - `userdef.reg` 首行不对 → rc=0，仅新用户默认值丢失
+
+    所以首行检查三个文件都做，`#arch` 只对 `system.reg` 做 —— 对另外两个
+    要求 arch 会误报（实测它们缺 arch 完全无影响）。
+    """
+
+    def _healthy(self) -> Path:
+        make_fake_layer(wexe_paths.layers_root(), "base")
+        private = self.tmp / "private"
+        create_prefix(private, layers=["base"])
+        return private
+
+    def test_plain_text_system_reg_is_flagged(self) -> None:
+        private = self._healthy()
+        (private / "system.reg").write_bytes(b"this is not a registry\n")
+        problems = validate_prefix(private)
+        self.assertTrue(
+            any("system.reg" in p and "首行" in p for p in problems),
+            f"纯文本 system.reg 未被判出：{problems}")
+
+    def test_missing_arch_in_system_reg_is_flagged(self) -> None:
+        """缺 `#arch=win64` 时 wine 判「32 位安装」，语法却完全合法。"""
+        private = self._healthy()
+        (private / "system.reg").write_bytes(
+            f"{prefix_mod.REG_HEADER}\n;; no arch\n\n".encode("ascii"))
+        problems = validate_prefix(private)
+        self.assertTrue(
+            any("system.reg" in p and "arch" in p for p in problems),
+            f"缺 arch 的 system.reg 未被判出：{problems}")
+
+    def test_wrong_arch_value_is_flagged(self) -> None:
+        """`#arch=win32` 与大小写不符都等效于「没有」——精确匹配。"""
+        private = self._healthy()
+        (private / "system.reg").write_bytes(
+            f"{prefix_mod.REG_HEADER}\n#arch=win32\n".encode("ascii"))
+        self.assertTrue(validate_prefix(private))
+
+    def test_utf16_bom_system_reg_is_flagged(self) -> None:
+        """带 BOM 的 UTF-16LE 曾被当成「正确格式」，实测 wine 拒收。"""
+        private = self._healthy()
+        body = f"{prefix_mod.REG_HEADER}\n{prefix_mod.REG_ARCH_64}\n"
+        (private / "system.reg").write_bytes(
+            b"\xff\xfe" + body.encode("utf-16-le"))
+        problems = validate_prefix(private)
+        self.assertTrue(
+            any("system.reg" in p for p in problems),
+            f"UTF-16 BOM 的 system.reg 未被判出：{problems}")
+
+    def test_broken_user_reg_is_flagged(self) -> None:
+        """user.reg 坏掉时进程不报错，只有 HKCU 写入悄悄丢失。"""
+        private = self._healthy()
+        (private / "user.reg").write_bytes(b"garbage\n")
+        problems = validate_prefix(private)
+        self.assertTrue(
+            any("user.reg" in p for p in problems),
+            f"损坏的 user.reg 未被判出：{problems}")
+
+    def test_broken_userdef_reg_is_flagged(self) -> None:
+        private = self._healthy()
+        (private / "userdef.reg").write_bytes(b"garbage\n")
+        problems = validate_prefix(private)
+        self.assertTrue(any("userdef.reg" in p for p in problems))
+
+    def test_user_reg_without_arch_is_not_flagged(self) -> None:
+        """防矫枉过正：`#arch` 只有 system.reg 里的算数。
+
+        实测 system.reg 写 win64、user.reg / userdef.reg 缺 arch，
+        `rc=0` 且 HKCU 写入正常落盘 —— 对它们要求 arch 是误报。
+        """
+        private = self._healthy()
+        no_arch = f"{prefix_mod.REG_HEADER}\n;; no arch\n\n".encode("ascii")
+        (private / "user.reg").write_bytes(no_arch)
+        (private / "userdef.reg").write_bytes(no_arch)
+        self.assertEqual(validate_prefix(private), [])
+
+    def test_arch_line_position_does_not_matter(self) -> None:
+        """实测 arch 在第 3 行、第 6 行、空行之后、CRLF 均可。"""
+        private = self._healthy()
+        for body in (
+            f"{prefix_mod.REG_HEADER}\n;; c\n{prefix_mod.REG_ARCH_64}\n\n",
+            f"{prefix_mod.REG_HEADER}\n;; a\n;; b\n;; c\n;; d\n{prefix_mod.REG_ARCH_64}\n",
+            f"{prefix_mod.REG_HEADER}\n\n{prefix_mod.REG_ARCH_64}\n\n",
+            f"{prefix_mod.REG_HEADER}\r\n{prefix_mod.REG_ARCH_64}\r\n",
+        ):
+            (private / "system.reg").write_bytes(body.encode("ascii"))
+            self.assertEqual(validate_prefix(private), [], f"误报：{body!r}")
+
+    def test_malformed_value_is_not_flagged(self) -> None:
+        """防矫枉过正：section 里的语法错误只会丢一个值，rc 仍是 0。
+
+        实测 `[Software\\X]` 后跟半行 `"a"="b` → wine 报 `Malformed value`，
+        但 `cmd /c echo hi` 照常 rc=0。把它判成 prefix 不健康会误拦。
+        """
+        private = self._healthy()
+        (private / "system.reg").write_bytes(
+            (f"{prefix_mod.REG_HEADER}\n{prefix_mod.REG_ARCH_64}\n\n"
+             '[Software\\\\Test]\n"a"="b').encode("ascii"))
         self.assertEqual(validate_prefix(private), [])
 
 
@@ -1113,7 +1263,95 @@ class TestRestartSuppression(IsolatedWexe):
         reg = suppress_restart(private)
         self.assertTrue(reg.is_file())
         self.assertEqual(reg.read_bytes()[:2], b"\xff\xfe")
-        self.assertIn("WINE REGISTRY", reg.read_bytes().decode("utf-16-le"))
+        # ## 这条断言曾经锁住了一个错误格式
+        #
+        # 早先这里断言「内容含 WINE REGISTRY」。但 `regedit /S` 只认
+        # Windows 导出格式（`Windows Registry Editor Version 5.00`），
+        # 喂它 wine 内部格式**退出码 0、stderr 空、一个键都不写**。
+        # 于是断言越正确，缺陷越稳固。现在改断言真实生效的格式，
+        # 并核对绝对键路径（相对路径 `[Software\\...]` 同样不被接受）。
+        text = reg.read_bytes().decode("utf-16-le")
+        self.assertIn("Windows Registry Editor Version 5.00", text)
+        self.assertIn("HKEY_CURRENT_USER", text)
+        self.assertNotIn("WINE REGISTRY", text)
+
+
+class TestRestartSuppressionTakesEffect(IsolatedWexe):
+    """拦截未生效时必须留下 WARN，不能只写 INFO 就算完成。
+
+    ## 为什么需要这一层
+
+    `regedit /S` 对格式错误的文件不报错，所以「命令跑完没抛异常」不能证明
+    拦截生效。早先 `suppress_restart` 无条件写 `reboot.suppressed`，
+    而用旧格式时那个键从来没写进去过 —— 日志在说谎，且这谎言一直绿着。
+    这里用一个只把 `regedit` 当成功、`reg query` 说查不到的假 wine 复现，
+    断言落下来的是 WARN 而不是 INFO。
+    """
+
+    def _make_fake_wine_split(self) -> Path:
+        """假 wine：regedit 退 0；reg query 报找不到键（退 1）。"""
+        bin_dir = wexe_paths.wine_root() / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        script = bin_dir / "wine64"
+        script.write_text(
+            "#!/bin/sh\n"
+            'for a in "$@"; do case "$a" in reg) found=1;; esac; done\n'
+            'if [ "$1" = "reg" ]; then\n'
+            '  echo "reg: Unable to find the specified registry key" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return script
+
+    def test_ineffective_import_logs_warning(self) -> None:
+        from wepack.install import suppress_restart
+        from wepack.install import _Log
+
+        self._make_fake_wine_split()
+        make_fake_layer(wexe_paths.layers_root(), "base")
+        private = self.tmp / "private"
+        create_prefix(private, layers=["base"])
+
+        log = _Log(None)
+        suppress_restart(private, log)
+
+        joined = "\n".join(log.lines)
+        self.assertIn("reboot.suppress_ineffective", joined)
+        self.assertNotIn("reboot.suppressed", joined)
+
+    def test_effective_import_logs_info(self) -> None:
+        """回查得到 NoClose 时必须走 INFO —— 防矫枉过正。"""
+        from wepack.install import suppress_restart
+        from wepack.install import _Log
+
+        bin_dir = wexe_paths.wine_root() / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        script = bin_dir / "wine64"
+        script.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "reg" ]; then\n'
+            "  echo 'HKEY_CURRENT_USER\\\\\\\\Software\\\\\\\\...\\\\\\\\Explorer'\n"
+            "  echo '    NoClose    REG_DWORD    0x0'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        make_fake_layer(wexe_paths.layers_root(), "base")
+        private = self.tmp / "private"
+        create_prefix(private, layers=["base"])
+
+        log = _Log(None)
+        suppress_restart(private, log)
+
+        joined = "\n".join(log.lines)
+        self.assertIn("reboot.suppressed", joined)
+        self.assertNotIn("reboot.suppress_ineffective", joined)
 
 
 # --------------------------------------------------------------------------
@@ -1207,7 +1445,7 @@ class TestEntryDiscovery(IsolatedWexe):
         (private / "dosdevices").mkdir()
         os.symlink("../drive_c", private / "dosdevices" / "c:")
         for reg in ("system.reg", "user.reg", "userdef.reg"):
-            (private / reg).write_bytes(b"\xff\xfe" + "WINE REGISTRY Version 2\n".encode("utf-16-le"))
+            (private / reg).write_bytes(valid_reg_bytes())
         return private
 
     def _write_pe(self, path: Path, *, gui: bool = True) -> None:

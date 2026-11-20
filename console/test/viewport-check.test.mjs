@@ -33,6 +33,23 @@ const ROOT = join(HERE, '..')
 const script = readFileSync(join(ROOT, 'scripts', 'viewport-check.mjs'), 'utf8')
 const css = readFileSync(join(ROOT, 'web', 'style.css'), 'utf8')
 
+/**
+ * 去掉注释后的脚本源码。
+ *
+ * ## 为什么非要这一步（本轮实测踩的坑）
+ *
+ * 静态守卫最初写成 `assert.match(script, /Emulation\.setTouchEmulationEnabled/u)`。
+ * 把代码里那一行**换成无效的 `setEmulatedMedia`** 之后，测试仍 234/234 全绿 ——
+ * 因为上面那段注释里正好解释着「只有 `Emulation.setTouchEmulationEnabled`
+ * 能让它成立」。断言被注释满足了，等于什么都没守。
+ *
+ * 这与第 1 轮附录 C 的坑同形：**改动/检查必须落在真正生效的那一小段里**。
+ * 所以这里是「拿掉注释、再查代码」。
+ */
+const scriptCode = script
+  .replace(/\/\*[\s\S]*?\*\//gu, '')
+  .replace(/^\s*\/\/.*$/gmu, '')
+
 describe('视口检查脚本', () => {
   test('压测串是 139 个字符，与 style.css 记录的实测值一致', async () => {
     /*
@@ -145,6 +162,99 @@ describe('CDP 等待必须有超时（防静默挂死）', () => {
       '降级后要带 fallbackReason，否则读报告的人不知道换了运行方式')
     assert.match(script, /注：本次以 --no-sandbox 运行/u,
       '人读输出要明写降级，避免被误认为默认行为')
+  })
+})
+
+describe('触控目标尺寸', () => {
+  /*
+   * ## 这组守的是什么
+   *
+   * 2026-11-20 实测：375px 下 12 个可点元素的高度是 **24–29px**，一个都
+   * 不到 44px。鼠标点得动，手指点不准 —— 四个方向卡片的按钮并排，「自检」
+   * 与「构建」相距不到 30px，点错就是真的开始一次构建。
+   *
+   * 这类缺陷不会出现在功能测试里（功能全对），也不会被用户报告（他们只会
+   * 觉得「这看板在手机上不好用」）。所以用两条线守：运行时由
+   * `viewport-check.mjs` 真量真断言，静态层在这里把 CSS 与判据绑住。
+   */
+
+  test('最小触控目标是 44px，与 Apple HIG 对齐', async () => {
+    const { MIN_TOUCH_TARGET } = await import('../scripts/viewport-check.mjs')
+    assert.equal(MIN_TOUCH_TARGET, 44,
+      'HIG 的最小点击目标是 44×44pt；改这个数要有依据')
+  })
+
+  test('放大规则只在 pointer: coarse 下生效，不能全局放大', () => {
+    /*
+     * 全局把按钮撑到 44px 会让桌面端变松散 —— 鼠标精度远高于手指，
+     * 紧凑的终端风格看板正是这个工具的用户习惯的密度。
+     *
+     * 更关键的是：不能用视口宽度判断。1440px 的触屏笔记本、桌面浏览器里
+     * 打开的 375px 响应式预览，都会让宽度判据给出与实际输入方式相反的
+     * 答案。`pointer` 描述的是输入设备本身。
+     */
+    const block = /@media \(pointer: coarse\) \{([\s\S]*?)\n\}/u.exec(css)
+    assert.notEqual(block, null, '应有 @media (pointer: coarse) 分组')
+
+    const body = block[1]
+    assert.match(body, /\.btn[\s\S]*?min-height:\s*44px/u,
+      '粗指针下 .btn 要有 min-height: 44px')
+    assert.match(body, /\.btn[\s\S]*?min-width:\s*44px/u,
+      '粗指针下 .btn 要有 min-width: 44px')
+    assert.match(body, /\.history-row[\s\S]{0,80}?min-height:\s*44px/u,
+      '历史行整行可点，也要够高')
+    assert.match(body, /summary[\s\S]{0,200}?min-height:\s*44px/u,
+      '两个 summary 是折叠开关，也要够高')
+
+    /*
+     * 反向断言：`.btn` 的基础规则里不许有 44px。若哪天有人「顺手」把它
+     * 写进基础规则，全局都会变大，这条会红。
+     */
+    const baseBtn = /^\.btn \{([\s\S]*?)\n\}/mu.exec(css)
+    assert.notEqual(baseBtn, null, '应有 .btn 基础规则')
+    assert.doesNotMatch(baseBtn[1], /min-(height|width):\s*44px/u,
+      '.btn 基础规则里不该有 44px，放大只应在粗指针下发生')
+  })
+
+  test('脚本真的激活了粗指针，而非只按宽度跳过', () => {
+    /*
+     * `Emulation.setEmulatedMedia` 带 `{name:'pointer', value:'coarse'}`
+     * **无效** —— 实测 `matchMedia('(pointer: coarse)')` 仍回 false。
+     * 只有 `setTouchEmulationEnabled` 能让它成立。
+     *
+     * 这是本轮实测踩到的第一个坑，写成断言防止下一轮又去试错。
+     *
+     * 注意查的是 `scriptCode`（去注释后）而不是 `script`：两者的注释里
+     * 都提到了这些 API 名，直接查 `script` 会被注释满足，空转。
+     */
+    assert.match(scriptCode, /Emulation\.setTouchEmulationEnabled/u,
+      '要激活触控模拟，否则 pointer: coarse 永远不成立、整节空转')
+    assert.doesNotMatch(scriptCode, /Emulation\.setEmulatedMedia/u,
+      'setEmulatedMedia 改不了 pointer 能力（实测无效），别再用它')
+    assert.match(scriptCode, /pointerCoarse/u,
+      '要记录粗指针是否真的生效，否则「0 个不达标」可能是没测到')
+  })
+
+  test('触控段同时量溢出，防止「修好触控、弄坏布局」', () => {
+    /*
+     * 按钮从 24px 撑到 44px 会变宽。`.dir-actions` 是 flex-wrap，正常情况
+     * 下只会换行；但若哪天改成 nowrap 或去掉 wrap，就会撑破卡片 ——
+     * 而那时基线档（细指针）仍是 0 处溢出，发现不了。
+     */
+    assert.match(scriptCode, /touchOverflow/u,
+      '触控档必须同时跑溢出测量')
+    assert.match(scriptCode, /row\.touchOverflow\.offenders\.length === 0/u,
+      '触控档的溢出要进最终判定，不能只量不判')
+  })
+
+  test('粗指针没生效时直接判失败，不留「静默通过」的口子', () => {
+    /*
+     * 粗指针失效时按钮仍是 24px，`undersized` 会非空 —— 但那是**间接**
+     * 失败。若哪天 `MIN_TOUCH_TARGET` 被调小，或页面碰巧有个别大按钮，
+     * 这一节就会静默通过。所以要直接断言模拟生效。
+     */
+    assert.match(scriptCode, /row\.touch\.pointerCoarse === true/u,
+      '模拟没生效时必须判失败，否则整节是空转')
   })
 })
 

@@ -2405,10 +2405,10 @@ Performance in each direction is determined by its foundation; this project only
 | exeonmac | 461 | about 2m30s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
-| console | 230 | about 19 seconds | |
+| console | 235 | about 19 seconds | |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1329** | — | See "0 skipped repository-wide" below |
+| **Total** | **1334** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3578,6 +3578,61 @@ Exit code 7 = `VERIFY_FAILED`, matching `contracts/exit-codes.json`.
 | `package --json` single document on failure | `test_phase6.TestPackageJsonFailureContract` | stdout contract | "emit then raise" injected → **2 red**, 8/8 green after restore |
 
 **⑨ Still unverified**: this section proves structural damage is blocked. **Software-level corruption where the prefix structure is intact but registry contents are half-written (e.g. an installer killed midway) can still only be found by actually running wine** — `validate_prefix` checks existence and non-emptiness, not content validity. Not over-engineered here; recorded as-is.
+
+### 15.16 Touch targets are only 24px: a mouse can hit them, a finger cannot (measured 2026-11-20, fixed)
+
+**The defect recorded here is not functional: every button works, the whole automated suite is green, and a mouse user sees nothing wrong.**
+
+**① How it surfaced.** The optimisation loop entered from the "multi-device adaptation" angle, with the question narrowed to "the three viewports only verify no-overflow, not touch-target size". Using CDP's `Emulation.setTouchEmulationEnabled` to emulate a coarse-pointer device, the hit area of every clickable element was measured at all three viewports:
+
+| Viewport | Clickable elements | Measured heights | Reaching 44px |
+|---|---|---|---|
+| 375 | 12 | 24 / 29px (only two values) | **0** |
+| 768 | 12 | 24 / 29px | **0** |
+| 1440 | 12 | 24 / 29px | **0** |
+
+The narrowest is `exeonmac`'s "层" (layers) button at **29×24px**. The four direction cards' buttons sit side by side, with "自检" (doctor) and "构建" (build) less than 30px apart — aiming for doctor and hitting build actually **starts a build**. This is not "slightly awkward"; it **triggers a real action by accident**.
+
+**② Why not just enlarge everything.** This tool's users work in a terminal all day; the dashboard's density is exactly why it was designed that way. On desktop, growing buttons from 24px to 44px makes four buttons in one direction card take an entire screen. Mouse pointing precision is far higher than a finger's, so it does not need this.
+
+**③ Nor can it be decided by viewport width.** "375px = phone = finger" is wrong: a 1440px touch laptop, or a 375px responsive preview opened in a desktop browser, both make a width-based test give the opposite answer to the actual input method. The CSS side uses `@media (pointer: coarse)` — it describes **the input device itself**.
+
+**④ The fix (`console/web/style.css`, 62 lines added).**
+
+```css
+@media (pointer: coarse) {
+  .btn { min-width: 44px; min-height: 44px; }
+  .dir-actions .btn { min-width: 44px; min-height: 44px; padding: 6px 10px; }
+  .checks-wrap > summary, .log-wrap > summary { min-height: 44px; display: flex; align-items: center; }
+  .history-row { min-height: 44px; align-items: center; }
+}
+```
+
+44px comes from Apple HIG's minimum hit target (44×44pt); Material specifies 48dp, so 44 aligns with HIG. `min-*` is used rather than changing `padding`: `min-*` only declares a lower bound, so elements already taller are not squashed while short ones are raised to 44px — both hold.
+
+**⑤ Measured after the fix (same machine, same script).**
+
+| Pointer type | Height of the 12 clickable elements | Below 44px |
+|---|---|---|
+| Coarse (finger, emulated) | all 44px | **0** |
+| Fine (mouse, default) | still 24 / 29px | 12 (**intentional**) |
+
+**⑥ The verdict lives in the script, not in someone's eyes.** `console/scripts/viewport-check.mjs` went from two measurement passes to three: baseline, stress, and **touch**. The third activates `setTouchEmulationEnabled` first, then measures overflow and hit areas together — the order matters: if the widened buttons burst their container, that must be caught in the same pass, otherwise "fixed touch targets, broke the layout" becomes the next regression.
+
+**⑦ Four negative verifications, all effective.**
+
+| Breakage | Result |
+|---|---|
+| Remove the whole `@media (pointer: coarse)` block | 15/15 undersized at each viewport, exit code **1**; 1 static guard red |
+| Keep `min-height`, drop `min-width` | The "层" button at 33×44px is caught; exit code **1** |
+| Put `44px` into the base `.btn` rule (global enlargement) | Static guard "base rule must not contain 44px" goes red |
+| Swap `setTouchEmulationEnabled` for `setEmulatedMedia` | 1 static guard red (see ⑧) |
+
+**⑧ A trap this round set for itself (worth recording): the static guard was satisfied by a comment.** The first version read `assert.match(script, /Emulation\.setTouchEmulationEnabled/u)`. After **replacing that line in the code with the ineffective `setEmulatedMedia`**, the suite stayed green at 234/234 — because the script's own comments happen to explain that very API name. The assertion scanned the whole file, and comments count as content. Fix: strip comments before asserting, plus a reverse assertion `doesNotMatch(scriptCode, /setEmulatedMedia/)`. Same shape as the Appendix C trap in round 1: **the check must land on the segment that actually takes effect**.
+
+**⑨ A silent hole was also plugged.** If coarse pointer were not active, buttons stay 24px and `undersized` would theoretically be non-empty, failing the run — but that is an **indirect** failure: shrink `MIN_TOUCH_TARGET` or have one large button on the page and the section passes silently. A direct assertion `row.touch.pointerCoarse === true` now blocks the no-op at the entrance.
+
+**⑩ Still unverified**: (a) **the targets only meet a size threshold; real-finger accuracy on a physical device is untested** — this is headless Chrome emulation, and physical DPI, anti-mistouch policies and system gesture zones all affect the actual experience; (b) **long paths wrap to 4 lines at 375px and break mid-word** (`very-/long-/directo/ry-...`), which is `overflow-wrap: anywhere` working as designed — readability could be better (a horizontal scroll container, or path truncation), but that is a different trade-off and was not changed this round; (c) `pointer: coarse` is unrecognised by very old browsers (Safari < 9), which fall back to the original size — an expected degradation, with no feature-detection shim.
 
 ---
 

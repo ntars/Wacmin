@@ -8,11 +8,21 @@
  * 脚本没有进仓库 —— 结论没有复现路径，等于没有证据。
  *
  * 这个脚本把那次测量固化下来：起一个真实的 console 服务，用真实的
- * 无头 Chrome 渲染真实页面，在三档视口下量两件事：
+ * 无头 Chrome 渲染真实页面，在三档视口下量三件事：
  *
  *   1. **基线**：页面按真实数据渲染时，有没有元素跑出容器。
  *   2. **压测**：往报告类元素里注入 139 字符的深目录路径（macOS 常见），
  *      看长串会不会撑破布局。
+ *   3. **触控**：模拟粗指针（手指）设备后，可点元素的命中区够不够大，
+ *      以及放大后的按钮有没有反过来撑破布局。
+ *
+ * ## 为什么第 3 项不能用视口宽度判断
+ *
+ * 「375px 屏 = 手机 = 手指」是错的。1440px 的触屏笔记本、桌面浏览器
+ * 里打开的 375px 响应式预览，都会让宽度判据给出与实际输入方式相反的
+ * 答案。CSS 侧用的是 `@media (pointer: coarse)` —— 它描述**输入设备
+ * 本身**，与宽度无关。所以这里也用 `Emulation.setTouchEmulationEnabled`
+ * 让 `pointer: coarse` 真的成立，而不是把宽视口跳过。
  *
  * ## 为什么必须查「被裁掉」而不只是查横向滚动条
  *
@@ -68,6 +78,19 @@ export const VIEWPORTS = [
  * 断言这个长度，改动会立刻被发现。
  */
 export const LONG_PATH = `/${'very-long-directory-name/'.repeat(3)}payload/MyApp2.app/Contents/Frameworks/Electron/runtime.tar.zst`
+
+/**
+ * 触控目标的最小边长。
+ *
+ * 44pt 取自 Apple HIG 的最小点击目标（44×44pt）；Android Material 给的是
+ * 48dp，取 44 与 HIG 对齐。手指落点误差约 7–10mm，24px（约 6.3mm）确实
+ * 会点错 —— 四个方向卡片的按钮并排时，想点「自检」点到「构建」，后果是
+ * 真的开始一次构建。
+ *
+ * 只在 `pointer: coarse` 下要求，细指针（鼠标）不受此约束：鼠标精度远
+ * 高于手指，桌面端强行撑到 44px 只会把紧凑的终端风格看板变松散。
+ */
+export const MIN_TOUCH_TARGET = 44
 
 // ---------------------------------------------------------------------------
 // 找 Chrome
@@ -343,6 +366,60 @@ function measureInPage() {
 }
 
 /**
+ * 在页面里量可点元素的命中区尺寸（会被序列化后送进浏览器执行）。
+ *
+ * ## 口径
+ *
+ * 「可点元素」取 `button` / `a[href]` / `summary` / `[role="button"]` ——
+ * 与 `a11y.test.mjs` 盯的那几类一致，也与真实交互路径一致。
+ *
+ * 只量**可见**的（宽高都非 0）：折叠的 `<details>` 内容、`hidden` 的面板
+ * 都是 0×0，算进来会制造一堆假阳性。但 `summary` 本身要算 —— 折叠状态下
+ * 它照样可点，恰恰是最需要够得着的那个。
+ *
+ * ## 为什么返回尺寸而不是只返回布尔
+ *
+ * 失败时要能说清「哪个元素、差多少像素」。只回一个 false，读报告的人还得
+ * 自己去浏览器里一个个量。
+ *
+ * @param {number} min 最小边长
+ * @returns {{pointerCoarse: boolean, min: number, total: number, undersized: object[]}}
+ */
+function measureTouchTargetsInPage(min) {
+  const describe = (element) => {
+    const cls = typeof element.className === 'string' && element.className !== ''
+      ? `.${element.className.trim().split(/\s+/u).join('.')}`
+      : ''
+    return `${element.tagName.toLowerCase()}${cls}`
+  }
+
+  const undersized = []
+  let total = 0
+  for (const element of document.querySelectorAll('button, a[href], summary, [role="button"]')) {
+    const rect = element.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) continue
+    total += 1
+    const width = Math.round(rect.width * 10) / 10
+    const height = Math.round(rect.height * 10) / 10
+    if (width < min || height < min) {
+      undersized.push({
+        element: describe(element),
+        width,
+        height,
+        text: (element.textContent ?? '').trim().slice(0, 18),
+      })
+    }
+  }
+
+  return {
+    pointerCoarse: window.matchMedia('(pointer: coarse)').matches,
+    min,
+    total,
+    undersized,
+  }
+}
+
+/**
  * 压测注入：把报告类容器填成最坏情况。
  *
  * ## 为什么必须造节点，而不是改现有元素的文字
@@ -596,7 +673,27 @@ async function measureAllViewports(ctx) {
       await new Promise((r) => { setTimeout(r, 120) })
       const stress = await evaluate(client, sessionId, measureInPage)
 
-      results.push({ viewport: viewport.name, width: viewport.width, baseline, stress })
+      /*
+       * 第三段：模拟粗指针设备。
+       *
+       * `Emulation.setTouchEmulationEnabled` 是唯一能让 `(pointer: coarse)`
+       * 真的成立的 CDP 手段 —— 实测过 `Emulation.setEmulatedMedia` 带
+       * `{name:'pointer', value:'coarse'}` 无效（`matchMedia` 仍回 false，
+       * Chrome 不支持用这个接口改指针能力）。
+       *
+       * 顺序有讲究：先激活触控再量溢出。放大后的按钮若撑破容器，必须
+       * 在这里被发现 —— 否则「修好了触控目标、弄坏了布局」会成为新的
+       * 回归。压测节点仍留在页面上，所以这一段同时覆盖「触控 + 长串」
+       * 这个最坏组合。
+       */
+      await client.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }, sessionId)
+      await new Promise((r) => { setTimeout(r, 200) })
+      const touchOverflow = await evaluate(client, sessionId, measureInPage)
+      const touch = await evaluate(client, sessionId, `(${String(measureTouchTargetsInPage)})(${String(MIN_TOUCH_TARGET)})`)
+      await client.send('Emulation.setTouchEmulationEnabled', { enabled: false }, sessionId)
+      await new Promise((r) => { setTimeout(r, 120) })
+
+      results.push({ viewport: viewport.name, width: viewport.width, baseline, stress, touch, touchOverflow })
     }
 
     return { results, noSandbox: browser.noSandbox }
@@ -643,9 +740,21 @@ export async function runViewportCheck(options = {}) {
     }
 
     const { results } = attempted
+    /*
+     * 判定里单列 `touch.pointerCoarse === true`。
+     *
+     * 粗指针没生效时，CSS 的 `@media (pointer: coarse)` 整块不解析，
+     * 按钮仍是 24px —— 理论上 `undersized` 会非空从而失败。但那是**间接**
+     * 失败：只要哪天有人把 `MIN_TOUCH_TARGET` 调小，或者页面碰巧有个别
+     * 大按钮，这一节就静默通过了。直接断言「模拟确实生效」才是把空转
+     * 堵在入口 —— 与 CSS 侧那条 `pointerCoarse` 断言各守一头。
+     */
     const ok = results.every((row) =>
       row.baseline.pageOverflow <= 0 && row.baseline.offenders.length === 0
-      && row.stress.pageOverflow <= 0 && row.stress.offenders.length === 0)
+      && row.stress.pageOverflow <= 0 && row.stress.offenders.length === 0
+      && row.touchOverflow.pageOverflow <= 0 && row.touchOverflow.offenders.length === 0
+      && row.touch.pointerCoarse === true
+      && row.touch.undersized.length === 0)
 
     return {
       ok,
@@ -693,7 +802,7 @@ function formatReport(payload) {
   const lines = []
   for (const row of payload.results) {
     lines.push(`视口 ${row.viewport}×（宽 ${String(row.width)}px）`)
-    for (const [label, data] of [['基线', row.baseline], ['压测', row.stress]]) {
+    for (const [label, data] of [['基线', row.baseline], ['压测', row.stress], ['触控', row.touchOverflow]]) {
       const overflow = data.pageOverflow > 0 ? `页面横向溢出 ${String(data.pageOverflow)}px` : '页面横向溢出 0px'
       lines.push(`  ${label}：${overflow}，越界元素 ${String(data.offenders.length)} 处`)
       for (const offender of data.offenders.slice(0, 5)) {
@@ -703,8 +812,18 @@ function formatReport(payload) {
         lines.push(`    …另有 ${String(data.offenders.length - 5)} 处`)
       }
     }
+
+    const touch = row.touch
+    const state = touch.pointerCoarse ? '粗指针已生效' : '⚠ 粗指针未生效，本节无效'
+    lines.push(`  触控目标：共 ${String(touch.total)} 个，小于 ${String(touch.min)}px 的 ${String(touch.undersized.length)} 个（${state}）`)
+    for (const bad of touch.undersized.slice(0, 5)) {
+      lines.push(`    · ${bad.element}${bad.text === '' ? '' : `「${bad.text}」`} 实测 ${String(bad.width)}×${String(bad.height)}px`)
+    }
+    if (touch.undersized.length > 5) {
+      lines.push(`    …另有 ${String(touch.undersized.length - 5)} 个`)
+    }
   }
-  lines.push(payload.ok ? '✓ 三档视口均无溢出' : '✗ 存在溢出，见上')
+  lines.push(payload.ok ? '✓ 三档视口均无溢出，触控目标均达标' : '✗ 存在溢出或触控目标过小，见上')
   return lines.join('\n')
 }
 

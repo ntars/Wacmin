@@ -647,3 +647,65 @@ html, body {
   border-color: var(--info);
   background: color-mix(in srgb, var(--info) 10%, transparent);
 }
+
+/* ── 触控目标尺寸 ──────────────────────────────────────────────────── */
+
+/*
+ * 只在**粗指针**设备上放大可点元素的命中区。
+ *
+ * ## 为什么不能统一放大
+ *
+ * 鼠标的点击精度远高于手指。桌面端把按钮从 24px 撑到 44px，会让本来就
+ * 紧凑的终端风格看板变得松散 —— 一张方向卡片里四个按钮占掉一整屏。
+ * 而手指的落点误差约 7–10mm，24px（约 6.3mm @ 375px 屏）确实会点错：
+ * 四个方向卡片的按钮并排，用户想点「自检」却打开「构建」—— 后者会真的
+ * 开始一次构建。
+ *
+ * 所以用 `pointer: coarse` 这个媒体查询开关，而不是按视口宽度判断：
+ * 视口宽度不等于输入精度。1440px 的触屏笔记本、375px 的模拟器窗口
+ * 都会让宽度判据给出错误答案，而 `pointer` 描述的是**输入设备本身**。
+ *
+ * ## 数值依据
+ *
+ * 44px 是 Apple HIG 的最小触控目标（44×44pt）。Android Material 给的是
+ * 48dp，取 44 与 HIG 对齐，也够用。
+ *
+ * ## 为什么用 min-height / min-width 而不是改 padding
+ *
+ * padding 会随字号与行高联动，改一处要在四个类上各算一遍。`min-*`
+ * 只声明下界：原本更高的元素（如结果区的下载按钮在窄屏换行后）不会被
+ * 压矮，原本矮的被撑到 44px，两条都成立。
+ *
+ * `.dir-actions` 与 `.topbar` 本身是 `flex-wrap: wrap`，按钮变宽只会
+ * 换行，不会撑破容器 —— 这条已由 `viewport-check.mjs` 在模拟粗指针
+ * 后重测溢出确认（见该脚本的输出）。
+ *
+ * `.history-row` 与两个 `<summary>` 是整行可点，它们的命中区本来就是整行
+ * 宽度，只需补高度。summary 用 flex 居中而不是靠 padding：`::before`
+ * 的三角箭头与文字在不同字号下的基线偏移不一样，flex 让两者对齐关系
+ * 由浏览器算，不靠人调像素。
+ */
+@media (pointer: coarse) {
+  .btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .dir-actions .btn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px 10px;
+  }
+
+  .checks-wrap > summary,
+  .log-wrap > summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+
+  .history-row {
+    min-height: 44px;
+    align-items: center;
+  }
+}

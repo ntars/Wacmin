@@ -24,7 +24,7 @@ Copyright (c) 2026 Ntarstudio（星玖工作室）
 | 范围 | 许可 | 依据 |
 | --- | --- | --- |
 | `contracts/` | **Apache-2.0** | 见 [`LICENSE`](./LICENSE) |
-| `console/`、`mac2win/`、`exeonmac/`、`win2mac/`、`apponwin/`、`ai/`、`docs/`、`.github/` | MIT | 同上 |
+| `console/`、`mac2win/`、`exeonmac/`、`win2mac/`、`apponwin/`、`ai/`、`.github/`、根级文档与工程配置 | MIT | 同上 |
 | 品牌名称、Logo、界面设计 | 保留所有权利 | 不随代码许可一并授予 |
 | **被封装进产物的第三方运行时** | 由最终分发者承担许可义务 | 见第四节 |
 

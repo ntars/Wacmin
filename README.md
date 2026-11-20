@@ -3805,8 +3805,11 @@ Copyright (c) 2026 Ntarstudio（星玖工作室）
 | 范围 | 许可 |
 |---|---|
 | `contracts/`（共享契约层） | **Apache-2.0** |
-| `console/` `mac2win/` `exeonmac/` `win2mac/` `apponwin/` `ai/` `docs/` | MIT |
+| `console/` `mac2win/` `exeonmac/` `win2mac/` `apponwin/` `ai/` `.github/` | MIT |
+| 根级 `README.md` `README_EN.md` `LICENSING.md` `NOTICE` 与各子项目 `package.json` `pyproject.toml` | MIT |
 | 品牌名称、Logo、界面设计 | 保留所有权利 |
+
+**默认归属**：上表未列出的本项目自研文件，一律适用根 `LICENSE`（Apache-2.0）。本仓库没有 `docs/` 目录（单文档制），逐路径路由见 [LICENSING.md](./LICENSING.md)。
 
 **为什么契约层单独升为 Apache-2.0**。`contracts/` 的读者不是本项目用户，而是想按这套契约做第三方实现的人。Apache-2.0 多给两样东西：明示专利授权（第 3 条）与 NOTICE 保留义务（第 4 条 d 项）。后者恰好是契约这类「会被到处传递」的文件最需要的。
 

@@ -10,6 +10,17 @@ Copyright (c) 2026 星玖工作室 Ntarstudio
 
 ---
 
+## 零、默认归属（先看这条）
+
+**下表未列出的、由本项目编写的文件，一律适用根 [`LICENSE`](./LICENSE)，即 Apache-2.0。**
+
+这条兜底规则是必须的。只列目录而不写默认值，克隆者面对根级 `.gitignore`、
+各子项目的 `package.json` 就无从判断归属，法律上等于没有授权。需要相反结果的
+路径，必须显式写进下表——**不存在「靠猜」的路径**。
+
+第三方与被封装进产物的运行时（Node.js、Electron、NW.js 等）不适用本兜底条款，
+按第五节处理。
+
 ## 一、分层映射
 
 | 路径 | 许可 | 说明 |
@@ -21,8 +32,13 @@ Copyright (c) 2026 星玖工作室 Ntarstudio
 | `win2mac/` | **MIT** | Windows 上打 Mac 包 |
 | `apponwin/` | **MIT** | Windows 上运行 Mac 程序 |
 | `ai/` | **MIT** | AI 接入层 |
-| `docs/` `.github/` | **MIT** | 文档与仓库配置 |
+| 根级 `README.md` `README_EN.md` `LICENSING.md` `NOTICE` `.gitignore` | **MIT** | 说明文档与仓库配置 |
+| `.github/` | **MIT** | CI 与仓库配置 |
+| 各子项目的 `package.json` `pyproject.toml` `*.schema.json` | **MIT** | 随其所属子项目；`contracts/` 内的 schema 除外（见首行） |
 | 品牌名称、Logo、界面设计 | **保留所有权利** | 不随代码许可授予 |
+
+> 本仓库**没有** `docs/` 目录：说明文档全部收敛在根级 `README.md` 与 `README_EN.md`
+> （单文档制，见第三节）。旧表把它列成 MIT，属于指向不存在路径的残留，已删除。
 
 ## 二、为什么契约层单独升为 Apache-2.0
 

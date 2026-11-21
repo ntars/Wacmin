@@ -2401,13 +2401,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 474 项 | 约 3 分 6 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、2 项导入期副作用守卫 |
+| exeonmac | 475 项 | 约 3 分 3 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）|
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1366 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1367 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3067,6 +3067,8 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 重启拦截的 `.reg` 从来没生效过 | `suppress_restart` 日志写 `reboot.suppressed`，实际一个键都没写进去；导入后 `reg query` 查不到 `NoClose` | 用 wine **内部**存储格式（`WINE REGISTRY Version 2` + 相对路径 `[Software\\...]`）喂 `regedit /S`，而它只认 **Windows 导出**格式。实测喂错格式时**退出码 0、stderr 空、零写入** —— 三组对照才切开 | 改 `Windows Registry Editor Version 5.00` + 绝对键路径；导入后回查目标键，查不到写 `WARN reboot.suppress_ineffective` 而非 INFO。`regedit /S` 静默失败，「没抛异常」不能证明生效 |
 | `package --json` 失败时 stdout 两段 JSON | `wepack package <坏包> --json` 的 stdout 是「完整 payload + main 的 error 段」两段拼接，`json.load` 抛 `Extra data: line 79`，管道交给 `jq` 也直接失败 | `cmd_package` 无条件 `_emit(payload)` 之后才 `raise VerifyFailed`。与 W-02 修过的「`build --json` 两段 JSON」同因，只是发生在单个子命令内部而非父子命令之间 | 改为先判 `report.ok`：失败时只由 `main()` 输出单一段 error（带 `message` 与 `exit_code`），详细 checks 走 stderr 与 `--report`。`raw_decode` 实测修复前段数 2 → 修复后 1；回归锁 2 项，注回旧顺序即变红 |
 | 测试模块导入即编译安装包，整类用例静默消失 | 跑单个测试类 `python3 -m unittest tests.test_phase2.TestCliPhase2` → `FAILED (errors=2)`、`RuntimeError: ISCC 编译失败（退出码 0）：`，而 detail 是**空的**；全量 `discover` 按字母序跑却一直是绿的 | `test_phase1.py` 在**模块顶层**求值 `REAL_INNO = str(fixtures.demo_inno_real() or "")`，导入即编译安装包；`test_phase2` 只为借两个纯字节构造函数就 `import tests.test_phase1`，而它的 `setUp` 已把 `WEXE_HOME` 指向临时目录并塞了一个只 `exit 0` 的假 wine → ISCC 被假 wine「跑」了、什么都没编、退出码干净 | 四个样本常量改为惰性函数（进程内缓存），四个类改用 `setUpClass` + `require_sample()` 拿不到就 `SkipTest`。装饰器在导入时求值，`setUpClass` 在用例真跑时才求值 —— 分界线就在这里。另把「退出码 0 但无产物」与「编译失败」的报错分开，让失败自己说清是哪一类。补 2 项守卫（子进程埋哨兵 + `ast` 扫模块顶层），负向验证：注回常量 → 两条全红 |
+
+| 判据写在模块顶层：导入即定论，跳过成了永久的 | `test_phase2` / `test_phase3` 顶层写 `SAMPLE_NSIS = ... demo_nsis()`，**导入这两个模块就会跑 `makensis`**；用哨兵假 `makensis` 实测 marker 出现，且失败报的正是 `makensis 编译失败（退出码 0）：`。`test_phase7_layers` 的两个 `@skipUnless(fixtures.wine_available())` 在导入时定型：`WEXE_HOME=/nonexistent` 下导入后 `__unittest_skip__` 恒为 `True` | 与 15.20 同一形态，但入口有三个：① 同一份 `SAMPLE_NSIS` 在三个文件里各写一套（违反 5.3）；② `REAL_WINE = fixtures.wine_available()` 看着无副作用，实际把结论在导入时定死；③ 装饰器参数同样在导入时求值，且挂在 `decorator_list` 上，静态扫描看不到 | 判据收进 `fixtures`（`sample_*()` / `require_sample()` / `wine_ready()`），`test_phase1` 改为同名引用，另三个文件删掉模块级常量改用 `setUpClass`；缓存键带上环境变量现值。守卫从「守一个模块」扩到全仓 6 个文件，并补扫描 `decorator_list` + 加一条扫描范围守卫（防 glob 返回空集导致全绿）。负向验证：注回模块级求值 → 静态 2 条 + 动态哨兵 → 2 项红；注回装饰器 → 1 项红 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -3928,6 +3930,89 @@ ISCC 退出码 0 但没生成产物 —— 这个 wine 什么也没做：
 
 **⑧ 仍未处理**：(a) `test_phase2` 依然 `from tests.test_phase1 import build_min_pe` —— 惰性化之后它已无副作用，但更彻底的做法是把这两个纯构造函数下沉到 `fixtures.py`，让测试模块之间不再互相导入；(b) ⑦ 表里那 3 处导入期调用待改惰性；(c) CI 只跑 `discover`（字母序），不跑单类，所以这类顺序依赖在 CI 上永远是绿的 —— 值得给 CI 加一条「单独跑每一个测试类」的作业。
 
+
+---
+
+### 15.21 「导入即定论」：判据放在模块顶层，跳过就成了永久的（2026-11-21 实测，已修）
+
+**这一节是 15.20 ⑦ 的处置。** 15.20 系统扫描出 3 处导入期调用并留作下一轮，这一节把它们全部改掉，同时发现 15.20 修得不够彻底 —— 它把「导入即编译」改成了「导入即定论」，后者更难看见。
+
+#### ① 症状：同一形态的第二副面孔
+
+15.20 修完后 `test_phase2` 里剩的是这行：
+
+```python
+REAL_WINE = fixtures.wine_available()      # 看着无副作用
+```
+
+它**确实**不跑外部工具，但它在导入那一刻就把「本机有没有 wine」这个结论定死了。实测（`WEXE_HOME=/nonexistent` 下导入）：
+
+| | `TestRealWine.__unittest_skip__` | `TestRealInstall.__unittest_skip__` |
+|---|---|---|
+| 改前（`= fixtures.wine_available()`） | **True** | **True** |
+| 改后（`setUpClass` 里判断） | False | False |
+
+改后 `__unittest_skip__` 是 False，但用例真跑时 `setUpClass` 会照实际环境跳过 —— 这才是正确的位置。**跳过本身不是问题，「在导入时把跳过定死」才是**：一旦定型就不会再纠正，模块级常量只求值一次。
+
+#### ② 同一形态的第三种：装饰器参数
+
+`test_phase7_layers.py` 的两处是 `@unittest.skipUnless(fixtures.wine_available(), ...)`。这个更隐蔽 —— 代码里看不到「常量」，只是一行装饰器，但 `skipUnless` 的参数据在**导入时**求值，效果与①完全相同。
+
+静态扫描抓不到它（它挂在 `decorator_list` 而不在模块体语句里），所以第一版 `ast` 守卫漏了这一处。补扫 `decorator_list` 后一次抓出 2 条。
+
+#### ③ 真正的缺陷在 `test_phase2` / `test_phase3`：导入就编译
+
+15.20 记的③说的是 `test_phase1`，但同形态的更强版本在这两个文件里 —— 它们直接抄了一份：
+
+```python
+SAMPLE_NSIS = os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or "")
+```
+
+`demo_nsis()` 会跑 `makensis`。用哨兵脚本实测（PATH 前置一个「被调用就留痕」的假 `makensis`）：
+
+```
+$ python3 -c "import tests.test_phase3"     → marker 存在
+$ python3 -c "import tests.test_phase2"     → marker 存在
+RuntimeError: makensis 编译失败（退出码 0）：
+```
+
+与 15.20 的 ISCC 完全同一句话、同一个形态、同一个成因（`makensis` 是假的、`exit 0`、零产物）。**15.20 修的是「ISCC 那条路」，没有修「这条路有两个入口」这件事。**
+
+#### ④ 修法：判据收进 `fixtures`，只留一份
+
+四处 `SAMPLE_NSIS` 的写法完全一样，说明它是**同一判据在三个文件里各写了一套**（违反 5.3 红线）。处置：
+
+- `tests/fixtures.py` 新增 `sample_nsis()` / `sample_inno()` / `sample_msi()` / `real_inno()` / `require_sample()` / `wine_ready()` / `reset_sample_cache()`；
+- `test_phase1` 的本地定义改为**同名引用**（`sample_nsis = fixtures.sample_nsis`），调用方无需改动；
+- `test_phase2` / `test_phase3` 删掉模块级常量，改为 `setUpClass` + `fixtures.require_sample(...)`；
+- `test_phase7_layers` 的两个装饰器改为 `setUpClass` 里判断。
+
+**缓存键带上环境变量现值**（`(key, os.environ.get(env_name, ""))`）。只按名字缓存会掩盖「环境变量生效」这件事 —— 测试恰恰会改环境变量再断言分支，缓存命中旧值就永远测不到新分支。
+
+#### ⑤ 守卫从「守一个模块」扩到「守全仓」
+
+15.20 的两条守卫只扫 `test_phase1.py`，所以才漏了另外三处。现在：
+
+| 守卫 | 判据 | 扫描范围 |
+|---|---|---|
+| `test_scan_covers_all_test_modules` | glob 结果必须包含 6 个已知模块，少一个即红 | — |
+| `test_no_fixture_call_at_module_level` | `ast` 扫**全部** `test_*.py` 的导入期语句 + `decorator_list`，`fixtures.*` 调用一个都不许有 | 6 个文件 |
+| `test_importing_modules_runs_no_external_tool` | 子进程逐个导入全部模块，`makensis` / `wine` 两条哨兵都不许出现 | 6 个文件 |
+
+第三条加了「扫描范围守卫」是必要的：如果 `glob` 因为路径写错返回空集，前两条会**全绿通过**（没有文件就没有违规），正是 15.16⑧ 记的「判据被空集满足」形态。
+
+#### ⑥ 负向验证（两处，均有效）
+
+| 注入 | 结果 |
+|---|---|
+| `test_phase2` 模块顶层加 `LEGACY_SAMPLE = fixtures.sample_nsis()` + `LEGACY_WINE = fixtures.wine_available()` | 静态守卫报 2 条（含精确行号）、动态守卫哨兵出现 → **2 项红** |
+| `test_phase7_layers` 注回 `@unittest.skipUnless(fixtures.wine_available(), ...)` | 静态守卫报 `装饰器 fixtures.wine_available()` → **红** |
+
+还原后 3/3 绿。
+
+#### ⑦ 仍未处理
+
+(a) `test_phase2` 依然 `from tests.test_phase1 import build_min_pe` —— 已无副作用，但更彻底的做法是把这两个纯字节构造函数下沉到 `fixtures.py`，让测试模块之间不再互相导入；(b) CI 只跑 `discover`（字母序），不跑单类，顺序依赖在 CI 上永远是绿的 —— 值得加一条「单独跑每一个测试类」的作业；(c) `fixtures._SAMPLE_CACHE` 是进程级的，同一进程内若先构造、后被 `reset_sample_cache()` 清掉的顺序用错仍会拿到旧值。
 
 ---
 

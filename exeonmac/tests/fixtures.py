@@ -784,9 +784,108 @@ def base_layer_available() -> bool:
         return False
 
 
+# --------------------------------------------------------------------------
+# 惰性样本入口（测试模块唯一允许的取夹具方式）
+# --------------------------------------------------------------------------
+#
+# ## 为什么样本一律走函数，不走模块级常量
+#
+# 早先 `test_phase1` / `test_phase2` / `test_phase3` 都在模块顶层写
+#
+#     SAMPLE_NSIS = os.environ.get(...) or str(fixtures.demo_nsis() or "")
+#
+# 于是**导入一个测试模块 = 现场跑一次 makensis / ISCC 编译**。看起来只是
+# 「慢一点」，实际后果是：任何改了 `WEXE_HOME` 或 `PATH` 的用例，只要在
+# 之后导入这些模块（`test_phase2` 只为借 `build_min_pe` 就 import
+# `test_phase1`），编译就会落到假工具上 —— 假工具 `exit 0` 什么也没编，
+# 抛 `RuntimeError: makensis 编译失败（退出码 0）：`，detail 为空。整类
+# 用例消失，而 `check_no_skips.py` 只看 `Ran N tests` 与 skipped，抓不到。
+#
+# 分界线就一条：**函数体在调用时执行，模块体在导入时执行**。
+# 夹具放进函数，导入就只剩「定义函数」这一件无副作用的事。
+#
+# 进程内缓存是必要的（NSIS 一次 0.4 秒、Inno 一次 13 秒），但缓存键跟着
+# 环境变量走 —— 先设 `WEXE_SAMPLE_INNO` 再取值与环境变量为空时取值，
+# 必须得到不同结果，否则「环境变量生效」这件事会被缓存掩盖。
+
+_SAMPLE_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _cached(key: str, env_name: str, build) -> str:
+    """按「名字 + 该样本对应的环境变量现值」缓存。
+
+    只按名字缓存会让「先取值、后设环境变量」得到旧结果 —— 而测试恰恰
+    会改环境变量再断言环境变量生效。键里带上环境变量现值，两种顺序
+    都能得到各自正确的结果。
+    """
+    cache_key = (key, os.environ.get(env_name, ""))
+    if cache_key not in _SAMPLE_CACHE:
+        _SAMPLE_CACHE[cache_key] = build()
+    return _SAMPLE_CACHE[cache_key]
+
+
+def sample_nsis() -> str:
+    """真实 NSIS 安装包（makensis 现场编译）。缺 makensis 时返回空串。"""
+    return _cached("nsis", "WEXE_SAMPLE_NSIS",
+                   lambda: os.environ.get("WEXE_SAMPLE_NSIS") or str(demo_nsis() or ""))
+
+
+def sample_inno() -> str:
+    """合成 Inno 骨架：只有标记，够测检测与版本读取，零依赖。"""
+    return _cached("inno", "WEXE_SAMPLE_INNO",
+                   lambda: os.environ.get("WEXE_SAMPLE_INNO") or str(demo_inno()))
+
+
+def sample_msi() -> str:
+    """纯 Python 构造的 MSI，零外部依赖。"""
+    return _cached("msi", "WEXE_SAMPLE_MSI",
+                   lambda: os.environ.get("WEXE_SAMPLE_MSI") or str(demo_msi()))
+
+
+def real_inno() -> str:
+    """真编译产物：ISCC + wine 现场编译，约 13 秒。**只在用例要跑时才调**。"""
+    return _cached("real-inno", "WEXE_SAMPLE_INNO",
+                   lambda: os.environ.get("WEXE_SAMPLE_INNO") or str(demo_inno_real() or ""))
+
+
+def reset_sample_cache() -> None:
+    """清掉进程内样本缓存（测试改环境变量后要重新取）。"""
+    _SAMPLE_CACHE.clear()
+
+
+def require_sample(getter, reason: str):
+    """在 `setUpClass` 里取夹具：拿不到就如实跳过，拿到就返回路径。
+
+    替代 `@unittest.skipUnless(常量 and ...)` —— 装饰器在**导入时**求值，
+    正是上面那段踩坑的入口；`setUpClass` 在用例真跑时才求值。
+
+    返回 `Path`；夹具不存在时抛 `unittest.SkipTest`，原因原样带出，
+    不伪装成「样本缺失」。
+    """
+    import unittest
+    from pathlib import Path
+
+    value = getter()
+    if not value or not Path(value).is_file():
+        raise unittest.SkipTest(reason)
+    return Path(value)
+
+
+def wine_ready() -> bool:
+    """`wine_available()` 的别名，语义是「此刻」而非「导入时」。
+
+    存在的理由：模块级 `REAL_WINE = fixtures.wine_available()` 会在导入时
+    定型，之后哪怕环境中出现了 wine 也永远为 False（跳过在报告里是绿的）。
+    统一走函数，每次问都重新探测。
+    """
+    return wine_available()
+
+
 __all__ = [
     "cache_dir", "find_makensis", "find_7z",
     "demo_msi", "demo_msi_chinese", "demo_msi_truncated",
-    "demo_nsis", "demo_inno",
-    "wine_available", "base_layer_available",
+    "demo_nsis", "demo_inno", "demo_inno_real",
+    "sample_nsis", "sample_inno", "sample_msi", "real_inno",
+    "reset_sample_cache", "require_sample",
+    "wine_available", "wine_ready", "base_layer_available",
 ]

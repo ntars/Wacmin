@@ -43,18 +43,23 @@ from wepack.recipes import (  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixtures  # noqa: E402
 
-#: 样本与环境探测。
+#: 样本与环境探测一律走惰性函数，**模块顶层不留任何求值**。
 #:
 #: ## 为什么不再要求设 WEXE_REAL_WINE=1
 #:
 #: 原来的写法是 `REAL_WINE = os.environ.get("WEXE_REAL_WINE") == "1"`，
 #: 于是**wine 明明装着，4 项集成测试却永远跳过**。跳过在报告里是绿的，
-#: 看起来「全部通过」—— 守卫没在站岗，没人发现。
+#: 看起来「全部通过」—— 守卫没在站岗，没人发现。现在改为自动探测：
+#: `wine_binary()` 会去真实运行时目录找，有就用。想强制关闭时设
+#: `WEXE_REAL_WINE=0`。
 #:
-#: 现在改为自动探测：`wine_binary()` 会去真实运行时目录找，有就用。
-#: 想强制关闭时设 `WEXE_REAL_WINE=0`（例如在没装 wine 的机器上跑）。
-SAMPLE_NSIS = os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or "")
-REAL_WINE = fixtures.wine_available()
+#: ## 为什么第 9 轮连自动探测也从模块顶层挪走
+#:
+#: `REAL_WINE = fixtures.wine_available()` 看着无副作用，实际**在导入时
+#: 就把结论定型了**：早先导入时若 `WEXE_HOME` 指向临时目录（没有 wine），
+#: 本模块的真实启动用例此后永远跳过，哪怕后来环境里出现了 wine。
+#: 第 8 轮修的是「导入即编译」，这一处是「导入即定论」，同一个错误：
+#: 模块级的求值结果不会跟着环境变。改用 `setUpClass` + `require_*()`。
 
 #: launcher 收到 SIGTERM 后允许的最长退出时间（秒）。
 #:
@@ -864,8 +869,12 @@ class TestPrefixHealthGuard(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
-@unittest.skipUnless(REAL_WINE, "需要 WEXE_REAL_WINE=1 与已安装的 wine 运行时")
 class TestRealLaunch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_ready():
+            raise unittest.SkipTest("需要已安装的 wine 运行时")
+
     def test_launcher_starts_wine(self):
         """真实启动：launcher 应把 wine 拉起来并写入日志。
 

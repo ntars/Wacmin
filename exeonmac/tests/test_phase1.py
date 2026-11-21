@@ -42,69 +42,28 @@ from wepack.models import InstallerKind  # noqa: E402
 
 import fixtures  # noqa: E402
 
-#: 环境变量优先（想用真实样本对照时指过去），否则用现场构造的夹具。
+#: 惰性样本入口：四个 `sample_*()` 都在 `fixtures` 里，本模块只做再导出。
+#:
+#: ## 为什么不是本地定义
+#:
+#: 第 9 轮之前这段是本地定义的四个函数（第 8 轮刚把它从模块级常量改成
+#: 函数）。但 `test_phase2` / `test_phase3` 也需要同一批夹具，各自又抄了
+#: 一份 `SAMPLE_NSIS = ... demo_nsis()` 在模块顶层 —— 判据三处各写一套，
+#: 改一处必漏两处（README 5.3）。现在统一收到 `fixtures`，本模块只留
+#: 同名引用，调用方无需改。
 #:
 #: `real_inno()` 与 `sample_inno()` 分开：前者是真编译产物（有载荷，能解包），
 #: 后者是最小骨架（只有标记，够测检测）。混用会让「检测」类测试
 #: 无谓地背上「编译 + wine」的成本。
-#:
-#: ## 为什么这四个都改成了惰性函数，而不是模块级常量
-#:
-#: 早先它们是在**导入时**求值的常量，其中 `fixtures.demo_inno_real()` 会经
-#: `wine_binary()` 读 `WEXE_HOME`。而 `test_phase2` 的用例把 `WEXE_HOME`
-#: 指到临时目录、塞一个只 `exit 0` 的假 wine，只为借本模块的 `build_min_pe`
-#: 就会 `import tests.test_phase1` —— 于是 ISCC 在假 wine 下空编、退出码 0、
-#: 产物不存在，抛出 `RuntimeError: ISCC 编译失败（退出码 0）：`（detail 为空，
-#: 因为假 wine 什么也没说）。整类消失、剩下的用例变成 error。
-#:
-#: **导入一个测试模块不应该有外部副作用**。夹具在「用例真的要跑」时才构造。
-_SAMPLE_CACHE: dict[str, str] = {}
-
-
-def sample_nsis() -> str:
-    if "nsis" not in _SAMPLE_CACHE:
-        _SAMPLE_CACHE["nsis"] = (
-            os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or ""))
-    return _SAMPLE_CACHE["nsis"]
-
-
-def sample_inno() -> str:
-    """合成骨架：只有标记，够测检测与版本读取，零依赖。"""
-    if "inno" not in _SAMPLE_CACHE:
-        _SAMPLE_CACHE["inno"] = (
-            os.environ.get("WEXE_SAMPLE_INNO") or str(fixtures.demo_inno()))
-    return _SAMPLE_CACHE["inno"]
-
-
-def sample_msi() -> str:
-    if "msi" not in _SAMPLE_CACHE:
-        _SAMPLE_CACHE["msi"] = (
-            os.environ.get("WEXE_SAMPLE_MSI") or str(fixtures.demo_msi()))
-    return _SAMPLE_CACHE["msi"]
-
-
-def real_inno() -> str:
-    """真编译产物：ISCC + wine 现场编译，约 13 秒。**只在用例要跑时才调**。"""
-    if "real-inno" not in _SAMPLE_CACHE:
-        _SAMPLE_CACHE["real-inno"] = (
-            os.environ.get("WEXE_SAMPLE_INNO") or str(fixtures.demo_inno_real() or ""))
-    return _SAMPLE_CACHE["real-inno"]
-
-
-def require_sample(getter, reason: str) -> Path:
-    """在 `setUpClass` 里取夹具：拿不到就如实跳过，拿到就返回路径。
-
-    替代原先的 `@unittest.skipUnless(常量 and ...)`：装饰器在**导入时**求值，
-    正是上面那段踩坑的入口。
-    """
-    value = getter()
-    if not value or not Path(value).is_file():
-        raise unittest.SkipTest(reason)
-    return Path(value)
+sample_nsis = fixtures.sample_nsis
+sample_inno = fixtures.sample_inno
+sample_msi = fixtures.sample_msi
+real_inno = fixtures.real_inno
+require_sample = fixtures.require_sample
 
 
 # --------------------------------------------------------------------------
-# 导入期副作用守卫（见上面那段说明的踩坑）
+# 导入期副作用守卫（全仓判据，不走样）
 # --------------------------------------------------------------------------
 
 
@@ -114,66 +73,28 @@ class TestImportHasNoSideEffects(unittest.TestCase):
     ## 为什么要专门守这件事
 
     `test_phase2` 里有几处 `from tests.test_phase1 import build_min_pe`。
-    早先 `test_phase1` 把夹具求值写在模块级，于是「借一个纯函数」的代价
-    变成「跑一次 ISCC 编译」；而当 `test_phase2` 的用例已把 `WEXE_HOME`
-    指到临时目录（那里有只 `exit 0` 的假 wine），编译静默失败，抛出的
-    `RuntimeError` 让 `test_phase2` 的两条用例变 error。**整类消失是不会
-    被 `check_no_skips.py` 抓到的** —— 它只看 `Ran N tests` 与 skipped。
+    第 8 轮之前 `test_phase1` 把夹具求值写在模块级，于是「借一个纯函数」
+    的代价变成「跑一次 ISCC 编译」；而当 `test_phase2` 的用例已把
+    `WEXE_HOME` 指到临时目录（那里有只 `exit 0` 的假 wine），编译静默
+    失败，抛出的 `RuntimeError` 让 `test_phase2` 的两条用例变 error。
+    **整类消失是不会被 `check_no_skips.py` 抓到的** —— 它只看
+    `Ran N tests` 与 skipped。
 
-    所以守两层：① 子进程里导入模块，不许有 stderr 输出、不许非零退出；
-    ② 静态断言模块顶层不再出现夹具调用（防有人又写回常量）。
+    ## 第 9 轮把范围从一个模块扩到全部
+
+    第 8 轮只守 `test_phase1`，因为当时只发现那一处。系统扫描后发现
+    `test_phase2` / `test_phase3` 各有一份 `SAMPLE_NSIS = ...demo_nsis()`
+    在模块顶层、`test_phase7_layers` 有两个 `skipUnless(wine_available())`
+    装饰器 —— 判据只守一个模块，另外三处照样带副作用。现在扫全部
+    `test_*.py`，「哪些文件在扫」这件事本身也断言，防扫描被写坏后空转。
     """
 
-    def test_importing_module_runs_no_external_tool(self) -> None:
-        """导入时不许调任何外部工具。
+    #: 必须在扫描范围内的模块。少一个就说明 glob 或路径坏了。
+    EXPECTED = {"test_phase1.py", "test_phase2.py", "test_phase3.py",
+                "test_phase4.py", "test_phase6.py", "test_phase7_layers.py"}
 
-        ## 判据怎么造才抓得住
-
-        第一版只断言「导入不报错」，负向验证时把常量写回模块顶层**仍然是
-        绿的** —— 因为空 `WEXE_HOME` 下 `demo_inno_real()` 只是返回 `None`，
-        不抛异常。判据太软了。
-
-        现在改成埋哨兵：造一个「被调用就在文件里留痕」的假 wine，并把
-        `WEXE_ISCC` 指向一个存在的文件（`find_iscc()` 因此会返回它），
-        于是**只要模块级求值了夹具，就一定会执行这个假 wine**。导入后
-        检查哨兵文件在不在 —— 在，就是导入带了副作用。
-        """
-        with tempfile.TemporaryDirectory(prefix="exeonmac-import-") as tmp:
-            root = Path(tmp)
-            sentinel = root / "wine-was-called"
-            wine = root / "wexe" / "runtime" / "wine" / "bin" / "wine64"
-            wine.parent.mkdir(parents=True)
-            wine.write_text(f'#!/bin/sh\n: > "{sentinel}"\nexit 0\n', encoding="utf-8")
-            wine.chmod(0o755)
-            # find_iscc() 只判 is_file()，不执行 —— 给个占位文件就够
-            iscc = root / "ISCC.exe"
-            iscc.write_bytes(b"stub")
-
-            env = dict(os.environ)
-            env["WEXE_HOME"] = str(root / "wexe")
-            env["WEXE_ISCC"] = str(iscc)
-            env.pop("WEXE_SAMPLE_INNO", None)
-            env["PYTHONPATH"] = str(REPO) + os.pathsep + str(REPO / "tests")
-            r = subprocess.run(
-                [sys.executable, "-c",
-                 "import tests.test_phase1 as m; print('ok', bool(m.sample_inno()))"],
-                cwd=str(REPO), capture_output=True, text=True, env=env, timeout=120)
-            self.assertEqual(r.returncode, 0,
-                             f"导入就失败了：stderr={r.stderr[-800:]}")
-            # 合成骨架零依赖，任何环境都造得出来；造不出说明它偷偷要了外部工具
-            self.assertIn("ok True", r.stdout,
-                          f"零依赖的合成夹具没造出来：{r.stdout!r}")
-            self.assertFalse(
-                sentinel.exists(),
-                "导入 test_phase1 时执行了 wine —— 模块顶层又在求值夹具了。"
-                "这会让 test_phase2 在假 wine 环境下导入它时整类崩掉。")
-
-    def test_no_fixture_call_at_module_level(self) -> None:
-        """静态守卫：`fixtures.demo_*` 不许出现在模块顶层。
-
-        判据用 `ast`：只扫**模块体直接语句**里对 `fixtures.demo_*` 的调用，
-        函数体里的不算（`sample_*()` 内部当然要调）。
-        """
+    def _scan(self, path: Path) -> list[str]:
+        """返回 `path` 里**导入时就会执行**的夹具调用（文件:行 + 名字）。"""
         import ast
 
         def walk_import_time(node):
@@ -189,19 +110,111 @@ class TestImportHasNoSideEffects(unittest.TestCase):
                 yield child
                 yield from walk_import_time(child)
 
-        tree = ast.parse((REPO / "tests" / "test_phase1.py").read_text("utf-8"))
+        tree = ast.parse(path.read_text("utf-8"))
         offenders: list[str] = []
+
+        def name_of(func) -> str | None:
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                return f"{func.value.id}.{func.attr}"
+            if isinstance(func, ast.Name):
+                return func.id
+            return None
+
         for sub in walk_import_time(tree):
-            if (isinstance(sub, ast.Call)
-                    and isinstance(sub.func, ast.Attribute)
-                    and isinstance(sub.func.value, ast.Name)
-                    and sub.func.value.id == "fixtures"
-                    and sub.func.attr.startswith("demo_")):
-                offenders.append(f"第 {sub.lineno} 行：fixtures.{sub.func.attr}()")
+            if isinstance(sub, ast.Call):
+                name = name_of(sub.func)
+                if name and name.startswith("fixtures."):
+                    offenders.append(f"{path.name}:{sub.lineno} {name}()")
+
+        # 装饰器在**导入时**求值，但它们挂在类/函数节点上，上面的遍历
+        # 只看得到 Call，看不到 decorator_list。单独扫一遍。
+        for node in ast.walk(tree):
+            # 装饰器挂在被装饰对象上；函数体里的函数不是导入期执行的，
+            # 但函数装饰器本身在 def 那一刻求值，所以函数也要算。
+            for dec in getattr(node, "decorator_list", []) or []:
+                for sub in ast.walk(dec):
+                    if isinstance(sub, ast.Call):
+                        name = name_of(sub.func)
+                        if name and name.startswith("fixtures."):
+                            offenders.append(f"{path.name}:{dec.lineno} 装饰器 {name}()")
+        return offenders
+
+    def test_scan_covers_all_test_modules(self) -> None:
+        """扫描范围守卫：glob 找不到文件时不许静默通过。"""
+        found = {p.name for p in (REPO / "tests").glob("test_*.py")}
+        missing = self.EXPECTED - found
+        self.assertEqual(missing, set(), f"扫描范围缺文件：{sorted(missing)}")
+
+    def test_no_fixture_call_at_module_level(self) -> None:
+        """静态守卫：任何测试模块顶层都不许出现 `fixtures.*` 调用。
+
+        包括函数体之外的直接调用与装饰器。函数体里的不算（`sample_*()`
+        内部当然要调夹具，那是被调时才执行）。
+        """
+        offenders: list[str] = []
+        for path in sorted((REPO / "tests").glob("test_*.py")):
+            offenders.extend(self._scan(path))
         self.assertEqual(offenders, [],
                          "模块顶层又在求值夹具了 —— 导入会带上外部副作用，"
-                         "而 test_phase2 借本模块的函数时会踩到假 wine：\n"
+                         "而任何改过 WEXE_HOME / PATH 的用例只要之后导入"
+                         "该模块就会踩到假工具、整类崩掉：\n"
                          + "\n".join(offenders))
+
+    def test_importing_modules_runs_no_external_tool(self) -> None:
+        """动态守卫：导入时不许执行 makensis / wine。
+
+        ## 判据怎么造才抓得住
+
+        第 8 轮第一版只断言「导入不报错」，负向验证时把常量写回模块顶层
+        **仍然是绿的** —— 空 `WEXE_HOME` 下 `demo_inno_real()` 只是返回
+        `None`，不抛异常。判据太软。
+
+        现在埋哨兵：把假 `makensis` 与假 `wine64` 都放进 PATH 最前面，
+        两者「被调用就留痕」。导入全部测试模块后检查哨兵文件 —— 存在，
+        就是导入带了副作用。这一版能抓住 `makensis` 与 `wine` 两条路径。
+        """
+        with tempfile.TemporaryDirectory(prefix="exeonmac-import-") as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            self._fake_tool(bin_dir / "makensis", root / "makensis.was-called")
+            # 假 wine 要落在 wexe 的托管运行时位置，`wine_binary()` 才认
+            wine = root / "wexe" / "runtime" / "wine" / "bin" / "wine64"
+            wine.parent.mkdir(parents=True)
+            self._fake_tool(wine, root / "wine.was-called")
+            # find_iscc() 只判 is_file()，给个占位就够
+            iscc = root / "ISCC.exe"
+            iscc.write_bytes(b"stub")
+
+            env = dict(os.environ)
+            env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+            env["WEXE_HOME"] = str(root / "wexe")
+            env["WEXE_ISCC"] = str(iscc)
+            for name in ("WEXE_SAMPLE_NSIS", "WEXE_SAMPLE_INNO", "WEXE_SAMPLE_MSI"):
+                env.pop(name, None)
+            env["PYTHONPATH"] = str(REPO) + os.pathsep + str(REPO / "tests")
+            r = subprocess.run(
+                [sys.executable, "-c",
+                 "import importlib, pathlib, sys\n"
+                 "for p in sorted(pathlib.Path('tests').glob('test_*.py')):\n"
+                 "    importlib.import_module('tests.' + p.stem)\n"
+                 "print('ok')"],
+                cwd=str(REPO), capture_output=True, text=True, env=env, timeout=300)
+            self.assertEqual(r.returncode, 0,
+                             f"导入就失败了：stderr={r.stderr[-1200:]}")
+            self.assertIn("ok", r.stdout)
+            called = [n for n in ("makensis", "wine")
+                      if (root / f"{n}.was-called").exists()]
+            self.assertEqual(
+                called, [],
+                f"导入测试模块时执行了 {called} —— 模块顶层又在求值夹具了。"
+                "这会让任何重定向过环境的用例在导入时整类崩掉。")
+
+    @staticmethod
+    def _fake_tool(path: Path, sentinel: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\n: > "{sentinel}"\nexit 0\n', encoding="utf-8")
+        path.chmod(0o755)
 
 
 def have_7z() -> bool:

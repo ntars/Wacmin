@@ -338,13 +338,24 @@ class TestLayerDllIndexCoverage(IsolatedWexe):
         self.assertIn("d3d8", base, "两处判据都漏了 syswow64")
 
 
-@unittest.skipUnless(fixtures.wine_available(), "需要真实 wine 运行时")
 class TestMatchAgainstRealLayers(IsolatedWexe):
     """用**真实**层目录跑一次匹配，证明索引不是只在假造的树上成立。
 
     假造的树只能证明「rglob 会递归」，证明不了真实层的目录布局被覆盖。
     这两条断言的就是本轮修掉的两个具体误判。
+
+    ## 为什么跳过判据在 `setUpClass` 而不在装饰器
+
+    `@unittest.skipUnless(fixtures.wine_available(), ...)` 的参数据在**导入时**
+    求值，于是「本机有没有 wine」在导入那一刻就定了。若导入发生在
+    `WEXE_HOME` 被重定向的上下文里（例如别处先改了环境），这两类用例
+    此后永远跳过，而跳过在报告里是绿的。`setUpClass` 在用例真跑时才问。
     """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_ready():
+            raise unittest.SkipTest("需要真实 wine 运行时")
 
     def setUp(self) -> None:
         super().setUp()
@@ -391,11 +402,15 @@ class TestMatchAgainstRealLayers(IsolatedWexe):
 # --------------------------------------------------------------------------
 
 
-@unittest.skipUnless(fixtures.wine_available(), "需要真实 wine 运行时")
 class TestRealLayerBuild(IsolatedWexe):
     """真跑一次 wineboot + 装 MSI。慢（约 1 分钟/层），但这是唯一能证明
     「自动构建真的成立」的方式 —— mock 只能证明代码路径通，证明不了
     wine 真的照做。
+
+    ## 跳过判据放在 `setUpClass`
+
+    理由同 `TestMatchAgainstRealLayers`：装饰器在导入时求值会把结论定型，
+    跳过还是绿。
 
     ## 为什么要把 runtime 软链进临时目录
 
@@ -404,6 +419,11 @@ class TestRealLayerBuild(IsolatedWexe):
     时正是因为这一点，`dotnet` 构建误报「运行时不含 wine-mono」—— 那是测试
     环境问题，不是代码缺陷。这里用软链把真实运行时接进来，让用例自洽。
     """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_ready():
+            raise unittest.SkipTest("需要真实 wine 运行时")
 
     def setUp(self) -> None:
         super().setUp()

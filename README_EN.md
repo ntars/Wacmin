@@ -2402,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 474 | about 3m06s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers and 2 import-time side-effect guards |
+| exeonmac | 475 | about 3m03s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers and 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1366** | — | See "0 skipped repository-wide" below |
+| **Total** | **1367** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3046,6 +3046,8 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | The placeholder registry is written in a format wine rejects | `prefix._write_placeholder_regs` produced a placeholder that made wine report `not a valid registry file` plus "32-bit installation", `rc=1` — yet the whole point of the placeholder is to let wine boot | It claimed "wine's .reg is UTF-16LE + BOM", which is only true for files **exported** by `regedit /E`; the on-disk format inside a prefix is plain ASCII and must carry `#arch=win64` | Switched to plain ASCII plus `#arch=win64`. Measured `rc=0`, after which wine expands the placeholder itself into a complete 200 KB registry |
 | The restart-suppression `.reg` never took effect | `suppress_restart` logged `reboot.suppressed` while writing zero keys; `reg query` after import finds no `NoClose` | It fed wine's **internal** storage format (`WINE REGISTRY Version 2` with relative `[Software\\...]` paths) to `regedit /S`, which only accepts the **Windows export** format. Measured: wrong format yields **exit code 0, empty stderr, zero writes** — it took a three-way comparison to pin down | Switched to `Windows Registry Editor Version 5.00` with absolute key paths; the import is now followed by a query of the target key, logging `WARN reboot.suppress_ineffective` instead of INFO when it is absent. `regedit /S` fails silently, so "no exception thrown" proves nothing |
 | The contract-check button sets `disabled` inside its click handler, so a keyboard Enter drops focus instantly | Clicking with a mouse works fine; pressing Enter on a keyboard sends focus to `<body>`, a screen reader restarts from the top, reaching the panel's "close" button takes 12 more Tabs, and closing the panel drops focus to `body` again. The first three viewport stages stay fully green | `Enter` is keydown → click → keyup. Setting `disabled` inside click makes the element stop being a focus target, so the browser returns focus to the document root and the trailing keyup has no receiver. A programmatic `.click()` has no trailing keyup, so the defect never reproduced and every existing test was green | Re-entry is guarded by a boolean plus `aria-disabled` (semantics only, focusability intact); the panel gains `tabindex="-1"` and gets `panel.focus()` after the check completes; closing hands focus back to the trigger. The criterion became stage 5 of `viewport-check.mjs`, using real key events plus a full `focusin`/`focusout` trace |
+
+| A criterion at module level: concluded at import, skip becomes permanent | `test_phase2` / `test_phase3` had `SAMPLE_NSIS = ... demo_nsis()` at module level, so **importing either module ran `makensis`**; measured with a sentinel fake `makensis`, the marker appeared and the failure was exactly `makensis 编译失败（退出码 0）：`. The two `@skipUnless(fixtures.wine_available())` decorators in `test_phase7_layers` were fixed at import time: importing under `WEXE_HOME=/nonexistent` left `__unittest_skip__` permanently `True` | Same shape as 15.20 but with three entrances: ① the same `SAMPLE_NSIS` written three times (a 5.3 violation); ② `REAL_WINE = fixtures.wine_available()` looks side-effect free but pins the conclusion at import; ③ decorator arguments are also evaluated at import and live in `decorator_list`, invisible to a module-body scan | The criterion moved into `fixtures` (`sample_*()` / `require_sample()` / `wine_ready()`); `test_phase1` now re-exports it, the other three files drop their module-level constants for `setUpClass`; cache keys include the current environment value. The guard widened from one module to all 6 files, now scanning `decorator_list` and asserting its own scan scope (so an empty glob cannot pass green). Negative verification: re-inject module-level evaluation → 2 static findings + sentinel → 2 red; restore the decorator → 1 red |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -3907,6 +3909,89 @@ None of them currently manifests as a failure: `discover` imports these modules 
 
 **⑧ Still unhandled**: (a) `test_phase2` still does `from tests.test_phase1 import build_min_pe` — harmless now that it is lazy, but the cleaner move is to sink those two pure builders into `fixtures.py` so test modules stop importing each other; (b) the three import-time calls in table ⑦ should become lazy; (c) CI only runs `discover` (alphabetical), never single classes, so this class of order dependency stays green on CI forever — a job that runs each test class on its own would be worth adding.
 
+
+---
+
+### 15.21 "Concluded at import time": a criterion at module level makes a skip permanent (measured 2026-11-21, fixed)
+
+**This section disposes of 15.20 ⑦.** 15.20 scanned out three import-time calls and left them for the next round; this section fixes all of them, and in doing so finds that 15.20 did not go far enough — it turned "compiling at import" into "concluding at import", which is harder to see.
+
+#### ① Symptom: the second face of the same shape
+
+After 15.20, what remained in `test_phase2` was this line:
+
+```python
+REAL_WINE = fixtures.wine_available()      # looks side-effect free
+```
+
+It genuinely does not run an external tool, but it pins the answer to "does this machine have wine" at the moment of import. Measured (importing with `WEXE_HOME=/nonexistent`):
+
+| | `TestRealWine.__unittest_skip__` | `TestRealInstall.__unittest_skip__` |
+|---|---|---|
+| Before (`= fixtures.wine_available()`) | **True** | **True** |
+| After (decided in `setUpClass`) | False | False |
+
+After the change `__unittest_skip__` is False, and `setUpClass` skips according to the actual environment when the test really runs — which is the correct place. **Skipping is not the problem; pinning the skip at import time is**: once pinned it is never corrected, because a module-level constant is evaluated exactly once.
+
+#### ② The third face: decorator arguments
+
+The two spots in `test_phase7_layers.py` were `@unittest.skipUnless(fixtures.wine_available(), ...)`. This is even more hidden — there is no "constant" visible in the code, just a decorator line, yet `skipUnless` evaluates its argument **at import time**, with exactly the same effect as ①.
+
+Static scanning missed it (it lives in `decorator_list`, not in module-body statements), so the first `ast` guard skipped this spot. After adding `decorator_list` to the scan it reported 2 findings at once.
+
+#### ③ The real defect in `test_phase2` / `test_phase3`: import means compile
+
+15.20 ③ was about `test_phase1`, but a stronger version of the same shape lives in these two files — they each copied it:
+
+```python
+SAMPLE_NSIS = os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or "")
+```
+
+`demo_nsis()` runs `makensis`. Measured with a sentinel script (a fake `makensis` prepended to PATH that leaves a mark when called):
+
+```
+$ python3 -c "import tests.test_phase3"     → marker present
+$ python3 -c "import tests.test_phase2"     → marker present
+RuntimeError: makensis 编译失败（退出码 0）：
+```
+
+Exactly the same sentence, shape and cause as the ISCC case in 15.20 (the `makensis` is fake, exits 0, produces nothing). **15.20 fixed "the ISCC path" but not "this path has two more entrances".**
+
+#### ④ Fix: move the criterion into `fixtures`, keep exactly one copy
+
+The four `SAMPLE_NSIS` definitions were byte-for-byte identical, which is the signature of **one criterion written three times** (a violation of 5.3). Disposition:
+
+- `tests/fixtures.py` gains `sample_nsis()` / `sample_inno()` / `sample_msi()` / `real_inno()` / `require_sample()` / `wine_ready()` / `reset_sample_cache()`;
+- `test_phase1`'s local definitions become **same-name references** (`sample_nsis = fixtures.sample_nsis`), so callers need no change;
+- `test_phase2` / `test_phase3` drop the module-level constants and use `setUpClass` + `fixtures.require_sample(...)`;
+- `test_phase7_layers`' two decorators become a check inside `setUpClass`.
+
+**The cache key includes the current value of the environment variable** (`(key, os.environ.get(env_name, ""))`). A name-only cache would mask whether the environment variable takes effect — and tests do change environment variables and then assert on the branch, so a stale cache hit would make the new branch permanently untestable.
+
+#### ⑤ The guard goes from "one module" to "the whole repository"
+
+15.20's two guards only scanned `test_phase1.py`, which is exactly why the other three spots were missed. Now:
+
+| Guard | Criterion | Scope |
+|---|---|---|
+| `test_scan_covers_all_test_modules` | the glob result must contain all 6 known modules; one missing is red | — |
+| `test_no_fixture_call_at_module_level` | `ast` scans **every** `test_*.py` for import-time statements plus `decorator_list`; not one `fixtures.*` call is allowed | 6 files |
+| `test_importing_modules_runs_no_external_tool` | a subprocess imports every module; neither the `makensis` nor the `wine` sentinel may appear | 6 files |
+
+The third guard needed a companion "scan-scope guard": if `glob` returns an empty set because the path is wrong, the first two would **pass green** (no files, no violations) — exactly the "criterion satisfied by an empty set" shape recorded in 15.16 ⑧.
+
+#### ⑥ Negative verification (two injections, both effective)
+
+| Injection | Result |
+|---|---|
+| add `LEGACY_SAMPLE = fixtures.sample_nsis()` + `LEGACY_WINE = fixtures.wine_available()` at `test_phase2` module level | static guard reports 2 findings with exact line numbers, dynamic guard's sentinel appears → **2 tests red** |
+| restore `@unittest.skipUnless(fixtures.wine_available(), ...)` on `test_phase7_layers` | static guard reports `装饰器 fixtures.wine_available()` → **red** |
+
+Restored afterwards: 3/3 green.
+
+#### ⑦ Still open
+
+(a) `test_phase2` still does `from tests.test_phase1 import build_min_pe` — side-effect free now, but the cleaner move is to sink those two pure byte builders into `fixtures.py` so test modules no longer import each other; (b) CI only runs `discover` (alphabetical), never a single class, so ordering dependencies stay green on CI — worth adding a "run every test class on its own" job; (c) `fixtures._SAMPLE_CACHE` is process-wide, so constructing first and clearing via `reset_sample_cache()` afterwards in the wrong order will still hand back a stale value.
 
 ---
 

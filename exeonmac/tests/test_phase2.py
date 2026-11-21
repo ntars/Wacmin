@@ -40,18 +40,27 @@ from wepack.prefix import (  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixtures  # noqa: E402
 
-#: 样本与环境探测。
+#: 样本与环境探测一律走惰性函数，**模块顶层不留任何求值**。
 #:
 #: ## 为什么不再要求设 WEXE_REAL_WINE=1
 #:
 #: 原来的写法是 `REAL_WINE = os.environ.get("WEXE_REAL_WINE") == "1"`，
 #: 于是**wine 明明装着，4 项集成测试却永远跳过**。跳过在报告里是绿的，
-#: 看起来「全部通过」—— 守卫没在站岗，没人发现。
+#: 看起来「全部通过」—— 守卫没在站岗，没人发现。现在改为自动探测：
+#: `wine_binary()` 会去真实运行时目录找，有就用。想强制关闭时设
+#: `WEXE_REAL_WINE=0`。
 #:
-#: 现在改为自动探测：`wine_binary()` 会去真实运行时目录找，有就用。
-#: 想强制关闭时设 `WEXE_REAL_WINE=0`（例如在没装 wine 的机器上跑）。
-SAMPLE_NSIS = os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or "")
-REAL_WINE = fixtures.wine_available()
+#: ## 为什么第 9 轮连自动探测也从模块顶层挪走
+#:
+#: `REAL_WINE = fixtures.wine_available()` 看着无副作用，实际**在导入时
+#: 就把结论定型了**：早先导入时若 `WEXE_HOME` 指向临时目录（没有 wine），
+#: 这个模块的 4 项集成测试此后永远跳过，哪怕后来环境里出现了 wine。
+#: 第 8 轮同类缺陷（ISCC）修的是「导入即编译」，这一处是「导入即定论」，
+#: 底层同一个错误：模块级的求值结果不会跟着环境变。
+#:
+#: 现在 `REAL_WINE` / `SAMPLE_NSIS` 都改成函数，`skipUnless` 换成
+#: `setUpClass` 里的 `require_*()` —— 装饰器在导入时求值，`setUpClass`
+#: 在用例真跑时才求值，分界线就在这里。
 
 
 # --------------------------------------------------------------------------
@@ -1750,12 +1759,16 @@ class TestCliPhase2(IsolatedWexe):
 # --------------------------------------------------------------------------
 
 
-@unittest.skipUnless(REAL_WINE, "需要 WEXE_REAL_WINE=1")
 class TestRealWine(unittest.TestCase):
     """真实 wine 测试不能隔离 WEXE_HOME —— wine 装在真实 wexe 目录下。
 
     这两个测试只读真实运行时，不写 layers，所以不需要隔离。
     """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_ready():
+            raise unittest.SkipTest("需要真实 wine 运行时")
 
     def test_wine_binary_found(self) -> None:
         from wepack.install import wine_binary
@@ -1776,14 +1789,21 @@ class TestRealWine(unittest.TestCase):
             self.assertEqual(validate_prefix(private), [])
 
 
-@unittest.skipUnless(REAL_WINE and SAMPLE_NSIS and Path(SAMPLE_NSIS).is_file(),
-                     "需要 WEXE_REAL_WINE=1 与 WEXE_SAMPLE_NSIS")
 class TestRealInstall(unittest.TestCase):
     """端到端安装测试。用真实 base 层，但 prefix 建在临时目录。
 
     不改真实 layers（base 层已由 layers build 建好），只在临时目录
     建 prefix 与安装，测试结束自动清理。
     """
+
+    installer: Path
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_ready():
+            raise unittest.SkipTest("需要真实 wine 运行时")
+        cls.installer = fixtures.require_sample(
+            fixtures.sample_nsis, "需要 makensis 才能现场编译 NSIS 样本")
 
     def test_install_nsis(self) -> None:
         """端到端：clonefile base → wineboot → 静默安装 → 找到主 exe。"""
@@ -1801,7 +1821,7 @@ class TestRealInstall(unittest.TestCase):
             create_prefix(private, layers=["base"])
             wineboot_init(private, timeout=300)
 
-            installer = Path(SAMPLE_NSIS)
+            installer = self.installer
             detection = detect_installer(installer)
             run = run_install(private, installer, detection, timeout=900,
                               install_dir=default_install_dir("Ondra"))

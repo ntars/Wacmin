@@ -34,6 +34,8 @@
 typedef int HRESULT;
 typedef unsigned int UINT32;
 typedef unsigned short UINT16;
+typedef short INT16;
+typedef int INT32;
 typedef int BOOL;
 typedef unsigned long DWORD;
 typedef unsigned short WCHAR;
@@ -49,6 +51,12 @@ __declspec(dllimport) void __stdcall ExitProcess(UINT32);
 #define V(obj, slot) (((void ***)(obj))[0][(slot)])
 
 static HANDLE g_out;
+
+/* 用了 float 就必须有 `_fltused`：MSVC 运行时用它标记「本模块需要浮点支持」，
+ * 编译器引用它但不定义它（通常由 CRT 提供）。我们不带 CRT，所以自己给。
+ * 没有它 lld-link 会报 `undefined symbol: _fltused` —— 报错完全没提浮点，
+ * 很容易误判成链接配置问题。 */
+int _fltused = 1;
 
 static int slen(const char *s) { int n = 0; while (s[n]) n++; return n; }
 static void P(const char *s) { DWORD w = 0; WriteFile(g_out, s, (DWORD)slen(s), &w, 0); }
@@ -66,6 +74,20 @@ static void I(int v) {
         if (neg) b[--i] = '-';
     }
     P(&b[i]);
+}
+
+/* 十六进制打印。指纹是 32 位无符号数，用十进制读不出差别，也没法贴进日志对账。 */
+static void H(unsigned int v) {
+    char b[11];
+    int i = 10;
+    b[i] = 0;
+    if (v == 0) { b[--i] = '0'; }
+    while (v) {
+        unsigned d = v & 15u;
+        b[--i] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
+        v >>= 4;
+    }
+    P("0x"); P(&b[i]);
 }
 
 static void put_wide(const WCHAR *w, int len) {
@@ -129,10 +151,198 @@ static void report_glyph(void *face, UINT32 cp, const char *label) {
     P("\n");
 }
 
-/* 完整走一遍：集合 → 按家族名查 → 取家族 → 取字面 → 查字形覆盖。
+/* ─────────────── 像素层：真的让 DirectWrite 把字栅格化一次 ───────────────
+ *
+ * ## 为什么「下标非 0」还不够
+ *
+ * `GetGlyphIndices` 只回答「这张字模里有没有这个码点的槽位」。它回答不了两件事：
+ * 那个槽位指向的字形是不是**空轮廓**（占位但没笔画），以及栅格化器会不会因为
+ * 渲染模式 / 字体表缺失而画出 `.notdef` 方框。前者在坏字体里很常见，后者在
+ * wine 的 dwrite 上完全可能。
+ *
+ * ## 判据怎么设计才不靠人眼
+ *
+ * 光数「墨水像素 > 0」不够 —— `.notdef` 方框同样有墨水。本探针的做法是**渲染两次**：
+ * 一次目标码点，一次**字形下标 0**（`.notdef` 本身）。两张 alpha 位图的指纹
+ * 若相同，说明目标码点画出来的就是缺字框。这不需要参考图、不需要人眼，也不
+ * 依赖「这个码点应该长什么样」的先验。
+ *
+ * 渲染走 `CreateGlyphRunAnalysis` + `CreateAlphaTexture`：纯 DirectWrite，
+ * 不经 GDI、不建窗口、不需要 HDC。ALIASED 模式是 1 字节/像素，
+ * 比 ClearType 的 3 字节/像素少一层「哪个子像素」的解释空间。
+ */
+
+typedef struct { UINT32 left, top, right, bottom; } RECTI32;
+
+/* 字形度量。只用 advanceWidth，其余字段必须按头文件顺序占位，
+ * 否则结构大小不对、写入会越界。 */
+typedef struct {
+    INT32 leftSideBearing;
+    UINT32 advanceWidth;
+    INT32 rightSideBearing;
+    INT32 topSideBearing;
+    UINT32 advanceHeight;
+    INT32 bottomSideBearing;
+    INT32 verticalOriginY;
+} GLYPH_METRICS;
+
+typedef struct {
+    UINT16 designUnitsPerEm;
+    UINT16 ascent;
+    UINT16 descent;
+    UINT16 lineGap;
+    UINT16 capHeight;
+    UINT16 xHeight;
+    INT16 underlinePosition;
+    UINT16 underlineThickness;
+    INT16 strikethroughPosition;
+    UINT16 strikethroughThickness;
+} FONT_METRICS;
+
+/* 一次性把某个字形栅格化的结果。`hash` 是 alpha 位图的指纹（FNV-1a），
+ * `ink` 是 alpha > 0 的像素数，`w/h` 是纹理尺寸。 */
+typedef struct {
+    int ok;
+    int hrCreate;
+    int hrBounds;
+    int hrTexture;
+    long ink;
+    long pixels;
+    int w;
+    int h;
+    unsigned int hash;
+} RASTER;
+
+#define EM_SIZE 48.0f          /* DIP；够大，小字号下的 hinting 差异不该混进判据 */
+#define MAX_TEXTURE_PIXELS (1024 * 1024)
+
+static unsigned char g_alpha[MAX_TEXTURE_PIXELS];
+
+static RASTER rasterize(void *factory, void *face, UINT16 glyph) {
+    RASTER r;
+    r.ok = 0; r.hrCreate = 0; r.hrBounds = 0; r.hrTexture = 0;
+    r.ink = 0; r.pixels = 0; r.w = 0; r.h = 0; r.hash = 0;
+
+    FONT_METRICS fm;
+    ((void(__stdcall *)(void *, FONT_METRICS *))
+     V(face, DW_IDWriteFontFace_GetMetrics))(face, &fm);
+    if (fm.designUnitsPerEm == 0) return r;
+
+    GLYPH_METRICS gm;
+    BOOL sideways = 0;
+    HRESULT hr = ((HRESULT(__stdcall *)(void *, const UINT16 *, UINT32,
+                                        GLYPH_METRICS *, BOOL))
+                  V(face, DW_IDWriteFontFace_GetDesignGlyphMetrics))(
+        face, &glyph, 1, &gm, sideways);
+    if (hr < 0) return r;
+
+    /* 设计单位 → DIP。不换算的话字宽会是 em 的 2048 倍，纹理直接超限。 */
+    float advance = (float)gm.advanceWidth * EM_SIZE / (float)fm.designUnitsPerEm;
+
+    /* DWRITE_GLYPH_RUN 的字段顺序必须与头文件一致：fontFace / fontEmSize /
+     * glyphCount / glyphIndices / glyphAdvances / glyphOffsets / isSideways / bidiLevel。 */
+    struct {
+        void *fontFace;
+        float fontEmSize;
+        UINT32 glyphCount;
+        const UINT16 *glyphIndices;
+        const float *glyphAdvances;
+        const void *glyphOffsets;
+        BOOL isSideways;
+        UINT32 bidiLevel;
+    } run;
+    run.fontFace = face;
+    run.fontEmSize = EM_SIZE;
+    run.glyphCount = 1;
+    run.glyphIndices = &glyph;
+    run.glyphAdvances = &advance;
+    run.glyphOffsets = 0;
+    run.isSideways = 0;
+    run.bidiLevel = 0;
+
+    /* DWRITE_RENDERING_MODE_ALIASED=1（枚举第二项）、
+     * DWRITE_MEASURING_MODE_NATURAL=0（枚举首项）。 */
+    void **analysis = 0;
+    hr = ((HRESULT(__stdcall *)(void *, const void *, float, const void *, int,
+                                int, float, float, void **))
+          V(factory, DW_IDWriteFactory_CreateGlyphRunAnalysis))(
+        factory, &run, 1.0f, 0, 1, 0, 0.0f, 0.0f, (void **)&analysis);
+    r.hrCreate = (int)hr;
+    if (hr < 0 || !analysis) return r;
+
+    RECTI32 bounds;
+    /* DWRITE_TEXTURE_ALIASED_1x1 = 0 */
+    hr = ((HRESULT(__stdcall *)(void *, int, RECTI32 *))
+          V(analysis, DW_IDWriteGlyphRunAnalysis_GetAlphaTextureBounds))(
+        analysis, 0, &bounds);
+    r.hrBounds = (int)hr;
+    if (hr < 0) return r;
+
+    long w = (long)bounds.right - (long)bounds.left;
+    long h = (long)bounds.bottom - (long)bounds.top;
+    r.w = (int)w; r.h = (int)h;
+    /* 空包围盒是**合法**答案：字形没有墨水（比如纯空格）。别当成失败。 */
+    if (w <= 0 || h <= 0) { r.ok = 1; return r; }
+    if (w * h > MAX_TEXTURE_PIXELS) { r.hrTexture = -1; return r; }
+
+    long bytes = w * h;
+    hr = ((HRESULT(__stdcall *)(void *, int, const RECTI32 *, unsigned char *, UINT32))
+          V(analysis, DW_IDWriteGlyphRunAnalysis_CreateAlphaTexture))(
+        analysis, 0, &bounds, g_alpha, (UINT32)bytes);
+    r.hrTexture = (int)hr;
+    if (hr < 0) return r;
+
+    unsigned int hash = 2166136261u;
+    for (long i = 0; i < bytes; i++) {
+        if (g_alpha[i]) r.ink++;
+        hash = (hash ^ g_alpha[i]) * 16777619u;
+    }
+    r.hash = hash;
+    r.pixels = bytes;
+    r.ok = 1;
+    return r;
+}
+
+/* 把某个码点的栅格化结果打出来，并与 `.notdef` 的指纹比一次。
+ *
+ * `tofu` 是字形下标 0 那次渲染的结果，作为「缺字长什么样」的参照。 */
+static void report_raster(void *factory, void *face, UINT32 cp,
+                          const RASTER *tofu, const char *label) {
+    UINT16 glyph = 0;
+    UINT32 p = cp;
+    HRESULT hr = ((HRESULT(__stdcall *)(void *, const UINT32 *, UINT32, UINT16 *))
+                  V(face, DW_IDWriteFontFace_GetGlyphIndices))(face, &p, 1, &glyph);
+
+    P("    raster["); P(label); P("] index="); I((int)glyph);
+    if (hr < 0 || glyph == 0) {
+        /* 下标 0 = `.notdef`：没有这个字的槽位，后面的渲染必然画方框，不必再测。 */
+        P(" ink=0 notdef\n");
+        return;
+    }
+    RASTER r = rasterize(factory, face, glyph);
+    P(" ink="); I((int)r.ink); P(" px="); I((int)r.pixels);
+    P(" size="); I(r.w); P("x"); I(r.h);
+    P(" hash="); H(r.hash);
+    if (!r.ok) {
+        P(" raster-failed(create="); I(r.hrCreate);
+        P(" bounds="); I(r.hrBounds);
+        P(" texture="); I(r.hrTexture); P(")\n");
+        return;
+    }
+    /* 三条一起判：
+     * ① 有墨水 —— 空轮廓会被抓出来；
+     * ② 指纹与 `.notdef` 不同 —— 「画了个方框」会被抓出来；
+     * ③ 像素数不是 0 —— 空包围盒是合法的，但对「这个码点该有笔画」来说不是。 */
+    if (r.ink == 0) P(" EMPTY");
+    else if (tofu->ok && r.hash == tofu->hash) P(" TOFU-SHAPED");
+    else P(" ink-present");
+    P("\n");
+}
+
+/* 完整走一遍：集合 → 按家族名查 → 取家族 → 取字面 → 查字形覆盖 → 栅格化。
  *
  * `label` 只用于输出，便于把「写之前 / 写之后」两组结果并排看。 */
-static void inspect(void **collection, const WCHAR *family_name,
+static void inspect(void **factory, void **collection, const WCHAR *family_name,
                     const char *label) {
     UINT32 index = 0;
     BOOL exists = 0;
@@ -184,6 +394,27 @@ static void inspect(void **collection, const WCHAR *family_name,
     report_glyph(face, 0x0041, "A");
     report_glyph(face, 0x4E2D, "U+4E2D");
     report_glyph(face, 0x9ED1, "U+9ED1");
+
+    /* 像素层：`.notdef`（下标 0）先渲染一次当参照，再逐个码点比指纹。 */
+    RASTER tofu = rasterize(factory, face, 0);
+    P("    notdef ink="); I((int)tofu.ink); P(" px="); I((int)tofu.pixels);
+    P(" size="); I(tofu.w); P("x"); I(tofu.h);
+    if (!tofu.ok || tofu.ink == 0) {
+        /* 苹方的 `.notdef` 是空轮廓（实测 ink=0），所以「指纹与缺字框相同」
+         * 这条判据在本机会空转。降级后必须靠下面那条自检码点守住判别力，
+         * 否则「渲染成功」会被读成「渲染对了」。 */
+        P("（缺字框无墨水，判据②降级；判别力由 U+10FFFD 自检承担）");
+    }
+    P("\n");
+
+    report_raster(factory, face, 0x0041, &tofu, "A");
+    report_raster(factory, face, 0x4E2D, &tofu, "U+4E2D");
+    report_raster(factory, face, 0x9ED1, &tofu, "U+9ED1");
+    /* U+10FFFD 是 Unicode 第 15 平面私用区最后一个码点，任何正常字模都不会
+     * 给它字形。它的 index 必须是 0 —— 这条是「缺字确实会被判出来」的机器证据，
+     * 不靠 notdef 有墨水。若哪天它返回非 0，说明这张字模的 cmap 有问题，
+     * 上面三条 `ink-present` 也就不可信了。 */
+    report_raster(factory, face, 0x10FFFD, &tofu, "U+10FFFD");
 }
 
 void entry(void) {
@@ -219,11 +450,11 @@ void entry(void) {
      * 哪个名字，不会自动把两种写法都登记上（本轮实测：E 组写「微软雅黑」，
      * 则中文名 exists=1、英文名 exists=0）。
      */
-    inspect(collection, yahei_en, "FindFamilyName[Microsoft YaHei]");
-    inspect(collection, yahei_zh, "FindFamilyName[weiruan-yahei]");
-    inspect(collection, simsun_en, "FindFamilyName[SimSun]");
-    inspect(collection, simsun_zh, "FindFamilyName[songti]");
-    inspect(collection, pingfang, "FindFamilyName[PingFang SC]");
+    inspect(factory, collection, yahei_en, "FindFamilyName[Microsoft YaHei]");
+    inspect(factory, collection, yahei_zh, "FindFamilyName[weiruan-yahei]");
+    inspect(factory, collection, simsun_en, "FindFamilyName[SimSun]");
+    inspect(factory, collection, simsun_zh, "FindFamilyName[songti]");
+    inspect(factory, collection, pingfang, "FindFamilyName[PingFang SC]");
 
     ExitProcess(0);
 }

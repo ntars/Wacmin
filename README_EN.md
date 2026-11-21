@@ -2195,7 +2195,7 @@ Wacmin/
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher (AppKit + Foundation)
 │   ├── tools/badge.swift      Icon badge composition
-│   ├── tools/dwrite-probe/    DirectWrite probe (slots generated from dwrite.h, see 15.26)
+│   ├── tools/dwrite-probe/    DirectWrite probe (slots from dwrite.h, pixel rasterization, see 15.26 / 15.27)
 │   ├── runtime/fetch.sh       Wine runtime download script (entry point without installing the Python package)
 │   ├── schema/compat.schema.json
 │   ├── tests/
@@ -2405,13 +2405,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 499 | about 3m36s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), and 9 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / three real-wine arms) |
+| exeonmac | 502 | about 4m37s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), and 12 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / pixel rasterization / four real-wine arms, one of them a Latin-only alias negative control) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1391** | — | See "0 skipped repository-wide" below |
+| **Total** | **1394** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3058,6 +3058,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 
 | Font substitution written into a registry root nobody reads | After 15.23 fixed the format, the keys really land, the stamp is queryable and the log reads "fontsub 已导入 2 条替换" — yet with `lfFaceName` set to `Microsoft YaHei`, `WINEDEBUG=+font` shows **no such mapping** in `dump_gdi_font_subst`, `substituting` fires **0 times**, and `select_font` picks `Courier New`. The text stays tofu | The launcher writes `HKCU\...\FontSubstitutes`. Scanning `win32u.so` for UTF-16 strings yields only `\Registry\Machine\...\FontSubstitutes`, with no `\Registry\User\` counterpart — **the HKCU copy is valid registry data that no code reads**. This is a second, independent defect from 15.23: that one made the data land, this one makes it be read | Root key changed to `HKEY_LOCAL_MACHINE` (measured: `substituting` fires, `select_font` picks `PingFang SC Regular`); the stamp moved to HKLM as well (otherwise "stamp found" only proves the write landed, not that it is in the tree GDI reads — the criterion degrades back to testing existence). Three-way comparison settles it (HKCU ineffective / HKLM effective / `Wine\Fonts\Replacements` effective but rejected as alias semantics). Guards 6 → 7; the old one asserted HKCU — **baking the wrong conclusion into the assertion** — and went red the moment the code changed. Details in 15.24 |
 | Both keys written, yet DirectWrite software is still tofu | After 15.24 fixed GDI, setting `lfFaceName` to `Microsoft YaHei` shows `select_font` picking `PingFang SC Regular` and `substituting` firing; but a DirectWrite program on the same prefix with the same fonts still renders Chinese as tofu, with not a single `+font` line | `FontSubstitutes` is GDI-only: scanning every ELF/PE under `lib/wine` for both UTF-16 and ASCII, the literal appears once, in `x86_64-unix/win32u.so`, and not at all in `x86_64-windows/dwrite.dll`; the latter reads only `HKCU\Software\Wine\Fonts\Replacements` (single-byte ANSI), and in the disassembly at `0x18000b8a5` the string is loaded before `RegOpenKeyA` is called with root `0x80000001`, i.e. HKEY_CURRENT_USER | Write both keys into the same .reg (the roots are exact opposites: GDI wants HKLM, DirectWrite wants HKCU); the stamp moves to `HKCU\Software\Wine\ExeOnMac`, sharing `replacePath`'s root. Six PE-probe groups settle it: HKLM only → `familyCount` 292 and `Microsoft YaHei` not found; HKCU only → 293 and found; both → still 293; HKLM with `Wine\Fonts\Replacements` → 292 — the root matters more than the key name. Guards 7 → 10 (2 scan the real binaries in both encodings, 1 asserts both keys land in one file); the end-to-end assertion now runs `wineserver -k` after SIGTERM before reading from disk (`-w` does not write back — measured 0 hits). Details in 15.25 |
+| The alias is right and the name resolves, but the glyphs are still tofu | Pointing `SimSun` at the Latin-only font Helvetica: `FindFamilyName` returns `exists=1`, `faceCount=6`, the Latin `A` renders normally, while `U+4E2D` is missing — checking only the family name or only the glyph index misses this class of broken mapping | The probe gained a pixel layer: `CreateGlyphRunAnalysis` + `CreateAlphaTexture` actually rasterize, judged on three criteria (`ink>0`, fingerprint differs from `.notdef`, and the known-missing `U+10FFFD` must land on notdef). Measured: the alias and the real font produce identical fingerprints (`A`=0xb302ef1a / `U+4E2D`=0x390a433b); the Latin-alias arm reports `notdef` for `U+4E2D`. See 15.27 |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -4473,8 +4474,66 @@ Two extra arms: **Chinese key names** (writing 微软雅黑 → Chinese name exi
 
 #### ⑥ Still open
 
-(a) **`GetFamilyNames` still page-faults** — 15.25's item (d) is unresolved. This round sidesteps it by checking `GetFontCount` for "are there faces", then `GetFont(0)` → `GetFaceNames`; `faceCount` plus glyph coverage now decisively separates "has a face" from "name only", but "which family-name string DirectWrite resolved to" is still not captured; (b) the rendering layer is still unverified (this round proves DirectWrite says the face contains U+4E2D, not that it is drawn on screen) — still a human judgement; (c) only the YaHei and SimSun key names were tested; SimHei and DengXian were not checked one by one.
+(a) **`GetFamilyNames` still page-faults** — 15.25's item (d) is unresolved. This round sidesteps it by checking `GetFontCount` for "are there faces", then `GetFont(0)` → `GetFaceNames`; `faceCount` plus glyph coverage now decisively separates "has a face" from "name only", but "which family-name string DirectWrite resolved to" is still not captured; (b) the rendering layer is still unverified (this round proves DirectWrite says the face contains U+4E2D, not that it is drawn on screen) — **15.27 pushed this to alpha-bitmap fingerprint comparison**, leaving only stroke quality itself unverified; (c) only the YaHei and SimSun key names were tested; SimHei and DengXian were not checked one by one.
 
+### 15.27 The pixel layer: from "the font has this glyph" to "the pixels match" (measured 2026-11-21)
+
+Rounds 15.23–15.26 all stopped at the same place: **the registry keys were right and the font file contained a glyph for `U+4E2D`**, but no round ever reached "a character is drawn on screen". That gap cannot be closed with logs — `GetGlyphIndices` answers "does this font file have a **slot** for this code point", and it knows nothing about two things: whether that slot points at an **empty outline** (a reserved slot with no strokes, common in broken fonts), and whether the renderer will fall back to a tofu box because the rendering mode is unsupported or a font table is missing.
+
+This round pushes the probe one layer further: it actually lets DirectWrite rasterize, counts pixels and compares fingerprints.
+
+#### ① How it rasterizes, and why no window
+
+The path is `IDWriteFactory::CreateGlyphRunAnalysis` → `IDWriteGlyphRunAnalysis::GetAlphaTextureBounds` → `CreateAlphaTexture`. It is pure DirectWrite — no HDC, no window, no GDI interop — so it exercises **the same consumption chain** that 15.25 verified, rather than switching to a different one to explain the result.
+
+The rendering mode is `DWRITE_RENDERING_MODE_ALIASED` (enum value 1): one byte per pixel, which sidesteps ClearType's three bytes per pixel and the question of which byte is which subpixel. The em size is fixed at 48 DIP — large enough that small-size hinting differences cannot leak into the verdict.
+
+The slot table grew to 11 interfaces / 87 slots, all generated from `dwrite.h`. The four new ones are `IDWriteGdiInterop`, `IDWriteBitmapRenderTarget`, `IDWriteRenderingParams` and `IDWriteGlyphRunAnalysis`.
+
+#### ② How the verdict is designed: no reference image, no human eye
+
+"Some ink pixels exist" is too weak a verdict — a `.notdef` tofu box has ink too. This round judges three things together:
+
+| Criterion | What it catches | Why it is necessary |
+|---|---|---|
+| `ink > 0` | Empty outlines (reserved slot, no strokes) | "Rendering succeeded" is not "a stroke was drawn" |
+| Fingerprint ≠ the `.notdef` fingerprint | The output is literally a tofu box | A tofu box has ink, so `ink>0` alone lets it through |
+| A known-missing code point `U+10FFFD` lands on notdef | Whether the whole verdict is idling | See the paragraph below |
+
+**The third criterion was forced by a mistake made in this very round.** The first version used "fingerprint equals the `.notdef` fingerprint" as the verdict. Measurement showed that PingFang's `.notdef` is an **empty outline** (`ink=0 px=0 size=0x0`), so that criterion could never fire — a criterion that is always true is not a criterion. So the probe now also checks `U+10FFFD` (the last code point of plane 15's private use area, which no sane font maps): its `index` must be 0. If it ever returns non-zero, the font's cmap is broken and the three `ink-present` lines above stop being trustworthy.
+
+#### ③ Four control arms (each clones the base layer afresh; only the registry changes)
+
+| Arm | Written | `familyCount` | Family | `faceCount` | `U+4E2D` index | Pixel layer |
+|---|---|---|---|---|---|---|
+| N | nothing | 292 | `PingFang SC` | 12 | 1278 | `ink=538` / `ink-present` |
+| R | `Replacements`: Microsoft YaHei → PingFang | **293** | `Microsoft YaHei` | 12 | 1278 | `ink=538` / `ink-present` |
+| X | `Replacements`: `SimSun` → **Helvetica** | 293 | `SimSun` | 6 | **0** | `notdef` |
+| — | `PingFang SC` inside the same arm (the real font) | 292 | `PingFang SC` | 12 | 1278 | `ink=538` / `ink-present` |
+
+**Arm R and the real font produce byte-identical fingerprints**: `A` → `0xb302ef1a`, `U+4E2D` → `0x390a433b`, `U+9ED1` → `0xf1d3d18`. The fingerprint is FNV-1a over the alpha bitmap, one pixel of difference changes it — so the alias "Microsoft YaHei" rasterizes **exactly** PingFang's glyph file. Not "the name looks right but the glyphs differ".
+
+**Arm X is the discriminating negative control, and the most valuable result of this round.** It deliberately points `SimSun` at the Latin-only font Helvetica: the name resolves (`exists=1`), the family has six faces (`faceCount=6`), the Latin `A` renders normally (`ink=360`), while `U+4E2D` / `U+9ED1` have **index 0** and the pixel layer says `notdef`. This is the concrete version of what 15.25 warned about: the name is right, the UI is still tofu.
+
+#### ④ Two compile-time traps
+
+- **`undefined symbol: _fltused`**: any use of `float` requires defining `int _fltused = 1` yourself. The MSVC runtime uses it to mark "this module needs floating point"; the compiler references it and the CRT normally provides it. This probe links with `/nodefaultlib`, so it must provide its own. The error mentions nothing about floating point, which makes it easy to misdiagnose as a linker configuration problem.
+- **Design units must be converted to DIP**: `GetDesignGlyphMetrics` returns `advanceWidth` in font design units (PingFang's em is 1000, most CJK fonts use 2048). Treating it as DIP makes the advance 2048× the em, the texture exceeds the limit and `CreateAlphaTexture` fails.
+
+#### ⑤ Guards 9 → 12, four negative verifications
+
+| Layer | Assertion | Negative verification |
+|---|---|---|
+| Static | Must go through `CreateGlyphRunAnalysis` + `CreateAlphaTexture` | Remove the `0x10FFFD` self-check → **1 red** |
+| Static | Must call `GetDesignGlyphMetrics` (design units need conversion) | Change a slot to a bare `3` → **2 red** |
+| Runtime | The alias's pixel fingerprint equals the target font's exactly | Offset the rendering of only the first family by one glyph → **red** (`0xb749edf` vs `0xb302ef1a`) |
+| Runtime | Latin-alias arm: `A` has ink, `U+4E2D` is notdef | Degrade the verdict to "rendering did not fail" → **red** (`ink-present` vs `notdef`) |
+
+**The third negative verification was green on its first attempt, and rightly so.** The first version offset the glyph on both sides (alias and real font), so equality still held — a verdict that only compares "are the two sides equal" is immune to tampering with **both** sides at once. Only a one-sided tamper (touching the first family alone) turned it red. Another instance of "a verdict must be falsifiable in both directions": **wherever equality is the verdict, make sure the two sides cannot be changed together.**
+
+#### ⑥ Still unverified / open
+
+(a) **Glyph quality is still unconfirmed by a human eye** — this round reaches "the alpha bitmaps are identical", which is the last layer a machine can give. Whether the strokes look right and whether ligatures are correct still needs a person; (b) only `ALIASED` was tested; ClearType and grayscale antialiasing are unverified (they may take different code paths in wine); (c) only one CJK font file (PingFang) was tested; (d) only two target values (`PingFang SC` and `Helvetica`) were verified; mapping to a "Microsoft font that lacks CJK" scenario is closer to reality and untested; (e) round 11's open item ③ "mechanically scan all `.reg` write paths of the same shape" has now been pending for five consecutive rounds; (f) **`git push` remains the top human-blocked item** — rounds 11–15 all exist only locally.
 
 ---
 

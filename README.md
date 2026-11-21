@@ -2195,7 +2195,7 @@ Wacmin/
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher（AppKit + Foundation）
 │   ├── tools/badge.swift      图标角标合成
-│   ├── tools/dwrite-probe/    DirectWrite 探针（槽位由 dwrite.h 生成，见 15.26）
+│   ├── tools/dwrite-probe/    DirectWrite 探针（槽位由 dwrite.h 生成，含像素栅格化，见 15.26 / 15.27）
 │   ├── runtime/fetch.sh       Wine 运行时下载脚本（免装 Python 包的入口）
 │   ├── schema/compat.schema.json
 │   ├── tests/
@@ -2404,13 +2404,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 499 项 | 约 3 分 36 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、9 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 三组真实 wine 对照） |
+| exeonmac | 502 项 | 约 4 分 37 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、12 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 像素栅格化 / 四组真实 wine 对照，含 1 组拉丁别名负向对照） |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1391 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1394 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3078,6 +3078,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 | 字体替换写进了没人读的注册表根键 | 15.23 修完格式后，键确实写进去了、戳也查得到、日志写「已导入 2 条替换」，但把 `lfFaceName` 设成「微软雅黑」再跑，`WINEDEBUG=+font` 里 `dump_gdi_font_subst` **没有这条映射**、`substituting` **0 次**、`select_font` 最终选中 `Courier New` —— 字还是方块 | launcher 写的是 `HKCU\...\FontSubstitutes`。`win32u.so` 里按 UTF-16 扫字符串只有 `\Registry\Machine\...\FontSubstitutes`，没有任何 `\Registry\User\` 对应项 —— **HKCU 那份是合法注册表数据，但没有代码去读它**。与 15.23 的格式错是两层独立的错：那层让数据进得去，这层才让它被读到 | 根键改 `HKEY_LOCAL_MACHINE`（实测 `substituting` 触发、`select_font` 选中 `PingFang SC Regular`）；戳同步搬到 HKLM（否则「查得到戳」只证明写进去了、不证明在 GDI 会读的树里，判据又退化成测存在）。三组对照坐实（HKCU 无效 / HKLM 有效 / `Wine\Fonts\Replacements` 有效但因是别名语义未采用）。守卫 6 → 7 项，其中旧那条断言写死了 HKCU —— **把错误结论写进了断言**，改代码时当场变红。详见 15.24 |
 | 明明两条键都写了，DirectWrite 的软件还是方块 | 15.24 修好 GDI 后，把 `lfFaceName` 设成「微软雅黑」再跑，`select_font` 选中 `PingFang SC Regular`、`substituting` 触发；但换成走 DirectWrite 的程序（同一 prefix、同一份字体），中文仍是方块，`+font` 那侧一行日志都没有 | `FontSubstitutes` 是 GDI 专用：按 UTF-16 与 ASCII 两种编码扫 `lib/wine` 全部 ELF/PE，该字面量只在 `x86_64-unix/win32u.so` 里出现 1 处，`x86_64-windows/dwrite.dll` 里一处都没有；后者只认 `HKCU\Software\Wine\Fonts\Replacements`（单字节 ANSI），反汇编 `0x18000b8a5` 处指向该串、`RegOpenKeyA` 的根键实参是 `0x80000001` 即 HKEY_CURRENT_USER | 同一份 .reg 里两条键各写一份（根键正好相反：GDI 要 HKLM，DirectWrite 要 HKCU）；戳搬到 `HKCU\Software\Wine\ExeOnMac` 与 `replacePath` 同根。六组 PE 探针对照坐实：只写 HKLM 时 `familyCount` 292、查不到「微软雅黑」；只写 HKCU 时 293、查得到；两条同写仍 293、`HKLM` 那份换成 `Wine\Fonts\Replacements` 则 292 —— 根键比键名更关键。守卫 7 → 10 项（2 项扫真实二进制的两种编码、1 项断言两条键在同一份文件里），端到端断言改为 SIGTERM 后 `wineserver -k` 再读盘（`-w` 不回写，实测 0 次）。详见 15.25 |
+| 别名写对了、名字也查得到，字画出来还是方块 | 把 `SimSun` 指到纯拉丁字体 Helvetica：`FindFamilyName` 返回 `exists=1`、`faceCount=6`、拉丁字母 `A` 正常渲染，而 `U+4E2D` 是缺字 —— 只查家族名或只查字形下标都会漏掉这类坏映射 | 探针新增像素层：`CreateGlyphRunAnalysis` + `CreateAlphaTexture` 真栅格化，判据三条（`ink>0`、指纹不等于 `.notdef`、已知缺字码点 `U+10FFFD` 必须落在 notdef）。实测别名与真身逐像素同指纹（`A`=0xb302ef1a / `U+4E2D`=0x390a433b），拉丁别名组 `U+4E2D` 被判 `notdef`。详见 15.27 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -4494,8 +4495,66 @@ wine 已启动 pid=18519
 
 #### ⑥ 仍未处理
 
-(a) **`GetFamilyNames` 层仍会 page fault** —— 15.25 遗留 (d) 未解决。本轮改为先 `GetFontCount` 判「有没有字面」、再 `GetFont(0)` → `GetFaceNames`，绕开了家族名那一层；`faceCount` 与字形覆盖已经能决定性地区分「有字模」与「只有名字」，但「DirectWrite 解析到的家族名到底是什么字符串」这一层仍然取不到；(b) 渲染层仍未验（本轮验的是「DirectWrite 说这张字模里有 U+4E2D 的字形」，不是「屏幕上画出来了」），仍只有人眼能判；(c) 只验了微软雅黑与宋体两个键名，黑体、等线等未逐个验。
+(a) **`GetFamilyNames` 层仍会 page fault** —— 15.25 遗留 (d) 未解决。本轮改为先 `GetFontCount` 判「有没有字面」、再 `GetFont(0)` → `GetFaceNames`，绕开了家族名那一层；`faceCount` 与字形覆盖已经能决定性地区分「有字模」与「只有名字」，但「DirectWrite 解析到的家族名到底是什么字符串」这一层仍然取不到；(b) 渲染层仍未验（本轮验的是「DirectWrite 说这张字模里有 U+4E2D 的字形」，不是「屏幕上画出来了」）—— **15.27 已推进到 alpha 位图指纹比对**，未验的只剩笔画质量本身；(c) 只验了微软雅黑与宋体两个键名，黑体、等线等未逐个验。
 
+### 15.27 像素层：从「字模里有这个字」到「画出来的像素对得上」（2026-11-21 实测）
+
+15.23–15.26 四轮都在同一个地方停住：**注册表写对了、字模里有 `U+4E2D` 的字形**，但没有一轮走到「屏幕上画出来的是字」。这中间的差距不是靠日志能补的 —— `GetGlyphIndices` 回答的是「字模里有没有这个码点的**槽位**」，它对两件事一无所知：那个槽位指向的字形是不是**空轮廓**（占着号但没笔画，坏字体里很常见），以及渲染器会不会因为渲染模式不支持、字体表缺失而画出缺字框。
+
+本轮把探针往前推一层：真让 DirectWrite 栅格化一次，数像素、比指纹。
+
+#### ① 怎么栅格化，为什么不建窗口
+
+走 `IDWriteFactory::CreateGlyphRunAnalysis` → `IDWriteGlyphRunAnalysis::GetAlphaTextureBounds` → `CreateAlphaTexture`。这条路纯 DirectWrite，不需要 HDC、不需要窗口、不需要 GDI interop，所以它和 15.25 验的 DirectWrite 路径是**同一条消费链**，不是另换一条来解释。
+
+渲染模式选 `DWRITE_RENDERING_MODE_ALIASED`（枚举值 1）：1 字节/像素，绕过 ClearType 的 3 字节/像素，省掉「这三个字节里哪个是哪个子像素」的解释空间。字号固定 48 DIP —— 足够大，小字号下的 hinting 差异不会混进判据。
+
+槽位表随之扩到 11 个接口 / 87 个槽位，全部由 `dwrite.h` 生成。新增四个：`IDWriteGdiInterop`、`IDWriteBitmapRenderTarget`、`IDWriteRenderingParams`、`IDWriteGlyphRunAnalysis`。
+
+#### ② 判据设计：不靠参考图，不靠人眼
+
+「有墨水像素」这个判据太弱 —— `.notdef` 方框同样有墨水。本轮的判据是三条一起判：
+
+| 判据 | 抓什么 | 为什么必须 |
+|---|---|---|
+| `ink > 0` | 空轮廓（占位但无笔画） | 「渲染成功」不等于「画出了笔画」 |
+| 指纹 ≠ `.notdef` 的指纹 | 画出来就是缺字框 | 缺字框有墨水，只看 `ink>0` 会放过 |
+| 已知缺字码点 `U+10FFFD` 落在 notdef | 整套判据是否在空转 | 见下面这条 |
+
+**第三条是本轮自己踩的坑逼出来的。** 第一版直接用「与 `.notdef` 指纹相同」当判据。实测发现苹方的 `.notdef` 是**空轮廓**（`ink=0 px=0 size=0x0`），于是那条判据永远不可能触发 —— 一个永远为真的判据等于没写。所以补一个**已知必然缺字**的码点 `U+10FFFD`（Unicode 第 15 平面私用区最后一个，任何正常字模都不会给它字形）：它的 `index` 必须等于 0。若哪天它返回非 0，说明这张字模的 cmap 有问题，上面三条 `ink-present` 也就不再可信。
+
+#### ③ 四组对照（每组从 base 层重新 clone，只改注册表）
+
+| 组 | 写入 | `familyCount` | 家族 | `faceCount` | `U+4E2D` 下标 | 像素层 |
+|---|---|---|---|---|---|---|
+| N | 都不写 | 292 | `PingFang SC` | 12 | 1278 | `ink=538` / `ink-present` |
+| R | `Replacements`：微软雅黑 → 苹方 | **293** | `Microsoft YaHei` | 12 | 1278 | `ink=538` / `ink-present` |
+| X | `Replacements`：`SimSun` → **Helvetica** | 293 | `SimSun` | 6 | **0** | `notdef` |
+| — | 同组内的 `PingFang SC`（对照真身） | 292 | `PingFang SC` | 12 | 1278 | `ink=538` / `ink-present` |
+
+**R 组与真身的像素指纹逐字相同**：`A` → `0xb302ef1a`、`U+4E2D` → `0x390a433b`、`U+9ED1` → `0xf1d3d18`。指纹按 FNV-1a 从 alpha 位图逐字节算，差一个像素就不同 —— 也就是说「微软雅黑」这个别名栅格化出来的**就是**苹方那张字模，不是「名字像、字不像」。
+
+**X 组是判别力的负向对照，也是本轮最有价值的一条。** 故意把 `SimSun` 指到纯拉丁字体 Helvetica：名字查得到（`exists=1`）、家族有 6 个字面（`faceCount=6`）、拉丁字母 `A` 正常渲染（`ink=360`），而 `U+4E2D` / `U+9ED1` 的**下标是 0**、像素层判 `notdef`。这正是 15.25「只查 `FindFamilyName` 会漏掉」那句话的现实版本 —— 名字对了、界面照样是方块。
+
+#### ④ 两个编译期的坑
+
+- **`undefined symbol: _fltused`**：用了 `float` 就必须自己定义 `int _fltused = 1`。MSVC 运行时用它标记「本模块需要浮点」，编译器引用它但通常由 CRT 提供；本探针 `/nodefaultlib`，所以得自己给。报错完全没提浮点，很容易误判成链接配置问题。
+- **设计单位必须换算成 DIP**：`GetDesignGlyphMetrics` 的 `advanceWidth` 是字体设计单位（苹方 em=1000，多数中文字体 2048）。直接当 DIP 用会让字宽变成 em 的 2048 倍，纹理尺寸超上限、`CreateAlphaTexture` 返回失败。
+
+#### ⑤ 守卫 9 项 → 12 项，四处负向验证
+
+| 层 | 断言 | 负向验证 |
+|---|---|---|
+| 静态 | 必须走 `CreateGlyphRunAnalysis` + `CreateAlphaTexture` | 删掉 `0x10FFFD` 自检 → **1 项红** |
+| 静态 | 必须取 `GetDesignGlyphMetrics`（设计单位要换算） | 槽位改裸 `3` → **2 项红** |
+| 运行时 | 别名的像素指纹与目标字体逐字相同 | 只让首个家族的渲染偏移一个字形 → **红**（`0xb749edf` vs `0xb302ef1a`） |
+| 运行时 | 拉丁别名组：`A` 有墨水、`U+4E2D` 判 notdef | 判据退化成「渲染没失败就算有字」→ **红**（`ink-present` vs `notdef`） |
+
+**第三次负向验证第一次是绿的，而且绿得有道理。** 初版把「偏移一个字形」加在两侧（别名与真身都偏移），于是相等性依然成立 —— 一个只比较「两边是否相同」的判据，对**同时**篡改两边是免疫的。改成单侧篡改（只动第一个家族）才立刻变红。这是「判据必须双向可证伪」的又一实例：**只验相等的地方，要确保被测的两侧不会一起被改动。**
+
+#### ⑥ 仍未处理
+
+(a) **人眼仍未确认字形质量** —— 本轮到「alpha 位图指纹相同」，这是机器能给的最后一层。笔画是否美观、连字是否正确，仍只有人眼能判；(b) 只测 `ALIASED` 一种渲染模式，ClearType 与灰度抗锯齿路径未验（它们在 wine 上可能走不同代码）；(c) 只验苹方一张字模，其他中文字体未验；(d) 只验证 `PingFang SC` 与 `Helvetica` 两个目标值，映射到「不带中文的 Microsoft 字体」等更真实场景未验；(e) 第 11 轮遗留③「同类 `.reg` 写入路径全量机械扫描」连续第五轮挂着；(f) **`git push` 仍是最高优先级人工待决项**，第 11–15 五轮全部只在本地。
 
 ---
 

@@ -143,7 +143,7 @@ class TestProbeSourceGuards(unittest.TestCase):
     def test_probe_checks_glyph_coverage_not_just_family_name(self) -> None:
         """必须查字形覆盖，不能只查「家族名解析得到」。
 
-        ## 这是本轮的核心判据
+        ## 这是第 13 轮的核心判据
 
         `FindFamilyName` 返回 true 只说明**名字**被登记了。`Replacements` 是别名
         语义：把一个没有中文字形的拉丁字体的名字登记成「微软雅黑」，名字照样查得到，
@@ -157,6 +157,30 @@ class TestProbeSourceGuards(unittest.TestCase):
         # `.notdef` 判据：下标 0 是缺字，不是「查到但为空」。
         self.assertIn("glyph != 0", self.source,
                       "「有字形」的判据必须是下标非 0（0 是 .notdef 缺字框）")
+
+    def test_probe_rasterizes_instead_of_only_trusting_glyph_index(self) -> None:
+        """必须真栅格化一次，不能停在「字形下标非 0」。
+
+        ## 第 15 轮补的这条
+
+        `GetGlyphIndices` 回答的是「字模里有没有这个码点的**槽位**」，它不知道
+        那个槽位指向的字形是空轮廓、也不知道渲染器会不会画出缺字框。只有把字
+        栅格化出来、数像素，才谈得上「像素上是对的」。
+
+        三处必须同时存在：工厂侧的 `CreateGlyphRunAnalysis`、纹理侧的
+        `CreateAlphaTexture`，以及**缺字自检码点**。最后一条最容易被漏 ——
+        苹方的 `.notdef` 是空轮廓（实测 ink=0），所以「与缺字框指纹相同」这条
+        判据在本机会空转，必须有一个**已知必然缺字**的码点来证明判据有判别力。
+        """
+        self.assertIn("DW_IDWriteFactory_CreateGlyphRunAnalysis", self.source,
+                      "探针没有栅格化 —— 只查字形下标证明不了「画出来了」")
+        self.assertIn("DW_IDWriteGlyphRunAnalysis_CreateAlphaTexture", self.source,
+                      "拿到了 run analysis 却没取 alpha 纹理")
+        self.assertIn("0x10FFFD", self.source,
+                      "缺少「必然缺字」的自检码点：没有它，缺字框判据空转也看不出来")
+        self.assertIn("DW_IDWriteFontFace_GetDesignGlyphMetrics", self.source,
+                      "取字宽必须走 GetDesignGlyphMetrics —— 字体设计单位不换算成 DIP "
+                      "会让纹理尺寸超限（em 的 2048 倍）")
 
     def test_build_script_does_not_depend_on_sdk_paths(self) -> None:
         """编译脚本不许写死 SDK 缓存路径。
@@ -256,6 +280,76 @@ class TestDirectWriteRuntime(unittest.TestCase):
         self.assertEqual(family["glyphs"].get("U+4E2D"), "present",
                          "名字解析到了，但字模里没有 U+4E2D —— 别名指向了无中文字形的字体")
         self.assertEqual(family["glyphs"].get("U+9ED1"), "present")
+
+    def test_alias_actually_rasterizes_the_same_pixels_as_the_target(self) -> None:
+        """像素层判据：别名的渲染结果必须与目标字体**逐像素相同**。
+
+        ## 这条比「有墨水」硬得多
+
+        前一条断言「字模里有 U+4E2D 的字形」。但那仍然只是**数据存在**：
+        渲染器可能因为渲染模式不支持、字体表缺失、或别名的家族与字模对不上，
+        而画出别的东西。本条的判据是：同一个码点，在「微软雅黑」这个别名下
+        栅格化出的 alpha 位图指纹，必须与「PingFang SC」下**完全一致**。
+
+        指纹按 FNV-1a 从 alpha 位图逐字节算出，不经任何近似 —— 差一个像素就不同。
+        这不需要参考图、不需要人眼，也不需要「这个字应该长什么样」的先验。
+
+        同时断言「必然缺字」的自检码点 `U+10FFFD` 落在 notdef：它证明这套判据
+        在本 prefix 上真的有判别力（若整条链路永远返回 ink-present，这条会先红）。
+        """
+        result = self._run("R", self.reg_replacements)
+        self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
+        alias = result["families"]["Microsoft YaHei"]
+        target = result["families"]["PingFang SC"]
+        for cp in ("A", "U+4E2D", "U+9ED1"):
+            with self.subTest(code_point=cp):
+                a = alias["raster"].get(cp) or {}
+                t = target["raster"].get(cp) or {}
+                self.assertEqual(a.get("verdict"), "ink-present",
+                                 f"{cp} 在别名下没渲染出墨水：{a}")
+                self.assertEqual(t.get("verdict"), "ink-present",
+                                 f"{cp} 在目标字体下没渲染出墨水：{t}")
+                self.assertGreater(a.get("ink") or 0, 0,
+                                   f"{cp} 的墨水像素数为 0 —— 空轮廓也会「渲染成功」")
+                self.assertEqual(a.get("hash"), t.get("hash"),
+                                 f"{cp} 在别名下与目标字体的像素指纹不同："
+                                 f"{a.get('hash')} vs {t.get('hash')} —— "
+                                 "别名指向的不是同一张字模")
+        # 判别力自检：这套 prefix 里确实有一个码点会被判成缺字。
+        missing = alias["raster"].get("U+10FFFD") or {}
+        self.assertEqual(missing.get("verdict"), "notdef",
+                         "自检码点 U+10FFFD 没被判成缺字 —— 判据可能整体空转")
+        self.assertEqual(missing.get("index"), 0)
+
+    def test_alias_to_a_latin_only_font_is_caught_by_the_pixel_layer(self) -> None:
+        """负向对照：把 `SimSun` 指到纯拉丁字体 Helvetica，必须判出中文缺字。
+
+        ## 为什么必须有这一组
+
+        前三组都在证明「写对了就有效」。但一个只会说「有效」的判据没有价值 ——
+        它同样会对「其实没生效」说有效。本组故意构造一个**名字查得到、字却画不出来**
+        的别名：`SimSun` exists=1、faceCount=6，而 U+4E2D 是缺字。
+
+        这正是 `FindFamilyName` 单独用时会漏掉的形态（第 13 轮遗留的那条风险的
+        现实版本）。像素层必须把它抓成 `notdef`，而拉丁字母 A 仍正常渲染。
+        """
+        reg = _write_reg(Path(self.tmp) / "simsun-helvetica.reg", [(
+            r"HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements",
+            [("SimSun", "Helvetica")],
+        )])
+        result = self._run("X", reg)
+        self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
+        family = result["families"]["SimSun"]
+        self.assertTrue(family["exists"],
+                        "本组的前提是「别名把名字登记上了」；名字都没登记，就测不到本组的点")
+        raster = family["raster"]
+        self.assertEqual(raster["A"].get("verdict"), "ink-present",
+                         "拉丁字母 A 应该正常渲染 —— 否则说明整条渲染链路坏了，"
+                         "而不是中文缺字")
+        self.assertEqual(raster["U+4E2D"].get("verdict"), "notdef",
+                         "别名指向纯拉丁字体时 U+4E2D 必须被判缺字；"
+                         "判成 ink-present 说明像素层没有判别力")
+        self.assertEqual(raster["U+9ED1"].get("verdict"), "notdef")
 
 
 if __name__ == "__main__":

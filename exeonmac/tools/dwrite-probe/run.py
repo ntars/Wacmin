@@ -149,7 +149,8 @@ def _reg_has_mapping(path: Path, values: list[str]) -> bool:
 def parse_probe(stdout: str) -> dict:
     """把探针的人类可读输出解析成结构化结果。
 
-    只认这几个字段，够用且稳定：`familyCount`、每组 `exists`、以及字形覆盖。
+    只认这几个字段，够用且稳定：`familyCount`、每组 `exists` / `faces`、
+    字形覆盖（`glyphs`）、以及第 15 轮加的像素层（`raster`）。
     解析失败返回 `{"ok": False}` —— 让调用方能区分「探针没说话」与「查不到」。
     """
     out: dict = {"ok": False, "familyCount": None, "families": {}}
@@ -162,7 +163,8 @@ def parse_probe(stdout: str) -> dict:
             name = line[len("FindFamilyName["):line.index("]")]
             current = name
             exists = "exists=1" in line
-            out["families"][name] = {"exists": exists, "faces": None, "glyphs": {}}
+            out["families"][name] = {"exists": exists, "faces": None,
+                                     "glyphs": {}, "raster": {}}
         elif current and line.strip().startswith("faceCount="):
             out["families"][current]["faces"] = int(line.split("=", 1)[1])
         elif current and "glyph[" in line:
@@ -170,6 +172,24 @@ def parse_probe(stdout: str) -> dict:
             inside = line[line.index("glyph[") + 6:line.index("]")]
             value = line.split("=", 1)[1]
             out["families"][current]["glyphs"][inside] = value
+        elif current and line.strip().startswith("raster["):
+            # 形如 `    raster[U+4E2D] index=1278 ink=538 px=1748 size=38x46 hash=0x390a433b ink-present`
+            # 或 `    raster[U+10FFFD] index=0 ink=0 notdef`
+            # 或 `    raster[A] index=36 … raster-failed(create=.. bounds=.. texture=..)`
+            inside = line[line.index("raster[") + 7:line.index("]")]
+            fields: dict = {"verdict": "unknown"}
+            for token in line[line.index("]") + 1:].split():
+                if "=" in token:
+                    key, _, value = token.partition("=")
+                    fields[key] = value
+                elif token in ("notdef", "ink-present", "EMPTY", "TOFU-SHAPED"):
+                    fields["verdict"] = token
+                elif token.startswith("raster-failed"):
+                    fields["verdict"] = "raster-failed"
+            for key in ("index", "ink", "px"):
+                if key in fields:
+                    fields[key] = int(fields[key])
+            out["families"][current]["raster"][inside] = fields
     out["ok"] = out["familyCount"] is not None
     return out
 
@@ -270,6 +290,9 @@ def main() -> int:
             for name, info in item["families"].items():
                 glyphs = " ".join(f"{k}:{v}" for k, v in info["glyphs"].items())
                 print(f"  {name}: exists={info['exists']} faces={info['faces']} {glyphs}")
+                for cp, px in info.get("raster", {}).items():
+                    print(f"    {cp}: {px.get('verdict')} ink={px.get('ink')} "
+                          f"hash={px.get('hash', '-')}")
     bad = [r["group"] for r in results if not r["ok"]]
     if bad:
         print(f"✗ 探针没给出结论：{', '.join(bad)}", file=sys.stderr)

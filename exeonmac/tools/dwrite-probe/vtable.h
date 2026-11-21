@@ -85,4 +85,33 @@
 #define DW_IDWriteLocalizedStrings_GetStringLength 7
 #define DW_IDWriteLocalizedStrings_GetString 8
 
+/* IDWriteGdiInterop : public IUnknown */
+#define DW_IDWriteGdiInterop_CreateFontFromLOGFONT 3
+#define DW_IDWriteGdiInterop_ConvertFontToLOGFONT 4
+#define DW_IDWriteGdiInterop_ConvertFontFaceToLOGFONT 5
+#define DW_IDWriteGdiInterop_CreateFontFaceFromHdc 6
+#define DW_IDWriteGdiInterop_CreateBitmapRenderTarget 7
+
+/* IDWriteBitmapRenderTarget : public IUnknown */
+#define DW_IDWriteBitmapRenderTarget_DrawGlyphRun 3
+#define DW_IDWriteBitmapRenderTarget_GetMemoryDC 4
+#define DW_IDWriteBitmapRenderTarget_GetPixelsPerDip 5
+#define DW_IDWriteBitmapRenderTarget_SetPixelsPerDip 6
+#define DW_IDWriteBitmapRenderTarget_GetCurrentTransform 7
+#define DW_IDWriteBitmapRenderTarget_SetCurrentTransform 8
+#define DW_IDWriteBitmapRenderTarget_GetSize 9
+#define DW_IDWriteBitmapRenderTarget_Resize 10
+
+/* IDWriteRenderingParams : public IUnknown */
+#define DW_IDWriteRenderingParams_GetGamma 3
+#define DW_IDWriteRenderingParams_GetEnhancedContrast 4
+#define DW_IDWriteRenderingParams_GetClearTypeLevel 5
+#define DW_IDWriteRenderingParams_GetPixelGeometry 6
+#define DW_IDWriteRenderingParams_GetRenderingMode 7
+
+/* IDWriteGlyphRunAnalysis : public IUnknown */
+#define DW_IDWriteGlyphRunAnalysis_GetAlphaTextureBounds 3
+#define DW_IDWriteGlyphRunAnalysis_CreateAlphaTexture 4
+#define DW_IDWriteGlyphRunAnalysis_GetAlphaBlendParams 5
+
 #endif

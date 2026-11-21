@@ -53,6 +53,12 @@ WANTED = [
     "IDWriteFont",
     "IDWriteFontFace",
     "IDWriteLocalizedStrings",
+    # 下面三个是第 15 轮加的：把「字模里有字形」推进到「像素上画出来了」。
+    # GetGlyphIndices 只回答「下标非 0」，回答不了「画出来是字还是缺字框」。
+    "IDWriteGdiInterop",
+    "IDWriteBitmapRenderTarget",
+    "IDWriteRenderingParams",
+    "IDWriteGlyphRunAnalysis",
 ]
 
 #: `IUnknown` 的 3 个方法（QueryInterface / AddRef / Release）不写进任何接口体，

@@ -106,5 +106,50 @@
       "GetStringLength": 7,
       "GetString": 8
     }
+  },
+  "IDWriteGdiInterop": {
+    "iid": "1edd9491-9853-4299-898f-6432983b6f3a",
+    "base": "IUnknown",
+    "slots": {
+      "CreateFontFromLOGFONT": 3,
+      "ConvertFontToLOGFONT": 4,
+      "ConvertFontFaceToLOGFONT": 5,
+      "CreateFontFaceFromHdc": 6,
+      "CreateBitmapRenderTarget": 7
+    }
+  },
+  "IDWriteBitmapRenderTarget": {
+    "iid": "5e5a32a3-8dff-4773-9ff6-0696eab77267",
+    "base": "IUnknown",
+    "slots": {
+      "DrawGlyphRun": 3,
+      "GetMemoryDC": 4,
+      "GetPixelsPerDip": 5,
+      "SetPixelsPerDip": 6,
+      "GetCurrentTransform": 7,
+      "SetCurrentTransform": 8,
+      "GetSize": 9,
+      "Resize": 10
+    }
+  },
+  "IDWriteRenderingParams": {
+    "iid": "2f0da53a-2add-47cd-82ee-d9ec34688e75",
+    "base": "IUnknown",
+    "slots": {
+      "GetGamma": 3,
+      "GetEnhancedContrast": 4,
+      "GetClearTypeLevel": 5,
+      "GetPixelGeometry": 6,
+      "GetRenderingMode": 7
+    }
+  },
+  "IDWriteGlyphRunAnalysis": {
+    "iid": "7d97dbf7-e085-42d4-81e3-6a883bded118",
+    "base": "IUnknown",
+    "slots": {
+      "GetAlphaTextureBounds": 3,
+      "CreateAlphaTexture": 4,
+      "GetAlphaBlendParams": 5
+    }
   }
 }

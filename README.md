@@ -2195,7 +2195,7 @@ Wacmin/
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher（AppKit + Foundation）
 │   ├── tools/badge.swift      图标角标合成
-│   ├── tools/dwrite-probe/    DirectWrite 探针（槽位由 dwrite.h 生成，含像素栅格化，见 15.26 / 15.27）
+│   ├── tools/dwrite-probe/    DirectWrite 探针（槽位由 dwrite.h 生成，含三档渲染模式的像素栅格化，见 15.26–15.28）
 │   ├── runtime/fetch.sh       Wine 运行时下载脚本（免装 Python 包的入口）
 │   ├── schema/compat.schema.json
 │   ├── tests/
@@ -2404,13 +2404,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 502 项 | 约 4 分 37 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、12 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 像素栅格化 / 四组真实 wine 对照，含 1 组拉丁别名负向对照） |
+| exeonmac | 511 项 | 约 4 分 39 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、21 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 像素栅格化 / 三档渲染模式 / 落盘判据纯函数 / 四组真实 wine 对照，含 1 组拉丁别名负向对照） |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1394 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1403 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3079,6 +3079,8 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 字体替换写进了没人读的注册表根键 | 15.23 修完格式后，键确实写进去了、戳也查得到、日志写「已导入 2 条替换」，但把 `lfFaceName` 设成「微软雅黑」再跑，`WINEDEBUG=+font` 里 `dump_gdi_font_subst` **没有这条映射**、`substituting` **0 次**、`select_font` 最终选中 `Courier New` —— 字还是方块 | launcher 写的是 `HKCU\...\FontSubstitutes`。`win32u.so` 里按 UTF-16 扫字符串只有 `\Registry\Machine\...\FontSubstitutes`，没有任何 `\Registry\User\` 对应项 —— **HKCU 那份是合法注册表数据，但没有代码去读它**。与 15.23 的格式错是两层独立的错：那层让数据进得去，这层才让它被读到 | 根键改 `HKEY_LOCAL_MACHINE`（实测 `substituting` 触发、`select_font` 选中 `PingFang SC Regular`）；戳同步搬到 HKLM（否则「查得到戳」只证明写进去了、不证明在 GDI 会读的树里，判据又退化成测存在）。三组对照坐实（HKCU 无效 / HKLM 有效 / `Wine\Fonts\Replacements` 有效但因是别名语义未采用）。守卫 6 → 7 项，其中旧那条断言写死了 HKCU —— **把错误结论写进了断言**，改代码时当场变红。详见 15.24 |
 | 明明两条键都写了，DirectWrite 的软件还是方块 | 15.24 修好 GDI 后，把 `lfFaceName` 设成「微软雅黑」再跑，`select_font` 选中 `PingFang SC Regular`、`substituting` 触发；但换成走 DirectWrite 的程序（同一 prefix、同一份字体），中文仍是方块，`+font` 那侧一行日志都没有 | `FontSubstitutes` 是 GDI 专用：按 UTF-16 与 ASCII 两种编码扫 `lib/wine` 全部 ELF/PE，该字面量只在 `x86_64-unix/win32u.so` 里出现 1 处，`x86_64-windows/dwrite.dll` 里一处都没有；后者只认 `HKCU\Software\Wine\Fonts\Replacements`（单字节 ANSI），反汇编 `0x18000b8a5` 处指向该串、`RegOpenKeyA` 的根键实参是 `0x80000001` 即 HKEY_CURRENT_USER | 同一份 .reg 里两条键各写一份（根键正好相反：GDI 要 HKLM，DirectWrite 要 HKCU）；戳搬到 `HKCU\Software\Wine\ExeOnMac` 与 `replacePath` 同根。六组 PE 探针对照坐实：只写 HKLM 时 `familyCount` 292、查不到「微软雅黑」；只写 HKCU 时 293、查得到；两条同写仍 293、`HKLM` 那份换成 `Wine\Fonts\Replacements` 则 292 —— 根键比键名更关键。守卫 7 → 10 项（2 项扫真实二进制的两种编码、1 项断言两条键在同一份文件里），端到端断言改为 SIGTERM 后 `wineserver -k` 再读盘（`-w` 不回写，实测 0 次）。详见 15.25 |
 | 别名写对了、名字也查得到，字画出来还是方块 | 把 `SimSun` 指到纯拉丁字体 Helvetica：`FindFamilyName` 返回 `exists=1`、`faceCount=6`、拉丁字母 `A` 正常渲染，而 `U+4E2D` 是缺字 —— 只查家族名或只查字形下标都会漏掉这类坏映射 | 探针新增像素层：`CreateGlyphRunAnalysis` + `CreateAlphaTexture` 真栅格化，判据三条（`ink>0`、指纹不等于 `.notdef`、已知缺字码点 `U+10FFFD` 必须落在 notdef）。实测别名与真身逐像素同指纹（`A`=0xb302ef1a / `U+4E2D`=0x390a433b），拉丁别名组 `U+4E2D` 被判 `notdef`。详见 15.27 |
+| 像素指纹对得上，但只在 ALIASED 模式下验过 | 15.27 用 `ALIASED` 得「像素对得上」，而真实软件走 ClearType。若 DirectWrite 的渲染模式参数真被当回事，两种模式的指纹与纹理尺寸都不同 —— 只测一档无法区分「模式被忽略」与「模式真的不同」，前者是好消息、后者要补验 | 探针扩成三档（`ALIASED` / `GDI_CLASSIC` / `NATURAL`），ClearType 纹理按 3 字节/像素取值。实测 ALIASED 与 ClearType 指纹不同、`px` 严格 1 : 3，而 `GDI_CLASSIC` 与 `NATURAL` 在 wine 上逐项相同（落到同一条光栅化路径）。详见 15.28 |
+| 落盘检查把 base 层预置值当成本次写入 | X 组只写 HKCU，`system.reg` 却报「写进去了」。根因是判据只看「本次要写的值在文件里出现过」，而 base 层自带 `"Helvetica"="Arial"` —— 要写的值恰好是那边的**键名**。这类假阳性不报错、只报成功，整组对照会静默作废 | 判据改为「段头 + 值名 + 值」三者齐全，并区分根键（`user.reg`=HKCU / `system.reg`=HKLM）；空集显式判 False。修后 X 组 `system.reg=False`。详见 15.28③ |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -4555,6 +4557,67 @@ wine 已启动 pid=18519
 #### ⑥ 仍未处理
 
 (a) **人眼仍未确认字形质量** —— 本轮到「alpha 位图指纹相同」，这是机器能给的最后一层。笔画是否美观、连字是否正确，仍只有人眼能判；(b) 只测 `ALIASED` 一种渲染模式，ClearType 与灰度抗锯齿路径未验（它们在 wine 上可能走不同代码）；(c) 只验苹方一张字模，其他中文字体未验；(d) 只验证 `PingFang SC` 与 `Helvetica` 两个目标值，映射到「不带中文的 Microsoft 字体」等更真实场景未验；(e) 第 11 轮遗留③「同类 `.reg` 写入路径全量机械扫描」连续第五轮挂着；(f) **`git push` 仍是最高优先级人工待决项**，第 11–15 五轮全部只在本地。
+
+### 15.28 渲染模式：ALIASED 画对了，真实软件走的那条路径没测过（2026-11-21 实测）
+
+15.27 只用了 `DWRITE_RENDERING_MODE_ALIASED` 一种模式就下了「像素对得上」的结论。而**真实 Windows 软件几乎不走 ALIASED**：GDI 是 `CLEARTYPE_QUALITY`，DirectWrite 默认 `NATURAL`，两者都是 ClearType 的子像素路径。所以「ALIASED 画对了」推不出「真实软件也画对了」—— 这句话在 15.27⑥(b) 里被自己写下了，本轮补它。
+
+#### ① 三档模式各自对应一种纹理类型，配错就报 `E_INVALIDARG`
+
+| 输出标签 | `DWRITE_RENDERING_MODE_*` | 纹理类型 | 字节/像素 |
+|---|---|---|---|
+| `alias` | `ALIASED`（1） | `DWRITE_TEXTURE_ALIASED_1x1`（0） | 1 |
+| `gdic` | `GDI_CLASSIC`（2） | `DWRITE_TEXTURE_CLEARTYPE_3x1`（1） | 3 |
+| `nat` | `NATURAL`（4） | `DWRITE_TEXTURE_CLEARTYPE_3x1`（1） | 3 |
+
+纹理类型必须与模式匹配，**不匹配时 `GetAlphaTextureBounds` 不猜，直接返回 `E_INVALIDARG`**。另一个必踩的坑：ClearType 的纹理宽度是像素宽的 **3 倍**（一像素三子像素各 1 字节），按 1x1 算会把缓冲区开小三倍，`CreateAlphaTexture` 同样报 `E_INVALIDARG` —— 而报错一个字都不提子像素，很容易误判成「这个模式 wine 不支持」。
+
+#### ② 实测：wine 把两档 ClearType 归并成一条路径，ALIASED 是另一条
+
+三档都跑真 wine（同一个 prefix、同一张苹方字模，48 DIP）：
+
+| 码点 | `alias` | `gdic` | `nat` | ALIASED vs ClearType |
+|---|---|---|---|---|
+| `A` | `ink=311` / `px=1120` / `0xb302ef1a` | `ink=144` / `px=3360` / `0xb2c8e3cb` | 同 `gdic` | **不同** |
+| `U+4E2D` | `ink=538` / `px=1748` / `0x390a433b` | `ink=354` / `px=5244` / `0x82392a23` | 同 `gdic` | **不同** |
+| `U+9ED1` | `ink=739` / `px=1806` / `0xf1d3d18` | `ink=252` / `px=5418` / `0xb6ad4a3b` | 同 `gdic` | **不同** |
+
+三条结论，各自独立：
+
+1. **模式真的被当真了。** ALIASED 与 ClearType 的指纹不同、`px` 比例正好 1 : 3（`1120 → 3360`、`1748 → 5244`、`1806 → 5418`），说明 `renderingMode` 参数有效、ClearType 确实按子像素出图。若两者指纹相同，那就是模式被忽略 —— 那时 15.27 的结论反而可以覆盖全部模式（好消息），但**只测一档永远区分不出这两种情况**。
+2. **`GDI_CLASSIC` 与 `NATURAL` 在 wine 上完全等同**（指纹、墨水数、纹理尺寸逐项相同）。这不是猜测，是可复核的事实：两个模式在 wine 的 dwrite 里落到同一条光栅化路径。断言写成「两者必须相同」，wine 哪天分开了会自己变红，而不是留一份「两档都测了」的假覆盖。
+3. **字形边界不随模式改变**（同码点三档 `size` 完全一致，如 `U+4E2D` 都是 `38x46`）。模式只影响采样密度，不影响布局 —— 这条能抓住「模式参数串位到别的槽」这类错误。
+
+#### ③ 顺带修掉一个判据假阳性：落盘检查把 base 层预置值当成了本次写入
+
+补 ClearType 断言时要断言「X 组只写 HKCU，`system.reg` 必须是 False」，结果它是 **True**。查下去是 `run.py` 的落盘判据有假阳性：旧实现只检查「本次要写的**值**在落盘文件里作为带引号的字符串出现过」。X 组写的是 `"SimSun"="Helvetica"`，而 base 层自带的 `FontSubstitutes` 段里有 wine 预置的 `"Helvetica"="Arial"` —— 字符串 `"Helvetica"` 确实在文件里，只是**它是键名、不是我们写的值**。
+
+这类缺陷不报错，只报成功。三个运行时用例的前提都写着「本组的前提是确实写进去了」，判据一假，整组对照全部作废而没人会知道 —— 与第 7 轮 `regedit /S` 静默失败、第 11 轮「键是上一轮写的」同一种形态（**第四次**）。
+
+修法：判据同时要求三件事 —— 段头对得上、值名对得上、值也对得上；且必须区分根键（`user.reg` 是 HKCU 那棵树、`system.reg` 是 HKLM，段头本身不含根键，只能由调用方声明）。修后 X 组 `system.reg=False`、`user.reg=True`。
+
+**修的过程中守卫又抓到一个「空集算通过」：** 若 `sections` 里一段都不属于该根键，`for` 循环里「不匹配就 `continue`」会让 `ok` 保持初值 True —— 等于「没有要检查的东西」被读成「全部检查通过」。同一个坑在第 9 轮的 `test_scan_covers_all_test_modules` 上出现过（glob 返回空集，前两条守卫全绿）。已改成显式拒绝空集。
+
+#### ④ 一个自己踩的签名坑：凭记忆写了 10 个参数
+
+给 `CreateGlyphRunAnalysis` 加 `renderingMode` 时，我按记忆把它写成 10 个参数（多加了 `gridFitMode` / `antialiasMode`）。实际 `dwrite.h` 里只有 **8 个**，那两个是 `IDWriteTextRenderer` 一侧的概念。函数指针强转绕过了类型检查，编译照样过，症状是**探针挂住 180 秒超时** —— 多出来的两个实参把 `renderingMode` 挤到别的位置，模式取到垃圾值。报错读起来像「wine 卡死了」。
+
+教训与 15.26⑥ 同一条：**签名只许来自头文件，不许来自记忆。** 现已加静态守卫直接数形参个数并逐个核对类型。
+
+#### ⑤ 守卫 12 项 → 21 项，五处负向验证全部有效
+
+| 层 | 新增断言 | 负向验证 |
+|---|---|---|
+| 静态 | 模式表至少三档，且 `renderingMode` 必须来自表（不许写死常量） | 写死 `1` → **1 项红** |
+| 静态 | ClearType 纹理字节数必须是 `w*h*3` | 去掉 `width_factor` → **1 项红** |
+| 静态 | `CreateGlyphRunAnalysis` 形参个数 = 9（8 实参 + out），逐个核类型 | 注回 10 参数版 → **1 项红** |
+| 纯函数 | 值作为别处的**键名**出现时不算落盘 | 退回旧实现 → **3 项红** |
+| 纯函数 | 空集 / 根键不匹配必须判 False | 去掉根键过滤 → **1 项红** |
+| 运行时 | ClearType 两档 `ink-present`、`px = w*h*3`、尺寸与 ALIASED 一致、指纹与 ALIASED 不同、两档之间相同 | 见上一行静态两条（运行时无独立注入，靠静态守卫先行拦截） |
+
+#### ⑥ 仍未处理
+
+(a) **人眼仍未确认字形质量** —— 本轮到「ClearType 的子像素 alpha 也对得上」，仍是机器能给的最外层。笔画美观、连字正确、次像素渲染在真实屏幕上的观感，只有人眼能判；(b) 只测了 `GDI_CLASSIC` / `NATURAL` 两档 ClearType 与 `ALIASED`，**灰度抗锯齿（`DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`）与 `OUTLINE` 未测**；(c) `measuringMode` 固定 `NATURAL`，`GDI_CLASSIC` 那一侧的取整差异未验；(d) 只验苹方一张字模；(e) 第 11 轮遗留③「同类 `.reg` 写入路径全量机械扫描」连续第六轮挂着；(f) **`git push` 仍是最高优先级人工待决项**，第 11–16 六轮全部只在本地。
 
 ---
 

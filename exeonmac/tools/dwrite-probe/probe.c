@@ -174,6 +174,45 @@ static void report_glyph(void *face, UINT32 cp, const char *label) {
 
 typedef struct { UINT32 left, top, right, bottom; } RECTI32;
 
+/* ─────────────── 渲染模式：ALIASED 只是三种里的一种 ───────────────
+ *
+ * 第 15 轮只用 `ALIASED` 一种模式就下了「像素对得上」的结论。那条结论的
+ * 适用范围比它听起来窄得多：真实 Windows 软件几乎不会用 ALIASED —— GDI 走
+ * `CLEARTYPE_QUALITY`，DirectWrite 默认走 `NATURAL`（都是 ClearType 的
+ * 子像素路径）。**不同的渲染模式在 DirectWrite 里是不同代码路径**（不同的
+ * 光栅化器、不同的字模表解释），所以「ALIASED 画对了」推不出「真实软件也画对了」。
+ *
+ * 三种模式各自对应一种 alpha 纹理类型：
+ *   ALIASED      → DWRITE_TEXTURE_ALIASED_1x1       1 字节/像素
+ *   GDI_CLASSIC  → DWRITE_TEXTURE_CLEARTYPE_3x1     3 字节/像素（子像素）
+ *   NATURAL      → DWRITE_TEXTURE_CLEARTYPE_3x1     3 字节/像素（子像素）
+ *
+ * 纹理类型必须与模式匹配，否则 `GetAlphaTextureBounds` 返回
+ * `E_INVALIDARG`（不匹配时它不猜，直接拒）。
+ *
+ * ## 为什么三档都测而不是挑一档
+ *
+ * 目的是判断「wine 的 dwrite 到底把模式当真了没有」。若三档指纹完全相同，
+ * 说明模式参数被忽略，那么第 15 轮的结论可以覆盖全部模式（好消息）；
+ * 若不同，则第 15 轮的结论只对 ALIASED 成立，必须补验其余两档（本轮要回答的）。
+ * 只测一档无法区分这两种情况 —— 这正是「测了一个值就下结论」的形态。
+ */
+typedef struct {
+    const char *name;   /* 输出里用的短名 */
+    int mode;           /* DWRITE_RENDERING_MODE_* */
+    int texture;        /* DWRITE_TEXTURE_TYPE_* */
+    int width_factor;   /* 纹理宽度相对像素宽度的倍数：1x1 是 1，3x1 是 3 */
+} RENDER_MODE;
+
+/* 枚举值取自 `dwrite.h`（`DWRITE_RENDERING_MODE` / `DWRITE_TEXTURE_TYPE`），
+ * 顺序即声明顺序，不手抄数字以外的东西。 */
+static const RENDER_MODE MODES[] = {
+    {"alias", 1, 0, 1},   /* ALIASED / ALIASED_1x1 */
+    {"gdic",  2, 1, 3},   /* GDI_CLASSIC / CLEARTYPE_3x1 */
+    {"nat",   4, 1, 3},   /* NATURAL / CLEARTYPE_3x1 */
+};
+#define MODE_COUNT ((int)(sizeof MODES / sizeof MODES[0]))
+
 /* 字形度量。只用 advanceWidth，其余字段必须按头文件顺序占位，
  * 否则结构大小不对、写入会越界。 */
 typedef struct {
@@ -200,9 +239,11 @@ typedef struct {
 } FONT_METRICS;
 
 /* 一次性把某个字形栅格化的结果。`hash` 是 alpha 位图的指纹（FNV-1a），
- * `ink` 是 alpha > 0 的像素数，`w/h` 是纹理尺寸。 */
+ * `ink` 是 alpha > 0 的像素数，`w/h` 是纹理尺寸（ClearType 的 w 是像素宽的 3 倍，
+ * 因为一个像素有三个子像素）。 */
 typedef struct {
     int ok;
+    int mode;          /* MODES 的下标 */
     int hrCreate;
     int hrBounds;
     int hrTexture;
@@ -218,10 +259,12 @@ typedef struct {
 
 static unsigned char g_alpha[MAX_TEXTURE_PIXELS];
 
-static RASTER rasterize(void *factory, void *face, UINT16 glyph) {
+static RASTER rasterize(void *factory, void *face, UINT16 glyph, int mode_index) {
     RASTER r;
-    r.ok = 0; r.hrCreate = 0; r.hrBounds = 0; r.hrTexture = 0;
+    r.ok = 0; r.mode = mode_index; r.hrCreate = 0; r.hrBounds = 0; r.hrTexture = 0;
     r.ink = 0; r.pixels = 0; r.w = 0; r.h = 0; r.hash = 0;
+
+    const RENDER_MODE m = MODES[mode_index];
 
     FONT_METRICS fm;
     ((void(__stdcall *)(void *, FONT_METRICS *))
@@ -260,21 +303,31 @@ static RASTER rasterize(void *factory, void *face, UINT16 glyph) {
     run.isSideways = 0;
     run.bidiLevel = 0;
 
-    /* DWRITE_RENDERING_MODE_ALIASED=1（枚举第二项）、
-     * DWRITE_MEASURING_MODE_NATURAL=0（枚举首项）。 */
+    /* 参数顺序**照抄 `dwrite.h` 的 `IDWriteFactory::CreateGlyphRunAnalysis`**：
+     *
+     *   glyphRun, pixelsPerDip, transform, renderingMode, measuringMode,
+     *   baselineOriginX, baselineOriginY, out
+     *
+     * 共 8 个参数，**没有** gridFitMode / antialiasMode —— 那是
+     * `IDWriteTextRenderer` 一侧的概念。本轮中途凭记忆写成 10 参数版本，
+     * 因为函数指针强转绕过类型检查而编译通过，症状是探针**挂住 180 秒超时**
+     * （多出来的两个实参把 renderingMode 挤到 measuringMode 的位置，模式取到
+     * 垃圾值）。教训与 15.26⑥ 同一条：**签名只许来自头文件，不许来自记忆。**
+     *
+     * measuringMode 固定 `NATURAL`（0）：真实软件里 NATURAL 与 GDI_CLASSIC 的
+     * 差别只在字宽取整，不影响「画出来是不是同一个字」。 */
     void **analysis = 0;
     hr = ((HRESULT(__stdcall *)(void *, const void *, float, const void *, int,
                                 int, float, float, void **))
           V(factory, DW_IDWriteFactory_CreateGlyphRunAnalysis))(
-        factory, &run, 1.0f, 0, 1, 0, 0.0f, 0.0f, (void **)&analysis);
+        factory, &run, 1.0f, 0, m.mode, 0, 0.0f, 0.0f, (void **)&analysis);
     r.hrCreate = (int)hr;
     if (hr < 0 || !analysis) return r;
 
     RECTI32 bounds;
-    /* DWRITE_TEXTURE_ALIASED_1x1 = 0 */
     hr = ((HRESULT(__stdcall *)(void *, int, RECTI32 *))
           V(analysis, DW_IDWriteGlyphRunAnalysis_GetAlphaTextureBounds))(
-        analysis, 0, &bounds);
+        analysis, m.texture, &bounds);
     r.hrBounds = (int)hr;
     if (hr < 0) return r;
 
@@ -283,12 +336,16 @@ static RASTER rasterize(void *factory, void *face, UINT16 glyph) {
     r.w = (int)w; r.h = (int)h;
     /* 空包围盒是**合法**答案：字形没有墨水（比如纯空格）。别当成失败。 */
     if (w <= 0 || h <= 0) { r.ok = 1; return r; }
-    if (w * h > MAX_TEXTURE_PIXELS) { r.hrTexture = -1; return r; }
 
-    long bytes = w * h;
+    /* ClearType 的纹理宽度是像素宽的 3 倍（每个像素 3 个子像素，各 1 字节）。
+     * 按 1x1 算会把缓冲区开小 3 倍，`CreateAlphaTexture` 直接报
+     * `E_INVALIDARG` —— 而报错同样不提「你少算了子像素」。 */
+    long bytes = w * (long)m.width_factor * h;
+    if (bytes > MAX_TEXTURE_PIXELS) { r.hrTexture = -1; return r; }
+
     hr = ((HRESULT(__stdcall *)(void *, int, const RECTI32 *, unsigned char *, UINT32))
           V(analysis, DW_IDWriteGlyphRunAnalysis_CreateAlphaTexture))(
-        analysis, 0, &bounds, g_alpha, (UINT32)bytes);
+        analysis, m.texture, &bounds, g_alpha, (UINT32)bytes);
     r.hrTexture = (int)hr;
     if (hr < 0) return r;
 
@@ -305,21 +362,17 @@ static RASTER rasterize(void *factory, void *face, UINT16 glyph) {
 
 /* 把某个码点的栅格化结果打出来，并与 `.notdef` 的指纹比一次。
  *
- * `tofu` 是字形下标 0 那次渲染的结果，作为「缺字长什么样」的参照。 */
-static void report_raster(void *factory, void *face, UINT32 cp,
-                          const RASTER *tofu, const char *label) {
-    UINT16 glyph = 0;
-    UINT32 p = cp;
-    HRESULT hr = ((HRESULT(__stdcall *)(void *, const UINT32 *, UINT32, UINT16 *))
-                  V(face, DW_IDWriteFontFace_GetGlyphIndices))(face, &p, 1, &glyph);
-
-    P("    raster["); P(label); P("] index="); I((int)glyph);
-    if (hr < 0 || glyph == 0) {
-        /* 下标 0 = `.notdef`：没有这个字的槽位，后面的渲染必然画方框，不必再测。 */
-        P(" ink=0 notdef\n");
-        return;
-    }
-    RASTER r = rasterize(factory, face, glyph);
+ * `tofu` 是字形下标 0 那次渲染的结果，作为「缺字长什么样」的参照（同一种模式）。
+ * 三档渲染模式各出一行：`raster[cp]` 是 ALIASED（与第 15 轮的输出格式一致，
+ * 老判据不用改），另两档标成 `raster[cp@gdic]` / `raster[cp@nat]`。
+ */
+static void report_one(void *factory, void *face, UINT16 glyph, UINT32 cp,
+                       const RASTER *tofu, const char *label, int mode_index,
+                       const char *suffix) {
+    RASTER r = rasterize(factory, face, glyph, mode_index);
+    P("    raster["); P(label); P(suffix); P("]");
+    P(" mode="); P(MODES[mode_index].name);
+    P(" index="); I((int)glyph);
     P(" ink="); I((int)r.ink); P(" px="); I((int)r.pixels);
     P(" size="); I(r.w); P("x"); I(r.h);
     P(" hash="); H(r.hash);
@@ -337,6 +390,24 @@ static void report_raster(void *factory, void *face, UINT32 cp,
     else if (tofu->ok && r.hash == tofu->hash) P(" TOFU-SHAPED");
     else P(" ink-present");
     P("\n");
+}
+
+static void report_raster(void *factory, void *face, UINT32 cp,
+                          const RASTER *tofu_by_mode, const char *label) {
+    UINT16 glyph = 0;
+    UINT32 p = cp;
+    HRESULT hr = ((HRESULT(__stdcall *)(void *, const UINT32 *, UINT32, UINT16 *))
+                  V(face, DW_IDWriteFontFace_GetGlyphIndices))(face, &p, 1, &glyph);
+
+    if (hr < 0 || glyph == 0) {
+        /* 下标 0 = `.notdef`：没有这个字的槽位，后面的渲染必然画方框，不必再测。
+         * 只打一行 —— 三档都会是 notdef，重复三遍只是噪音。 */
+        P("    raster["); P(label); P("] index=0 ink=0 notdef\n");
+        return;
+    }
+    static const char *SUFFIX[3] = {"", "@gdic", "@nat"};
+    for (int i = 0; i < MODE_COUNT; i++)
+        report_one(factory, face, glyph, cp, &tofu_by_mode[i], label, i, SUFFIX[i]);
 }
 
 /* 完整走一遍：集合 → 按家族名查 → 取家族 → 取字面 → 查字形覆盖 → 栅格化。
@@ -395,26 +466,37 @@ static void inspect(void **factory, void **collection, const WCHAR *family_name,
     report_glyph(face, 0x4E2D, "U+4E2D");
     report_glyph(face, 0x9ED1, "U+9ED1");
 
-    /* 像素层：`.notdef`（下标 0）先渲染一次当参照，再逐个码点比指纹。 */
-    RASTER tofu = rasterize(factory, face, 0);
-    P("    notdef ink="); I((int)tofu.ink); P(" px="); I((int)tofu.pixels);
-    P(" size="); I(tofu.w); P("x"); I(tofu.h);
-    if (!tofu.ok || tofu.ink == 0) {
+    /* 像素层：`.notdef`（下标 0）在**每种模式**下各渲染一次当参照，再逐个码点同模式比指纹。
+     *
+     * 参照必须与目标同模式：ALIASED 的 alpha 是 1 字节/像素、ClearType 是 3 字节/像素
+     * （子像素），跨模式的指纹本来就不可能相等 —— 拿 ALIASED 的缺字框去比 ClearType
+     * 的字，永远得出「不同」，判据②就永远为真、等于没写。 */
+    RASTER tofu_by_mode[MODE_COUNT];
+    for (int i = 0; i < MODE_COUNT; i++) {
+        tofu_by_mode[i] = rasterize(factory, face, 0, i);
+        P("    notdef@"); P(MODES[i].name);
+        P(" ink="); I((int)tofu_by_mode[i].ink);
+        P(" px="); I((int)tofu_by_mode[i].pixels);
+        P(" size="); I(tofu_by_mode[i].w); P("x"); I(tofu_by_mode[i].h);
+        if (!tofu_by_mode[i].ok || tofu_by_mode[i].ink == 0)
+            P("（无墨水，判据②在该模式下降级）");
+        P("\n");
+    }
+    if (!tofu_by_mode[0].ok || tofu_by_mode[0].ink == 0) {
         /* 苹方的 `.notdef` 是空轮廓（实测 ink=0），所以「指纹与缺字框相同」
          * 这条判据在本机会空转。降级后必须靠下面那条自检码点守住判别力，
          * 否则「渲染成功」会被读成「渲染对了」。 */
-        P("（缺字框无墨水，判据②降级；判别力由 U+10FFFD 自检承担）");
+        P("    （缺字框无墨水，判别力由 U+10FFFD 自检承担）\n");
     }
-    P("\n");
 
-    report_raster(factory, face, 0x0041, &tofu, "A");
-    report_raster(factory, face, 0x4E2D, &tofu, "U+4E2D");
-    report_raster(factory, face, 0x9ED1, &tofu, "U+9ED1");
+    report_raster(factory, face, 0x0041, tofu_by_mode, "A");
+    report_raster(factory, face, 0x4E2D, tofu_by_mode, "U+4E2D");
+    report_raster(factory, face, 0x9ED1, tofu_by_mode, "U+9ED1");
     /* U+10FFFD 是 Unicode 第 15 平面私用区最后一个码点，任何正常字模都不会
      * 给它字形。它的 index 必须是 0 —— 这条是「缺字确实会被判出来」的机器证据，
      * 不靠 notdef 有墨水。若哪天它返回非 0，说明这张字模的 cmap 有问题，
      * 上面三条 `ink-present` 也就不可信了。 */
-    report_raster(factory, face, 0x10FFFD, &tofu, "U+10FFFD");
+    report_raster(factory, face, 0x10FFFD, tofu_by_mode, "U+10FFFD");
 }
 
 void entry(void) {

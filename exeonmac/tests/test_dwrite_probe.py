@@ -197,6 +197,190 @@ class TestProbeSourceGuards(unittest.TestCase):
         self.assertTrue((PROBE_DIR / "imports.dwrite.def").is_file())
         self.assertTrue((PROBE_DIR / "imports.kernel32.def").is_file())
 
+    def test_probe_covers_multiple_rendering_modes(self) -> None:
+        """必须测不止一种渲染模式，且纹理类型跟着模式走。
+
+        ## 第 16 轮补的这条
+
+        第 15 轮只用 `ALIASED` 一种模式就下了「像素对得上」的结论。真实 Windows
+        软件几乎不走 ALIASED：GDI 是 `CLEARTYPE_QUALITY`、DirectWrite 默认
+        `NATURAL`。若这两种模式在 wine 里走不同代码路径，「ALIASED 画对了」
+        就推不出「真实软件也画对了」。
+
+        三处必须同时存在，缺一处整条判据会静默失效：
+
+        1. 模式表里至少三档（`alias` / `gdic` / `nat`）。只测一档无法区分
+           「模式被忽略」与「模式真的不同」—— 前者是好消息，后者要补验。
+        2. `CreateGlyphRunAnalysis` 必须把 `renderingMode` 从表里传进去，
+           不能写死某个常量。写死的话三档跑出来一模一样，看着像「模式无差别」。
+        3. ClearType 的纹理宽度必须是像素宽的 3 倍。按 1x1 算会把缓冲区开小
+           3 倍，`CreateAlphaTexture` 报 `E_INVALIDARG` —— 而报错不提子像素。
+        """
+        self.assertIn("MODES[]", self.source, "渲染模式表没有了")
+        for name in ('"alias"', '"gdic"', '"nat"'):
+            self.assertIn(name, self.source, f"渲染模式表缺 {name}")
+        # 模式必须真的传进 CreateGlyphRunAnalysis（不是写死 1）。
+        call = re.search(
+            r"CreateGlyphRunAnalysis\)\)\(\s*factory, &run,[^;]*?;", self.source, re.S)
+        self.assertIsNotNone(call, "解析不到 CreateGlyphRunAnalysis 的调用")
+        self.assertIn("m.mode", call.group(0),
+                      "renderingMode 必须来自模式表，写死常量会让三档结果一模一样")
+        # ClearType 一次像素 3 字节，缓冲区必须乘 3。
+        self.assertIn("m.width_factor", self.source,
+                      "ClearType 纹理宽度是像素宽的 3 倍；不乘会让缓冲区开小三倍")
+
+    def test_create_glyph_run_analysis_signature_matches_header(self) -> None:
+        """`CreateGlyphRunAnalysis` 的形参个数必须是 8（照抄 dwrite.h）。
+
+        本轮中途凭记忆把它写成 10 个参数（多加了 `gridFitMode` /
+        `antialiasMode`，那是 `IDWriteTextRenderer` 一侧的概念）。函数指针强转
+        绕过了类型检查，编译照样过，症状是**探针挂住 180 秒超时** —— 多出来的
+        两个实参把 `renderingMode` 挤到别的位置，模式取到垃圾值。
+
+        报错读起来像「wine 卡死了」，其实就是签名写错。所以这里直接数形参。
+        """
+        call = re.search(
+            r"HRESULT\(__stdcall \*\)\(([^)]*)\)\)\s*\n?\s*V\(factory, "
+            r"DW_IDWriteFactory_CreateGlyphRunAnalysis\)\)\(", self.source)
+        self.assertIsNotNone(call, "解析不到 CreateGlyphRunAnalysis 的函数指针签名")
+        params = [p.strip() for p in call.group(1).split(",") if p.strip()]
+        self.assertEqual(
+            len(params), 9,
+            f"函数指针形参应为 9 个（8 个真实参数 + 末尾 out 指针），实际 {len(params)} 个：{params}")
+        # 逐一核对类型，位置错了同样致命。
+        self.assertEqual(params[0], "void *", "第 1 个参数是 IDWriteFactory*")
+        self.assertEqual(params[1], "const void *", "第 2 个参数是 DWRITE_GLYPH_RUN*")
+        self.assertEqual(params[2], "float", "第 3 个参数是 pixelsPerDip")
+        self.assertEqual(params[3], "const void *", "第 4 个参数是 DWRITE_MATRIX*（可空）")
+        self.assertEqual(params[4], "int", "第 5 个参数是 renderingMode")
+        self.assertEqual(params[5], "int", "第 6 个参数是 measuringMode")
+
+
+class TestRegistryLandingGuard(unittest.TestCase):
+    """落盘判据本身要被守住：它报「写进去了」必须真的写进去了。
+
+    ## 为什么这条单独成类
+
+    第 16 轮实测发现旧判据有假阳性：X 组（只写 HKCU）报 `system.reg: True`。
+    根因是判据只看「本次要写的**值**在文件里作为带引号字符串出现过」，而 base 层
+    自带的 `FontSubstitutes` 里有 `"Helvetica"="Arial"` —— 我们要写的值
+    `Helvetica` 恰好是那边的**键名**。
+
+    这类缺陷不报错、只报成功。三个运行时用例的前提都写着「本组的前提是
+    『确实写进去了』」，判据一假，整组对照全部作废而没人会知道。所以它自己
+    必须有守卫，且必须在**不跑 wine** 的前提下就能验 —— 纯函数才好验。
+    """
+
+    def setUp(self) -> None:
+        self.runner = load_runner()
+        self.tmp = Path(tempfile.mkdtemp(prefix="dwprobe-reg-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_landing(self, name: str, blocks: dict[str, list[str]]) -> Path:
+        """造一份落盘形态的注册表文件（`[Software\\\\X]` 双反斜杠 + `#time`）。"""
+        lines = ["WINE REGISTRY Version 2", ""]
+        for key, values in blocks.items():
+            lines.append(f"[{key}] 1795273080")
+            lines.append("#time=1dd79c8b35b1e8e")
+            lines.extend(values)
+            lines.append("")
+        path = self.tmp / name
+        path.write_bytes("\n".join(lines).encode("utf-8"))
+        return path
+
+    def test_value_appearing_as_a_key_name_is_not_a_match(self) -> None:
+        """要写的值恰好是别处的**键名**时，不许判成落盘。
+
+        这就是实测抓到的那个假阳性。落盘文件里有 `"Helvetica"="Arial"`（base 层
+        预置），我们要写的是 `"SimSun"="Helvetica"` —— 后者一个字节都没进文件，
+        但 `"Helvetica"` 字符串在。判据必须看 `"名"="值"` 这个完整形态。
+        """
+        landing = self._write_landing("system.reg", {
+            r"Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes": [
+                '"Helv"="MS Sans Serif"',
+                '"Helvetica"="Arial"',
+            ],
+        })
+        sections = [(r"HKEY_CURRENT_USER|Software\Wine\Fonts\Replacements",
+                     [("SimSun", "Helvetica")])]
+        self.assertFalse(
+            self.runner._reg_has_mapping(landing, sections, "HKEY_CURRENT_USER"),
+            '「值作为别处的键名出现」被误判成落盘成功 —— 这正是第 16 轮抓到的假阳性')
+
+    def test_correct_section_and_pair_is_a_match(self) -> None:
+        """段头 + 值名 + 值三者齐全才算落盘（正向，防矫枉过正）。"""
+        landing = self._write_landing("user.reg", {
+            r"Software\\Wine\\Fonts\\Replacements": ['"SimSun"="Helvetica"'],
+        })
+        sections = [(r"HKEY_CURRENT_USER|Software\Wine\Fonts\Replacements",
+                     [("SimSun", "Helvetica")])]
+        self.assertTrue(
+            self.runner._reg_has_mapping(landing, sections, "HKEY_CURRENT_USER"),
+            "段与键值都对上了却判成未落盘 —— 判据收得太紧了")
+
+    def test_half_written_mapping_is_rejected(self) -> None:
+        """两个映射只写进去一个 → 判未落盘。
+
+        半个映射会让一部分界面正常、另一部分仍是方块，是最难查的形态。
+        """
+        landing = self._write_landing("user.reg", {
+            r"Software\\Wine\\Fonts\\Replacements": [
+                '"Microsoft YaHei"="PingFang SC"',
+            ],
+        })
+        sections = [(r"HKEY_CURRENT_USER|Software\Wine\Fonts\Replacements",
+                     [("Microsoft YaHei", "PingFang SC"), ("SimSun", "PingFang SC")])]
+        self.assertFalse(
+            self.runner._reg_has_mapping(landing, sections, "HKEY_CURRENT_USER"),
+            "只写进去一半被当成成功")
+
+    def test_hive_mismatch_is_rejected(self) -> None:
+        """`.reg` 写的是 HKLM，就不许拿 `user.reg`（HKCU 那棵树）判成功。
+
+        落盘文件的段头**不含根键**（`user.reg` 本身就是 HKCU），所以根键与文件
+        的对应关系只能由调用方声明。不声明的话，两张表会互相冒充 ——
+        `FontSubstitutes` 写在 `system.reg`、`Replacements` 写在 `user.reg`，
+        而这个区别正是第 13 轮结论的全部内容。
+
+        **这条测的是「空集不算成功」**：`sections` 里一段都不属于该文件时，
+        循环里「不匹配就跳过」会让 `ok` 保持初值 True —— 等于「没有要检查的
+        东西」被读成「全部检查通过」。同一形态在第 9 轮的
+        `test_scan_covers_all_test_modules` 上出现过（glob 返回空集，守卫全绿）。
+        """
+        landing = self._write_landing("user.reg", {
+            r"Software\\Wine\\Fonts\\Replacements": ['"SimSun"="Helvetica"'],
+        })
+        sections = [(r"HKEY_LOCAL_MACHINE|Software\Wine\Fonts\Replacements",
+                     [("SimSun", "Helvetica")])]
+        self.assertFalse(
+            self.runner._reg_has_mapping(landing, sections, "HKEY_CURRENT_USER"),
+            "HKLM 的写入被拿 HKCU 的文件判成功了 —— 空集被当成通过")
+
+    def test_empty_sections_never_pass(self) -> None:
+        """空 `sections`（解析出来什么都没有）必须判 False。"""
+        landing = self._write_landing("user.reg", {
+            r"Software\\Wine\\Fonts\\Replacements": ['"SimSun"="Helvetica"'],
+        })
+        self.assertFalse(
+            self.runner._reg_has_mapping(landing, [], "HKEY_CURRENT_USER"),
+            "没有任何要检查的项却报成功")
+
+    def test_sections_keep_the_root_key(self) -> None:
+        """解析 `.reg` 时根键必须留下 —— 剥掉就分不清 HKCU 与 HKLM。"""
+        reg = _write_reg(self.tmp / "both.reg", [
+            (r"HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements",
+             [("Microsoft YaHei", "PingFang SC")]),
+            (r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes",
+             [("SimSun", "PingFang SC")]),
+        ])
+        sections = self.runner._reg_sections(reg)
+        self.assertEqual(len(sections), 2, f"两段应各自独立：{sections}")
+        hives = sorted(label.split("|")[0] for label, _ in sections)
+        self.assertEqual(hives, ["HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE"],
+                         "根键被剥掉了，两处不同存储会混成一处")
+
 
 class TestDirectWriteRuntime(unittest.TestCase):
     """真跑 wine 的三组对照：DirectWrite 只认 HKCU 那条键。
@@ -332,6 +516,9 @@ class TestDirectWriteRuntime(unittest.TestCase):
 
         这正是 `FindFamilyName` 单独用时会漏掉的形态（第 13 轮遗留的那条风险的
         现实版本）。像素层必须把它抓成 `notdef`，而拉丁字母 A 仍正常渲染。
+
+        **本组同时守落盘判据**：`.reg` 只写 HKCU，所以 `system.reg` 必须是 False。
+        第 16 轮之前这里是 True（假阳性），根因见 `TestRegistryLandingGuard`。
         """
         reg = _write_reg(Path(self.tmp) / "simsun-helvetica.reg", [(
             r"HKEY_CURRENT_USER\Software\Wine\Fonts\Replacements",
@@ -339,6 +526,12 @@ class TestDirectWriteRuntime(unittest.TestCase):
         )])
         result = self._run("X", reg)
         self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
+        self.assertTrue(result["registry"]["user.reg"],
+                        "本组的前提是「HKCU 里确实写进去了」")
+        self.assertFalse(result["registry"]["system.reg"],
+                         "这份 .reg 只写 HKCU，system.reg 不该被碰 —— "
+                         "判成 True 说明落盘判据把 base 层预置的 "
+                         '"Helvetica"="Arial" 当成了本次写入（假阳性）')
         family = result["families"]["SimSun"]
         self.assertTrue(family["exists"],
                         "本组的前提是「别名把名字登记上了」；名字都没登记，就测不到本组的点")
@@ -350,6 +543,72 @@ class TestDirectWriteRuntime(unittest.TestCase):
                          "别名指向纯拉丁字体时 U+4E2D 必须被判缺字；"
                          "判成 ink-present 说明像素层没有判别力")
         self.assertEqual(raster["U+9ED1"].get("verdict"), "notdef")
+
+    def test_cleartype_modes_are_measured_and_have_resolving_power(self) -> None:
+        """ClearType 两档（`gdic` / `nat`）必须真的被测量，且与 ALIASED 可分。
+
+        ## 第 16 轮的核心断言
+
+        第 15 轮只测 ALIASED 就下了「像素对得上」。真实软件走 ClearType ——
+        若 ClearType 模式在 wine 里根本不被接受（`E_INVALIDARG`）或画出来是空图，
+        「ALIASED 正确」对真实场景毫无意义。
+
+        三档各自断言三件事：判据为 `ink-present`、墨水像素 > 0、纹理宽度是
+        像素宽的 3 倍（ClearType 一像素三子像素，1x1 不会是这个比例）。
+
+        另断言 **ALIASED 与 ClearType 的指纹不同**。相同的话说明渲染模式参数被
+        忽略 —— 那也算是结论（可以推出「所有模式共用一条路径」），但不能假装
+        测了两种；本断言把「真的不同」变成可复核的事实，wine 哪天改了行为会
+        自己变红，而不是留一份过期结论继续骗人。
+        """
+        result = self._run("R", self.reg_replacements)
+        self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
+        alias = result["families"]["Microsoft YaHei"]
+        for cp in ("A", "U+4E2D", "U+9ED1"):
+            with self.subTest(code_point=cp):
+                mono = alias["raster"].get(cp) or {}
+                self.assertEqual(mono.get("mode"), "alias", f"{cp} 的基准档不是 ALIASED")
+                # ALIASED 是 1 字节/像素：px 必须等于 w*h。
+                self.assertEqual(mono.get("px"), (mono.get("w") or 0) * (mono.get("h") or 0),
+                                 f"{cp} 的 ALIASED 纹理字节数不等于 w*h：{mono}")
+                for suffix, mode in (("@gdic", "gdic"), ("@nat", "nat")):
+                    ct = alias["raster"].get(cp + suffix) or {}
+                    self.assertEqual(ct.get("mode"), mode,
+                                     f"{cp}{suffix} 的模式不是 {mode}：{ct}")
+                    self.assertEqual(ct.get("verdict"), "ink-present",
+                                     f"{cp} 在 {mode} 下没画出墨水：{ct} —— "
+                                     "真实软件走的就是这条路径")
+                    self.assertGreater(ct.get("ink") or 0, 0,
+                                       f"{cp} 在 {mode} 下墨水像素为 0")
+                    # ClearType 一像素 3 字节：px 必须是 w*h*3。按 1x1 开缓冲区
+                    # 会变成 w*h，`CreateAlphaTexture` 直接 E_INVALIDARG。
+                    self.assertEqual(
+                        ct.get("px"), (ct.get("w") or 0) * (ct.get("h") or 0) * 3,
+                        f"{cp} 在 {mode} 下的纹理字节数不是 w*h*3 —— "
+                        f"ClearType 每像素三个子像素：{ct}")
+                    # 纹理的像素尺寸应与 ALIASED 一致（同一个字形、同一个字号），
+                    # 只是每像素多了两个子像素。不一致说明模式影响了布局，需另查。
+                    self.assertEqual((ct.get("w"), ct.get("h")), (mono.get("w"), mono.get("h")),
+                                     f"{cp} 在 {mode} 下的字形尺寸与 ALIASED 不同："
+                                     f"{ct} vs {mono} —— 模式不该改变字形边界")
+                # ClearType 与 ALIASED 的指纹必须不同（否则模式被忽略）。
+                gdic = alias["raster"].get(cp + "@gdic") or {}
+                self.assertNotEqual(
+                    mono.get("hash"), gdic.get("hash"),
+                    f"{cp} 的 ALIASED 与 ClearType 指纹相同 —— 渲染模式可能被忽略，"
+                    "第 15 轮的结论适用范围要重新界定")
+                # 两档 ClearType（GDI_CLASSIC 与 NATURAL）在 wine 上的关系也要记下：
+                # 相同说明 wine 把它们归并成一条路径（本轮实测如此）。
+                nat = alias["raster"].get(cp + "@nat") or {}
+                self.assertEqual(
+                    gdic.get("hash"), nat.get("hash"),
+                    f"{cp} 的两档 ClearType 指纹不同（{gdic.get('hash')} vs "
+                    f"{nat.get('hash')}）—— wine 分开了 GDI_CLASSIC 与 NATURAL，"
+                    "需分别断言，不能只测一档就当覆盖了 ClearType")
+        # 缺字自检在 ClearType 下也必须成立：U+10FFFD 无槽位，三档都该是 notdef。
+        missing = alias["raster"].get("U+10FFFD") or {}
+        self.assertEqual(missing.get("verdict"), "notdef",
+                         "ClearType 路径下缺字自检码点没被判成缺字 —— 判据可能空转")
 
 
 if __name__ == "__main__":

@@ -2195,7 +2195,7 @@ Wacmin/
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher (AppKit + Foundation)
 │   ├── tools/badge.swift      Icon badge composition
-│   ├── tools/dwrite-probe/    DirectWrite probe (slots from dwrite.h, pixel rasterization, see 15.26 / 15.27)
+│   ├── tools/dwrite-probe/    DirectWrite probe (slots from dwrite.h, pixel rasterization across three rendering modes, see 15.26–15.28)
 │   ├── runtime/fetch.sh       Wine runtime download script (entry point without installing the Python package)
 │   ├── schema/compat.schema.json
 │   ├── tests/
@@ -2405,13 +2405,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 502 | about 4m37s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), and 12 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / pixel rasterization / four real-wine arms, one of them a Latin-only alias negative control) |
+| exeonmac | 511 | about 4m39s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine), 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), and 21 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / pixel rasterization / three rendering modes / pure-function landing checks / four real-wine arms, one of them a Latin-only alias negative control) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1394** | — | See "0 skipped repository-wide" below |
+| **Total** | **1403** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3059,6 +3059,8 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | Font substitution written into a registry root nobody reads | After 15.23 fixed the format, the keys really land, the stamp is queryable and the log reads "fontsub 已导入 2 条替换" — yet with `lfFaceName` set to `Microsoft YaHei`, `WINEDEBUG=+font` shows **no such mapping** in `dump_gdi_font_subst`, `substituting` fires **0 times**, and `select_font` picks `Courier New`. The text stays tofu | The launcher writes `HKCU\...\FontSubstitutes`. Scanning `win32u.so` for UTF-16 strings yields only `\Registry\Machine\...\FontSubstitutes`, with no `\Registry\User\` counterpart — **the HKCU copy is valid registry data that no code reads**. This is a second, independent defect from 15.23: that one made the data land, this one makes it be read | Root key changed to `HKEY_LOCAL_MACHINE` (measured: `substituting` fires, `select_font` picks `PingFang SC Regular`); the stamp moved to HKLM as well (otherwise "stamp found" only proves the write landed, not that it is in the tree GDI reads — the criterion degrades back to testing existence). Three-way comparison settles it (HKCU ineffective / HKLM effective / `Wine\Fonts\Replacements` effective but rejected as alias semantics). Guards 6 → 7; the old one asserted HKCU — **baking the wrong conclusion into the assertion** — and went red the moment the code changed. Details in 15.24 |
 | Both keys written, yet DirectWrite software is still tofu | After 15.24 fixed GDI, setting `lfFaceName` to `Microsoft YaHei` shows `select_font` picking `PingFang SC Regular` and `substituting` firing; but a DirectWrite program on the same prefix with the same fonts still renders Chinese as tofu, with not a single `+font` line | `FontSubstitutes` is GDI-only: scanning every ELF/PE under `lib/wine` for both UTF-16 and ASCII, the literal appears once, in `x86_64-unix/win32u.so`, and not at all in `x86_64-windows/dwrite.dll`; the latter reads only `HKCU\Software\Wine\Fonts\Replacements` (single-byte ANSI), and in the disassembly at `0x18000b8a5` the string is loaded before `RegOpenKeyA` is called with root `0x80000001`, i.e. HKEY_CURRENT_USER | Write both keys into the same .reg (the roots are exact opposites: GDI wants HKLM, DirectWrite wants HKCU); the stamp moves to `HKCU\Software\Wine\ExeOnMac`, sharing `replacePath`'s root. Six PE-probe groups settle it: HKLM only → `familyCount` 292 and `Microsoft YaHei` not found; HKCU only → 293 and found; both → still 293; HKLM with `Wine\Fonts\Replacements` → 292 — the root matters more than the key name. Guards 7 → 10 (2 scan the real binaries in both encodings, 1 asserts both keys land in one file); the end-to-end assertion now runs `wineserver -k` after SIGTERM before reading from disk (`-w` does not write back — measured 0 hits). Details in 15.25 |
 | The alias is right and the name resolves, but the glyphs are still tofu | Pointing `SimSun` at the Latin-only font Helvetica: `FindFamilyName` returns `exists=1`, `faceCount=6`, the Latin `A` renders normally, while `U+4E2D` is missing — checking only the family name or only the glyph index misses this class of broken mapping | The probe gained a pixel layer: `CreateGlyphRunAnalysis` + `CreateAlphaTexture` actually rasterize, judged on three criteria (`ink>0`, fingerprint differs from `.notdef`, and the known-missing `U+10FFFD` must land on notdef). Measured: the alias and the real font produce identical fingerprints (`A`=0xb302ef1a / `U+4E2D`=0x390a433b); the Latin-alias arm reports `notdef` for `U+4E2D`. See 15.27 |
+| Pixel fingerprints match, but only under ALIASED | 15.27 concluded "the pixels match" with `ALIASED`, while real software runs ClearType. If DirectWrite honours the rendering mode at all, the two modes differ in both fingerprint and texture size — testing one mode cannot distinguish "the mode is ignored" from "the modes really differ". The first is good news; the second needs covering | The probe now runs three modes (`ALIASED` / `GDI_CLASSIC` / `NATURAL`) and sizes ClearType textures at 3 bytes per pixel. Measured: ALIASED and ClearType fingerprints differ and `px` is exactly 1 : 3, while `GDI_CLASSIC` and `NATURAL` are identical in wine (they land on one rasteriser path). See 15.28 |
+| The landing check counts base-layer defaults as this round's write | Arm X writes HKCU only, yet `system.reg` reported "written". The criterion only looked for "the value we intend to write appears in the file", and the base layer already ships `"Helvetica"="Arial"` — the value we write happens to be **a value name** there. Such a false positive never errors, it reports success, and every comparison silently becomes void | The criterion now requires section header + value name + value together, and distinguishes root keys (`user.reg`=HKCU / `system.reg`=HKLM); an empty set is explicitly False. After the fix arm X reports `system.reg=False`. See 15.28③ |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -4534,6 +4536,67 @@ The slot table grew to 11 interfaces / 87 slots, all generated from `dwrite.h`. 
 #### ⑥ Still unverified / open
 
 (a) **Glyph quality is still unconfirmed by a human eye** — this round reaches "the alpha bitmaps are identical", which is the last layer a machine can give. Whether the strokes look right and whether ligatures are correct still needs a person; (b) only `ALIASED` was tested; ClearType and grayscale antialiasing are unverified (they may take different code paths in wine); (c) only one CJK font file (PingFang) was tested; (d) only two target values (`PingFang SC` and `Helvetica`) were verified; mapping to a "Microsoft font that lacks CJK" scenario is closer to reality and untested; (e) round 11's open item ③ "mechanically scan all `.reg` write paths of the same shape" has now been pending for five consecutive rounds; (f) **`git push` remains the top human-blocked item** — rounds 11–15 all exist only locally.
+
+### 15.28 Rendering modes: ALIASED rendered correctly, the path real software takes was never tested (measured 2026-11-21)
+
+15.27 concluded "the pixels match" using a single mode, `DWRITE_RENDERING_MODE_ALIASED`. **Real Windows software almost never uses ALIASED**: GDI uses `CLEARTYPE_QUALITY`, DirectWrite defaults to `NATURAL`, and both are ClearType subpixel paths. So "ALIASED renders correctly" does not imply "real software renders correctly" — a caveat 15.27⑥(b) wrote down itself. This round closes it.
+
+#### ① Each mode needs its matching texture type; a mismatch returns `E_INVALIDARG`
+
+| Output label | `DWRITE_RENDERING_MODE_*` | Texture type | Bytes per pixel |
+|---|---|---|---|
+| `alias` | `ALIASED` (1) | `DWRITE_TEXTURE_ALIASED_1x1` (0) | 1 |
+| `gdic` | `GDI_CLASSIC` (2) | `DWRITE_TEXTURE_CLEARTYPE_3x1` (1) | 3 |
+| `nat` | `NATURAL` (4) | `DWRITE_TEXTURE_CLEARTYPE_3x1` (1) | 3 |
+
+`GetAlphaTextureBounds` **does not guess** when the texture type does not match the mode — it returns `E_INVALIDARG`. The other trap: a ClearType texture is **three times** as wide as the pixel width (one byte per subpixel). Sizing the buffer for 1x1 makes it three times too small and `CreateAlphaTexture` returns `E_INVALIDARG` as well — with an error message that never mentions subpixels, so it is easily misread as "wine does not support this mode".
+
+#### ② Measured: wine folds the two ClearType modes into one path; ALIASED is a separate one
+
+All three modes run against real wine (same prefix, same PingFang font file, 48 DIP):
+
+| Code point | `alias` | `gdic` | `nat` | ALIASED vs ClearType |
+|---|---|---|---|---|
+| `A` | `ink=311` / `px=1120` / `0xb302ef1a` | `ink=144` / `px=3360` / `0xb2c8e3cb` | same as `gdic` | **different** |
+| `U+4E2D` | `ink=538` / `px=1748` / `0x390a433b` | `ink=354` / `px=5244` / `0x82392a23` | same as `gdic` | **different** |
+| `U+9ED1` | `ink=739` / `px=1806` / `0xf1d3d18` | `ink=252` / `px=5418` / `0xb6ad4a3b` | same as `gdic` | **different** |
+
+Three independent conclusions:
+
+1. **The mode argument is honoured.** ALIASED and ClearType produce different fingerprints and the `px` ratio is exactly 1 : 3 (`1120 → 3360`, `1748 → 5244`, `1806 → 5418`), so `renderingMode` is effective and ClearType really produces subpixel output. Had the fingerprints matched, the mode would have been ignored — in which case 15.27's conclusion would happily cover every mode (good news), but **testing a single mode can never tell these two cases apart**.
+2. **`GDI_CLASSIC` and `NATURAL` are identical in wine** (fingerprint, ink count and texture size all match). This is a checkable fact, not an assumption: both modes land on one rasteriser path in wine's dwrite. The assertion is written as "these two must be equal", so wine will turn it red the day it separates them, instead of leaving behind a fake "both ClearType modes covered".
+3. **Glyph bounds do not change with the mode** (the same code point yields the same `size` in all three, e.g. `U+4E2D` is `38x46` everywhere). The mode affects sampling density only, not layout — this catches mistakes such as the mode argument sliding into the wrong slot.
+
+#### ③ A criterion false positive fixed along the way: the landing check counted base-layer defaults as this round's write
+
+While adding the ClearType assertion I wanted to assert "arm X writes HKCU only, so `system.reg` must be False" — and it came back **True**. The cause is a false positive in `run.py`'s landing check: the old implementation only looked for "the **value** we intend to write appears in the landed file as a quoted string". Arm X writes `"SimSun"="Helvetica"`, and the base layer's `FontSubstitutes` section already contains wine's preset `"Helvetica"="Arial"` — the string `"Helvetica"` really is in the file, it is just **a value name there, not a value we wrote**.
+
+This class of defect never errors; it reports success. All three runtime cases are prefaced with "this arm presupposes the write really landed", so a false criterion invalidates every comparison without anyone noticing — the same shape as round 7's `regedit /S` silent failure and round 11's "the key was written by the previous round" (**the fourth occurrence**).
+
+Fix: the criterion now demands three things at once — the section header matches, the value name matches, and the value matches; and it must distinguish root keys (`user.reg` is the HKCU tree, `system.reg` is HKLM, and section headers carry no root key, so only the caller can declare it). After the fix arm X reports `system.reg=False`, `user.reg=True`.
+
+**The guard then caught an "empty set passes" case in the fix itself:** if no section in `sections` belongs to that root key, the loop's "skip on mismatch" leaves `ok` at its initial True — reading "there is nothing to check" as "everything passed". The identical trap appeared in round 9's `test_scan_covers_all_test_modules` (a glob returning an empty set made the first two guards green). It now rejects empty sets explicitly.
+
+#### ④ A signature trap I walked into myself: 10 parameters from memory
+
+Adding `renderingMode` to `CreateGlyphRunAnalysis`, I wrote it from memory as a 10-parameter call (adding `gridFitMode` / `antialiasMode`). The real `dwrite.h` declares **8**; those two belong to `IDWriteTextRenderer`. The cast through a function pointer bypassed type checking, so it compiled, and the symptom was the **probe hanging until the 180-second timeout** — the two extra arguments pushed `renderingMode` into a different position and the mode picked up garbage. The error reads like "wine froze".
+
+Same lesson as 15.26⑥: **signatures come from the header, never from memory.** A static guard now counts the parameters and checks each type.
+
+#### ⑤ Guards 12 → 21, five negative verifications all effective
+
+| Layer | New assertion | Negative verification |
+|---|---|---|
+| Static | At least three modes, and `renderingMode` must come from the table (never a literal) | Hard-code `1` → **1 red** |
+| Static | ClearType texture bytes must be `w*h*3` | Drop `width_factor` → **1 red** |
+| Static | `CreateGlyphRunAnalysis` has 9 parameter types (8 + out), each checked | Re-inject the 10-parameter version → **1 red** |
+| Pure function | A value appearing elsewhere as a **value name** is not a landing | Revert to the old implementation → **3 red** |
+| Pure function | Empty set / root-key mismatch must be False | Remove the root-key filter → **1 red** |
+| Runtime | Both ClearType modes `ink-present`, `px = w*h*3`, same bounds as ALIASED, fingerprints differ from ALIASED and match each other | Covered by the static injections above (no separate runtime injection) |
+
+#### ⑥ Still unverified / open
+
+(a) **Glyph quality is still unconfirmed by a human eye** — this round reaches "the ClearType subpixel alpha also matches", still the outermost layer a machine can give. Stroke beauty, ligature correctness and how subpixel rendering looks on a real screen need a person; (b) only `GDI_CLASSIC` / `NATURAL` ClearType and `ALIASED` were tested — **grayscale antialiasing (`DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`) and `OUTLINE` are untested**; (c) `measuringMode` is fixed at `NATURAL`, so the rounding difference on the `GDI_CLASSIC` side is unverified; (d) only one CJK font file (PingFang) was tested; (e) round 11's open item ③ "mechanically scan all `.reg` write paths of the same shape" has now been pending for six consecutive rounds; (f) **`git push` remains the top human-blocked item** — rounds 11–16 all exist only locally.
 
 ---
 

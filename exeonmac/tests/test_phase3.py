@@ -1223,5 +1223,134 @@ class TestSignalDuringStartupWindow(unittest.TestCase):
             "另起一个就会再次出现「有子进程但信号找不到它」")
 
 
+# --------------------------------------------------------------------------
+# 字体替换真的写进去了没有（不需要真实 wine 的部分）
+# --------------------------------------------------------------------------
+
+
+class TestFontSubstitutionFormat(unittest.TestCase):
+    """## 这个类是「字体替换从上线的第一天起就没生效过」的回归锁。
+
+    缺陷（2026-11-21 实测）：`FontSubstitution.apply` 写出的 `fontsub.reg`
+    用的是 wine **内部格式**（首行 `WINE REGISTRY Version 2`、键路径双反斜杠）。
+    实测 `wine regedit /S` 对该格式 **退出码 0、stderr 空、零键写入**，
+    紧接着 `reg query` 同一条键报 `Unable to find the specified registry key`。
+    而 launcher 的日志一直写「fontsub 已导入 2 条替换」。
+
+    这与第 7 轮在 Python 侧修掉的 `install.suppress_restart` 是同一根因
+    （把导出格式当成存储格式），当时只在 Python 侧扫过，Swift 侧漏了。
+    """
+
+    def setUp(self) -> None:
+        self.source = (REPO / "launcher" / "Sources" / "main.swift").read_text(
+            encoding="utf-8")
+
+    def _apply_body(self) -> str:
+        return self.source.split("static func apply(")[1].split(
+            "\n    /// 导入后回查")[0]
+
+    def test_writes_export_format_header(self) -> None:
+        """首行必须是 `Windows Registry Editor Version 5.00`。
+
+        内部格式那一行（`WINE REGISTRY Version 2`）只许出现在注释里 ——
+        注释里那句是在解释「为什么不用它」，不许是真正写进文件的内容。
+        """
+        body = self._apply_body()
+        code = "\n".join(line for line in body.splitlines()
+                         if not line.strip().startswith("//"))
+        self.assertIn("Windows Registry Editor Version 5.00", code,
+                      "fontsub.reg 首行必须是导出格式头，否则 regedit /S 静默不写")
+        self.assertNotIn("WINE REGISTRY Version 2", code,
+                         "内部格式（WINE REGISTRY Version 2）会被 regedit /S 静默丢弃")
+
+    def test_key_path_is_fully_qualified_and_single_escaped(self) -> None:
+        """键路径必须是 `HKEY_CURRENT_USER\\...` 全名 + 单反斜杠。
+
+        内部格式用 `Software\\\\...` 双反斜杠且不带根键，导出格式两者都不同。
+        """
+        self.assertIn('"HKEY_CURRENT_USER\\\\Software\\\\Microsoft\\\\Windows NT',
+                      self.source,
+                      "导出格式的键必须带 HKEY_CURRENT_USER 根且单反斜杠（Swift 源码里写作 \\\\）")
+        body = self._apply_body()
+        self.assertIn("[\\(keyPath)]", body,
+                      "写文件的键路径必须取自 keyPath 常量，不许就地再抄一份")
+
+    def test_single_source_for_key_path(self) -> None:
+        """键路径只许有一份字面量：写文件与回查共用 `keyPath`。
+
+        两处各写一套是本项目反复出事故的形态（README 5.3 红线）。
+        """
+        literal = "Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\FontSubstitutes"
+        count = self.source.count(literal)
+        self.assertEqual(count, 1,
+                         f"键路径字面量出现 {count} 次，只许出现在 keyPath 常量里")
+
+    def test_import_is_verified_not_assumed(self) -> None:
+        """导入后必须回查，不能凭「退出码 0」判定成功。
+
+        `regedit /S` 对格式不对的文件不报错，这条已在 Python 侧与 Swift 侧
+        各实测一次。「命令跑完没抛异常」从来不是证据。
+        """
+        body = self._apply_body()
+        self.assertIn("stampPresent(", body,
+                      "退出码 0 之后必须回查本次的戳，否则格式错了也报「已导入」")
+        guard = self.source.split("private static func runQuery")[1]
+        self.assertIn('"reg", "query"', guard,
+                      "回查必须真的跑 reg query，不能只看文件写没写成")
+
+    def test_query_judged_on_this_run_not_leftovers(self) -> None:
+        """回查必须能证明「**这次**写进去了」，不能读到上一轮留下的值。
+
+        ## 这条是本轮负向验证抓出来的第二个缺陷
+
+        第一版判据是「导入后 reg query 读得到字体名即成功」。把内部格式注回去
+        做负向验证时它**仍然判绿** —— 键是上一轮成功写的，本次一个字节都没写，
+        回查却通过。判据测的是「注册表里有没有」，不是「这次写没写进去」。
+
+        ## 修法：一次性戳，而不是先删旧键
+
+        「导入前 reg delete」也能让判据变严，但那是破坏性操作：本次导入失败时，
+        用户原本能用的替换值被清掉，从「旧值可用」倒退成「什么都没有」。
+
+        现在同一份 .reg 里额外写一个 `ExeOnMac\\FontSubstitutionStamp = <UUID>`，
+        导入后查这枚戳。每次运行都是新 UUID，旧值绝不可能蒙对。
+        """
+        body = self._apply_body()
+        self.assertIn("UUID().uuidString", body,
+                      "戳必须每次运行重新生成，写死就退化成「读到上一次」")
+        self.assertIn("stampKeyPath", body, "戳必须写进 launcher 自有命名空间")
+        # 戳与字体映射必须在**同一份** .reg 里：分两次导入就让「一起被吃掉」
+        # 这个前提失效，回查到戳也证明不了字体写进去了。
+        self.assertEqual(body.count("let text = lines.joined"), 1,
+                         "只许生成一份 .reg 文本，戳与字体映射同批写入")
+        self.assertNotIn("reg\", \"delete\"", self.source,
+                         "不许用 reg delete 清旧键 —— 破坏性，失败时倒退")
+        guard = self.source.split("private static func stampPresent")[1].split(
+            "\n    }")[0]
+        self.assertIn("query.contains(stamp)", guard,
+                      "回查必须比对本次的戳，不能只判「键存在」")
+
+    def test_announce_is_explicit_not_inferred_from_output(self) -> None:
+        """「wine 已启动」只许由调用方显式声明，不许用 `output != nil` 推断。
+
+        ## 这是本轮自己造出来又自己修掉的噪音
+
+        加上 `reg delete` 之后它传的是 `FileHandle.nullDevice`（非 nil），
+        于是日志里冒出两条莫须有的「wine 已启动」—— 一句只该在主程序启动时
+        出现一次的话出现了三次。实测修前 `grep -c` 得 **3**，修后得 **1**。
+        """
+        self.assertIn("announce: Bool = false", self.source,
+                      "runChild 必须有显式的 announce 参数")
+        self.assertNotIn("if output != nil && !capture", self.source,
+                         "不许再用 output 是否为 nil 推断要不要写「已启动」")
+        body = self.source.split("static func runChild")[1].split(
+            "static func noteSignal")[0]
+        self.assertIn("if announce {", body)
+        # 主程序那一处必须显式传 true，否则真实启动用例靠的那行日志会消失。
+        run = self.source.split("static func run(")[1]
+        self.assertIn("announce: true", run,
+                      "主程序启动必须传 announce: true —— 「wine 已启动」是 TestRealLaunch 的唯一凭据")
+
+
 if __name__ == "__main__":
     unittest.main()

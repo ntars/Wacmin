@@ -2401,13 +2401,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 480 项 | 约 2 分 42 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）|
+| exeonmac | 486 项 | 约 2 分 42 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、6 项字体替换格式与判据守卫 |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1372 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1378 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3061,6 +3061,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 契约检查按钮在 click 里设 `disabled`，键盘回车当场丢焦点 | 鼠标点得动，键盘按回车后焦点掉到 `<body>`、读屏从头重念；要够到面板里的「关闭」得再按 12 次 Tab；关闭后同样掉回 `body`。前三段视口检查全绿 | `Enter` 是 keydown → click → keyup 三步，click 里设 `disabled` 让元素不再是焦点目标，浏览器把焦点退回文档根，紧随的 keyup 无处投递。程序化 `.click()` 没有后续 keyup，所以复现不出来，此前所有测试都绿着 | 防重入改用布尔量 + `aria-disabled`（只改语义、不改可聚焦性）；面板加 `tabindex="-1"` 并在检查完成后 `panel.focus()`；关闭时主动把焦点交回触发按钮。判据进 `viewport-check.mjs` 第 5 段，用真实按键 + 全程 `focusin`/`focusout` 轨迹判 |
 | launcher 收不到 SIGTERM，只能 `kill -9` | 关掉 ExeOnMac 产物时进程不退出；实测 SIGTERM 后 90 秒仍在运行，`launcher.log` 里连「收到信号」都没有 | `DispatchSource.makeSignalSource(queue: .main)`：`.main` 队列的 handler 由 **main run loop** 调度，而 `WineRunner.run` 用 `Thread.sleep(0.2)` 轮询子进程、一路不跑 run loop。`signal(sig, SIG_IGN)` 又把默认处置吃掉了，于是信号既不触发 handler 也不终止进程。**每个用例因此白等 60 秒兜底超时，测试还一直是绿的** | 信号源改挂独立串行队列（`DispatchQueue(label: "com.wexe.launcher.signal")`）。实测 SIGTERM 后 **0.19 秒**退出、日志出现「收到信号 15」与「wine 退出 status=15」；测试从 63.3 秒降到 3.1 秒。补两层守卫：`test_phase0` 静态断言队列不是 `.main`（防写法回退），`test_phase3` 断言「日志出现收到信号」+「20 秒内退出」（防行为回退），两者均做过负向验证 |
 | 打包对「半坏 prefix」照样报成功 | `system.reg` / `user.reg` / `userdef.reg` 全删、或 `system32` 被清空、或 `dosdevices/c:` 换成普通文件之后，`wepack package` 仍 `EXIT=0`、`ok=true`、校验 10/10 全绿；而同一份 prefix 交给 wine 直接 `could not load kernel32.dll, status c0000135`（rc=53） | 装配侧第 7 项校验只断言 `Private/drive_c` **是个目录**。prefix 是否可用，`install` 侧一直用 `prefix.validate_prefix()` 判（五项），装配侧却另写了一套更宽松的判据 —— 同一条业务规则两套实现，宽松那套恰在最后一道关口上（§5.3 红线）。测试夹具也只建 `drive_c/App/`，造出来的 prefix 本身起不来，两边一起宽松所以永远绿 | 第 7 项改为调 `prefix.validate_prefix()`，项名 `prefix.drive_c` → `prefix.valid`，失败时逐项点名缺失。补 7 项回归锁（5 项判据 + 2 项 stdout 契约），注回旧判据 5 项全红。「健康判过」那条同时防矫枉过正。夹具按 `validate_prefix` 的最低要求造齐（system32 非空、`dosdevices/c:` 相对软链、三个 `.reg` 非空） |
+| 字体替换从未生效过 | 日志写「fontsub 已导入 2 条替换」，注册表里一个键都没有；界面中文显示为方块。而 `regedit /S` **退出码 0、stderr 空**，看不出任何异常 | `fontsub.reg` 用的是 wine **内部格式**（`WINE REGISTRY Version 2` + 双反斜杠键）。实测同一份内容：内部格式零键写入，导出格式两条都写进去。与第 7 轮 `install.suppress_restart` 同一根因（把导出格式当存储格式），当时只改 Python 侧、Swift 这份没被同一条判据扫到 | 改写为导出格式（`Windows Registry Editor Version 5.00` + `HKEY_CURRENT_USER\` 全名 + 单反斜杠）；导入后不再凭退出码判成功，改为「同一份 .reg 里写一枚 UUID 戳，查戳在不在」。补 5 项静态守卫，四处负向验证均有效。详见 15.23 |
 | 长路径断在词中间 | 页面不溢出、测试全绿，但 139 字符路径在 375px 下被断成 4–5 行，断点落在 `Framewo\|rks`、`dir\|ectory` 这类词正中间；三档合计 **15 处**（口径：断点两侧都属于 `[A-Za-z0-9._]`） | 为解决溢出用了 `overflow-wrap: anywhere`，它只在**任意字符之间**找断点，不利用 `/` `\\` `-` 这些天然边界；`.result-val` 还额外带 `word-break: break-all`，它**无视** `<wbr>` | 新增纯函数 `pathSegments()` 按分隔符切片、`app.js` 的 `writeText()` 逐片 `append(Text)` 并在分隔符后插 `<wbr>`，`el()` 统一走它；`.result-val` 的 `break-all` 换成 `overflow-wrap: anywhere`。修后三档 0 处。压测改为 `import('./app.js')` 调产品函数，否则压测量的是它自己 |
 | 注册表文件「存在且非空」就判健康 | 把 `system.reg` 换成 35 字节纯文本，`validate_prefix` 返回 `[]`、打包校验 10/10 全绿；同一份 prefix 交给 wine 直接 `system.reg is not a valid registry file` + 「32-bit installation」、`rc=1`。`user.reg` 坏掉更隐蔽：`reg add` 返 0 但键没落盘 | 判据只看 `is_file()` 与 `st_size > 0`，从不读内容。测试夹具写的也是坏格式（UTF-16LE+BOM、无 `#arch`），**夹具造出的 prefix 自己就跑不起来** —— 判据与夹具一起宽松，缺陷永远绿 | 新增 `_check_reg_file()`：首行必须是 `WINE REGISTRY Version 2`（三个文件都查），`system.reg` 另须含 `#arch=win64`。三档致命程度实测分开，`user.reg`/`userdef.reg` 不要求 arch（否则误报）。两条夹具一并改正，常量从 `wepack.prefix` 导入 |
 | 占位注册表写的是 wine 不收的格式 | `prefix._write_placeholder_regs` 写的占位表让 wine 报 `not a valid registry file` + 「32-bit installation」、`rc=1` —— 占位表的存在意义正是「让 wine 能起来」 | 自述「wine 的 .reg 是 UTF-16LE + BOM」，而那句话只对 `regedit /E` 的**导出**文件成立；prefix 里的存储格式是纯 ASCII，且必须带 `#arch=win64` | 改纯 ASCII + `#arch=win64`。实测 `rc=0`，wine 自己把占位补全成 20 万字节完整注册表 |
@@ -4121,6 +4122,111 @@ RuntimeError: makensis 编译失败（退出码 0）：
 #### ⑧ 仍未处理
 
 (a) 只测了 SIGTERM 与 SIGINT 的窗口内路径，SIGHUP 同在 `signals` 数组里但没单独测（三条走同一段代码，风险低，但「同一段代码」这个理由在 15.14 已经被证明不可靠）；(b) `regedit` 被停掉意味着字体替换没生效，界面中文可能显示为方块 —— 这是有意的取舍（用户已经在关，不该为了字体再起一个进程），但**产品上没有提示**；(c) wine 收到 SIGTERM 后是否把所有窗口状态写回 prefix，仍未验证（同 15.14 ⑦）。
+
+### 15.23 字体替换从上线起就没生效过：`regedit /S` 返回 0，一个键都没写（2026-11-21 实测，已修）
+
+**这一节是 15.22 ⑧(b) 的处置。** 15.22 留下的问题是「`regedit` 被信号停掉后字体替换没生效，而产品没有提示」。顺着这条去查「那不被停的时候生效了吗」，答案是否 —— **和信号毫无关系，它从来就没生效过**。
+
+#### ① 症状：日志说「已导入 2 条替换」，注册表里一条都没有
+
+`FontSubstitution.apply` 写出的 `fontsub.reg` 用的是 wine **内部格式**：
+
+```
+WINE REGISTRY Version 2
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes]
+"Microsoft YaHei"="PingFang SC"
+```
+
+拿真实 base 层（382 MB）与真实 wine-11.21 实测：
+
+| 步骤 | 命令 | 结果 |
+|---|---|---|
+| 导入 | `wine64 regedit /S fontsub.reg` | **退出码 0**，stderr 空 |
+| 回查 | `wine64 reg query "HKCU\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes"` | **`reg: Unable to find the specified registry key`** |
+
+退出码干净、stderr 干净、一个键都没写。launcher 的日志照原文写「fontsub 已导入 2 条替换」—— 用户看到方块中文，日志说成功了。
+
+#### ② 同一份内容换成导出格式，一条不差地写进去
+
+把首行改为 `Windows Registry Editor Version 5.00`、键路径改单反斜杠并带 `HKEY_CURRENT_USER\` 全名，同一条命令：
+
+```
+$ wine64 reg query "HKCU\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes"
+HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes
+    Microsoft YaHei    REG_SZ    PingFang SC
+    SimSun    REG_SZ    Songti SC
+```
+
+**这与第 7 轮修的 `install.suppress_restart` 是同一个根因**：把「导出格式」当成了「存储格式」。当时只在 Python 侧改了、并加了回查，Swift 侧这份没被同一条判据扫到 —— 一处修完不等于同类修完。
+
+#### ③ 端到端：真 launcher 跑完，注册表里确实有
+
+用 `launcher/build.sh` 编译的真实 launcher 装配成 `.app`（base 层 + `notepad.exe` + `font_map` 两条），`WEXE_HOME` 指到临时目录，启动后读 `launcher.log`：
+
+```
+runtime ready: .../runtime/wine/bin/wine64
+fontsub 已导入 2 条替换
+wine 已启动 pid=88702
+```
+
+随后对同一个 prefix 直接 `reg query`，两条 `REG_SZ` 都在。**修前同一个 `.app` 跑完是零键。**
+
+#### ④ 判据的两版演进：为什么最后用「一次性戳」而不是「先删旧键」
+
+这是本节最该记住的部分 —— **第一版判据被自己的负向验证判红，而且判得对**。
+
+| 版本 | 判据 | 负向验证（注回内部格式） |
+|---|---|---|
+| v1 | 导入后 `reg query` 读得到字体名即成功 | **仍然判绿** —— 键是**上一轮**成功写的，本次零写入，回查却通过 |
+| v2（否决） | 导入前先 `reg delete 旧键`，再导入再查 | 能判红，但**破坏性**：本次导入失败时，用户原本能用的替换值被清掉，从「旧值可用」倒退成「什么都没有」 |
+| v3（采用） | 同一份 `.reg` 里额外写 `ExeOnMac\FontSubstitutionStamp = <UUID>`，导入后查这枚戳 | **正确判红**：`fontsub 回查退出码 1` + `WARN …本次的戳查不到：字体替换未生效` |
+
+v1 的错在于测的是「注册表里有没有」，不是「这次写没写进去」—— 这与 15.18 的「末态掩盖过程」、15.16 的「判据被空集满足」同属一类。v3 的戳每次运行重新生成，旧值绝不可能蒙对；写失败时旧值仍在，不会倒退，也不产生任何破坏性动作。
+
+戳写在 `HKCU\Software\Wine\ExeOnMac`（launcher 自有命名空间），不碰微软那个键，也不在任何 Windows 软件会读的位置。
+
+#### ⑤ 顺带修掉第二个真缺陷：信号送达后再起子进程就停不住了
+
+加回查那一步（多跑一次 `reg query`）之后，15.22 的 `TestSignalDuringStartupWindow` 的 SIGTERM / SIGINT 两条**立刻变红**。根因不是回查本身，而是「信号已被送达」这件事没参与判断：
+
+- `drainPending` 送达时会清空 `pending`、只留 `deliveredSignal`；
+- `runChild` 启动前只看 `pending`，于是「信号已送达并停掉上一个子进程」之后再调它，`pending` 是 nil，**放行**；
+- 那个信号已经用掉、`signal(sig, SIG_IGN)` 又吃掉了默认处置 —— 新子进程谁也停不了。
+
+修法：`runChild` 与 `run` 的启动前检查改为 `pending != nil || deliveredSignal != nil`，`late` 分支统一走 `consumePendingSignal()`（它优先取 `deliveredSignal`）。**这是「同一判据只看了一半」的又一次复发**：字段拆成两个之后，所有读它的地方都得跟着改。
+
+#### ⑥ 第三个：自己造出来的日志噪音，也是自己发现的
+
+`runChild` 早先用 `output != nil` 推断要不要写「wine 已启动」。回查与清键那几步传的是 `FileHandle.nullDevice`（非 nil），于是日志里冒出**三条**「wine 已启动」——一句只该在主程序启动时出现一次的话出现了三次。实测修前 `grep -c` 得 3，修后得 1。
+
+改为显式 `announce: Bool = false` 参数，只有 `WineRunner.run` 传 `true`。**日志是排障的唯一线索，宁可多一个参数，也不能让它说假话。**
+
+#### ⑦ 回归锁：6 项静态守卫，不需要 wine
+
+| 用例 | 判据 |
+|---|---|
+| `test_writes_export_format_header` | 首行必须是 `Windows Registry Editor Version 5.00`；`WINE REGISTRY Version 2` 只许出现在注释里 |
+| `test_key_path_is_fully_qualified_and_single_escaped` | 键必须是 `HKEY_CURRENT_USER\...` 全名 + 单反斜杠，且取自 `keyPath` 常量 |
+| `test_single_source_for_key_path` | 键路径字面量全文件只出现 **1** 次（5.3 红线） |
+| `test_import_is_verified_not_assumed` | 退出码 0 之后必须回查，且回查真的跑 `reg query` |
+| `test_query_judged_on_this_run_not_leftovers` | 必须有 `UUID()` 戳、戳与字体映射在**同一份** `.reg` 里、`stampPresent` 比对的是戳本身、不许用 `reg delete` |
+| `test_announce_is_explicit_not_inferred_from_output` | 必须有 `announce` 参数，且不许再用 `output != nil` 推断 |
+
+#### ⑧ 负向验证（四处，均有效）
+
+| 注入 | 结果 |
+|---|---|
+| 首行改回 `WINE REGISTRY Version 2` + 双反斜杠键 | **2 项红**（格式头 + 键路径） |
+| 删掉回查（`else if false`） | **1 项红** |
+| 删掉 `clearSubstitutes(...)` 调用（v2 时代的守卫） | **1 项红** |
+| 「wine 已启动」退回 `output != nil && !capture` | **1 项红** |
+
+还原后 6/6 绿。行为层另做过两次真实端到端负向验证：v3 注入内部格式 → 日志正确出现 `fontsub 回查退出码 1` 与 WARN；未注入 → 日志 `fontsub 已导入 2 条替换` 且注册表实查有值。
+
+#### ⑨ 仍未处理
+
+(a) 只测了 `HKCU` 下的替换路径，`HKLM` 级（系统级字体替换）没测 —— launcher 只写 `HKCU`，这是刻意的（不需要管理员权限），但「某些软件只读 HKLM」这件事未验证；(b) 字体替换生效后 macOS 侧真实渲染效果未人眼确认 —— 本轮只证明了「键写进去了」，没证明「中文不再是方块」；(c) 同一形态（把导出格式当内部格式）在 `exeonmac` 的其他 `.reg` 写入路径上未做全量扫描，只确认了 `install.suppress_restart`（第 7 轮）与本节两处。
+
 
 ---
 

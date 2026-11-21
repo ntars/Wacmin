@@ -2402,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 480 | about 2m42s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard) and 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) |
+| exeonmac | 486 | about 2m42s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 6 font-substitution format/check guards |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1372** | — | See "0 skipped repository-wide" below |
+| **Total** | **1378** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3041,6 +3041,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
 | `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
 | A test module compiles an installer at import, and a whole class vanishes silently | Running one test class (`python3 -m unittest tests.test_phase2.TestCliPhase2`) gives `FAILED (errors=2)` and `RuntimeError: ISCC 编译失败（退出码 0）：` with an **empty** detail; a full `discover` run in alphabetical order stayed green | `test_phase1.py` evaluates `REAL_INNO = str(fixtures.demo_inno_real() or "")` at **module top level**, so importing compiles an installer; `test_phase2` imports `tests.test_phase1` merely to borrow two pure byte builders, and its `setUp` has already pointed `WEXE_HOME` at a temp dir containing a fake wine that only does `exit 0` → ISCC is "run" by the fake wine, compiles nothing, exits cleanly | The four sample constants became lazy functions (cached per process) and the four classes use `setUpClass` + `require_sample()`, raising `SkipTest` when unavailable. Decorators evaluate at import time; `setUpClass` only when the test really runs — that is the dividing line. The "exit 0 but no artifact" message is now separate from "compilation failed", so the failure states which kind it is. Two guards added (subprocess sentinel + `ast` scan of the module body); negative check: inject the constant back → both turn red |
+| Font substitution never worked, not once | Log reads "fontsub 已导入 2 条替换" while the registry holds not a single key; Chinese text renders as tofu. `regedit /S` reports **exit code 0 with empty stderr**, so nothing looks wrong | `fontsub.reg` used wine's **internal** format (`WINE REGISTRY Version 2` plus double-backslash keys). Measured on the same content: internal format writes zero keys, export format writes both. Same root cause as `install.suppress_restart` fixed in round 7 (export format mistaken for storage format) — that round only changed the Python side, and this Swift copy was never covered by the same check | Rewritten in export format (`Windows Registry Editor Version 5.00` with the full `HKEY_CURRENT_USER\` root and single backslashes); success is no longer inferred from the exit code but from a **UUID stamp written into the same `.reg`** and queried back. 5 static guards added, four negative verifications all effective. Details in 15.23 |
 | Long paths break mid-word | No overflow, all tests green, yet a 139-character path is split into 4–5 lines at 375px with breaks landing inside words (`Framewo\|rks`, `dir\|ectory`); **15** occurrences across three viewports (criterion: both sides of the break belong to `[A-Za-z0-9._]`) | `overflow-wrap: anywhere` fixed the overflow but only looks for breaks **between arbitrary characters**, never using the natural `/` `\` `-` boundaries; `.result-val` additionally carried `word-break: break-all`, which **ignores** `<wbr>` | New pure function `pathSegments()` slices on separators, `app.js`'s `writeText()` appends `Text` per slice and inserts `<wbr>` after each separator, and `el()` routes everything through it; `.result-val`'s `break-all` became `overflow-wrap: anywhere`. Zero occurrences after the fix. The stress injector now `import('./app.js')` and calls the product function — otherwise it measures itself |
 | A registry file that merely "exists and is non-empty" is judged healthy | Replacing `system.reg` with 35 bytes of plain text leaves `validate_prefix` returning `[]` and packaging verification at 10/10 green; the same prefix handed to wine produces `system.reg is not a valid registry file` plus "32-bit installation", `rc=1`. A broken `user.reg` is subtler: `reg add` returns 0 but the key never lands | The check only looked at `is_file()` and `st_size > 0`, never at content. The test fixture wrote the same broken format (UTF-16LE + BOM, no `#arch`), so **the fixture could not produce a prefix that even boots** — check and fixture were loose together, which is why the defect stayed green forever | Added `_check_reg_file()`: the first line must be `WINE REGISTRY Version 2` (all three files), and `system.reg` must also carry `#arch=win64`. The three files were measured to have different fatality levels; `user.reg` / `userdef.reg` are deliberately not required to carry arch (that would be a false positive). Both fixtures fixed, constants imported from `wepack.prefix` |
 | The placeholder registry is written in a format wine rejects | `prefix._write_placeholder_regs` produced a placeholder that made wine report `not a valid registry file` plus "32-bit installation", `rc=1` — yet the whole point of the placeholder is to let wine boot | It claimed "wine's .reg is UTF-16LE + BOM", which is only true for files **exported** by `regedit /E`; the on-disk format inside a prefix is plain ASCII and must carry `#arch=win64` | Switched to plain ASCII plus `#arch=win64`. Measured `rc=0`, after which wine expands the placeholder itself into a complete 200 KB registry |
@@ -4100,6 +4101,110 @@ Restored afterwards: 5/5 green.
 #### ⑧ Still open
 
 (a) Only the in-window paths for SIGTERM and SIGINT are tested; SIGHUP sits in the same `signals` array but is not tested separately (all three share one code path — low risk, but "one code path" was already proven unreliable in 15.14); (b) stopping regedit means the font substitution never took effect, so Chinese text may render as boxes — a deliberate trade-off (the user is already closing it; spawning another process for fonts is wrong), but **the product gives no hint**; (c) whether wine writes all window state back to the prefix on SIGTERM remains unverified (same as 15.14 ⑦).
+
+### 15.23 Font substitution never worked, not once since release: `regedit /S` returns 0 and writes nothing (measured 2026-11-21, fixed)
+
+**This section disposes of 15.22 ⑧(b).** That item noted that when `regedit` is stopped by a signal, font substitution does not take effect and the product says nothing. Following that thread raised a sharper question: does it take effect when nothing interrupts it? The answer is no — **it has nothing to do with signals, it never worked at all.**
+
+#### ① Symptom: the log says "imported 2 substitutions", the registry has none
+
+`FontSubstitution.apply` wrote `fontsub.reg` in wine's **internal** format:
+
+```
+WINE REGISTRY Version 2
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes]
+"Microsoft YaHei"="PingFang SC"
+```
+
+Measured against a real base layer (382 MB) and real wine-11.21:
+
+| Step | Command | Result |
+|---|---|---|
+| import | `wine64 regedit /S fontsub.reg` | **exit code 0**, empty stderr |
+| read back | `wine64 reg query "HKCU\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes"` | **`reg: Unable to find the specified registry key`** |
+
+Clean exit code, clean stderr, zero keys written. The launcher log still said "fontsub 已导入 2 条替换" — the user sees tofu, the log reports success.
+
+#### ② The same content in export format lands every key
+
+Changing the first line to `Windows Registry Editor Version 5.00`, the key path to single backslashes with the full `HKEY_CURRENT_USER\` root, and re-running the same command:
+
+```
+HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes
+    Microsoft YaHei    REG_SZ    PingFang SC
+    SimSun    REG_SZ    Songti SC
+```
+
+**This is the same root cause as `install.suppress_restart`, fixed in round 7**: export format mistaken for storage format. That round only fixed the Python side and added a read-back there; this Swift copy was never covered by the same check. Fixing one instance is not fixing the class.
+
+#### ③ End to end: a real launcher, a real registry
+
+A real launcher built by `launcher/build.sh`, assembled into an `.app` (base layer + `notepad.exe` + two `font_map` entries), `WEXE_HOME` pointed at a temp dir:
+
+```
+runtime ready: .../runtime/wine/bin/wine64
+fontsub 已导入 2 条替换
+wine 已启动 pid=88702
+```
+
+A direct `reg query` against that prefix afterwards shows both `REG_SZ` values. **Before the fix, the same `.app` produced zero keys.**
+
+#### ④ How the check evolved: why a one-shot stamp instead of "delete the key first"
+
+This is the part worth remembering — **the first version of the check was failed by its own negative verification, and correctly so.**
+
+| Version | Check | Negative verification (inject internal format) |
+|---|---|---|
+| v1 | after import, `reg query` returns the font name → success | **still green** — the key came from a **previous** successful run; this run wrote nothing, yet the check passed |
+| v2 (rejected) | `reg delete` the old key first, then import, then query | catches it, but **destructive**: if this import fails, the user's previously working substitutions are wiped — "old value works" degrades to "nothing at all" |
+| v3 (adopted) | write `ExeOnMac\FontSubstitutionStamp = <UUID>` into the **same** `.reg`, then query for that stamp | **correctly red**: `fontsub 回查退出码 1` + `WARN …本次的戳查不到：字体替换未生效` |
+
+v1 measured "is it in the registry", not "did this run write it" — the same family as 15.18's "final state masks the process" and 15.16's "check satisfied by the empty set". v3's stamp is regenerated every run, so an old value can never match by luck; if the write fails the old value survives, so nothing regresses.
+
+The stamp lives under `HKCU\Software\Wine\ExeOnMac` (launcher's own namespace), never touching Microsoft's key and never in a location any Windows application reads.
+
+#### ⑤ Second real defect fixed: once a signal is delivered, the next child can no longer be stopped
+
+Adding the read-back (one more `reg query`) turned 15.22's `TestSignalDuringStartupWindow` SIGTERM / SIGINT cases **red immediately**. The cause was not the read-back but the fact that "signal already delivered" was not part of the decision:
+
+- `drainPending` clears `pending` on delivery and leaves only `deliveredSignal`;
+- `runChild`'s pre-start guard only looked at `pending`, so after "delivered and stopped the previous child" it **let a new child start**;
+- that signal was already spent and `signal(sig, SIG_IGN)` had swallowed the default disposition — nothing could ever stop the new child.
+
+Fix: the guard in `runChild` and `run` became `pending != nil || deliveredSignal != nil`, and `late` now goes through `consumePendingSignal()` (which prefers `deliveredSignal`). **Another recurrence of "the same check only read half of its state"**: once the field was split in two, every reader had to change with it.
+
+#### ⑥ Third: log noise I created myself, and found myself
+
+`runChild` used `output != nil` to decide whether to write "wine 已启动". The new steps pass `FileHandle.nullDevice` (non-nil), so the log gained **three** such lines — a line that should appear exactly once, when the main program starts, appeared three times. `grep -c` gave 3 before and 1 after.
+
+Replaced with an explicit `announce: Bool = false` parameter that only `WineRunner.run` sets to `true`. **The log is the only debugging trail; better an extra parameter than a log that lies.**
+
+#### ⑦ Regression locks: 6 static guards, no wine needed
+
+| Case | Criterion |
+|---|---|
+| `test_writes_export_format_header` | first line must be `Windows Registry Editor Version 5.00`; `WINE REGISTRY Version 2` only inside comments |
+| `test_key_path_is_fully_qualified_and_single_escaped` | key must carry the `HKEY_CURRENT_USER\` root with single backslashes, sourced from the `keyPath` constant |
+| `test_single_source_for_key_path` | the key path literal appears exactly **once** in the file (§5.3 red line) |
+| `test_import_is_verified_not_assumed` | after exit code 0 a read-back is mandatory, and it really runs `reg query` |
+| `test_query_judged_on_this_run_not_leftovers` | a `UUID()` stamp must exist, stamp and font map must be in the **same** `.reg`, `stampPresent` must compare the stamp itself, and `reg delete` is forbidden |
+| `test_announce_is_explicit_not_inferred_from_output` | an `announce` parameter must exist and `output != nil` must no longer decide logging |
+
+#### ⑧ Negative verification (four injections, all effective)
+
+| Injection | Result |
+|---|---|
+| first line back to `WINE REGISTRY Version 2` + double-backslash key | **2 red** (header + key path) |
+| read-back removed (`else if false`) | **1 red** |
+| the `clearSubstitutes(...)` call removed (v2-era guard) | **1 red** |
+| "wine 已启动" back to `output != nil && !capture` | **1 red** |
+
+6/6 green after restore. Behaviour was also verified end to end twice: injecting the internal format produced `fontsub 回查退出码 1` plus the WARN in the log; without injection the log read "fontsub 已导入 2 条替换" and a direct registry query showed the values.
+
+#### ⑨ Still open
+
+(a) Only the `HKCU` substitution path was tested; `HKLM` (system-wide substitution) was not — the launcher deliberately writes `HKCU` only (no admin rights needed), but "some software reads only HKLM" is unverified; (b) the actual on-screen rendering after substitution was never inspected by eye — this round proves the keys are written, not that Chinese text stops rendering as tofu; (c) the same pattern (export format mistaken for internal) was not swept across every other `.reg` write path in `exeonmac`; only `install.suppress_restart` (round 7) and this section were confirmed.
+
 
 ---
 

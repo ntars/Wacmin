@@ -287,6 +287,13 @@ enum LauncherLog {
 /// 走 `.reg` 文件而不是直接改注册表二进制：文本文件可审计、可回滚，
 /// 也符合 ARCHITECTURE.md 第 9 节的安全约定。
 enum FontSubstitution {
+    /// 字体替换的目标键。launcher 侧**只有这一份**，写文件与回查都用它。
+    static let keyPath = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes"
+
+    /// 本次运行标记所在的键与值名。launcher 自有命名空间，不碰任何系统配置。
+    static let stampKeyPath = "HKEY_CURRENT_USER\\Software\\Wine\\ExeOnMac"
+    static let stampValueName = "FontSubstitutionStamp"
+
     /// 返回「本次调用是否因收到信号而中止」。
     ///
     /// 早先返回 Void。加这个返回值是因为：信号若落在 regedit 期间，regedit
@@ -297,20 +304,60 @@ enum FontSubstitution {
                       log: URL?) -> Bool {
         guard !fonts.isEmpty else { return false }
 
+        // ## 文件格式必须是「导出格式」，不是「内部格式」（实测缺陷，2026-11-21）
+        //
+        // 早先这里写的是内部格式：首行 `WINE REGISTRY Version 2`、键路径用双反斜杠。
+        // 实测（wine-11.21，382 MB 真 base 层）：
+        //
+        //   `wine regedit /S fontsub.reg` → **退出码 0、stderr 空、零键写入**。
+        //   紧接着 `wine reg query` 同一条键 → `reg: Unable to find the specified registry key`。
+        //
+        // 换成导出格式（首行 `Windows Registry Editor Version 5.00`、键路径单反斜杠、
+        // 键带 `HKEY_CURRENT_USER\` 全名）后同一条命令 → 两条 REG_SZ 都查得到。
+        //
+        // 后果不是「少了个优化」：字体替换**从上线起就从未生效过**，而日志一直
+        // 写「fontsub 已导入 2 条替换」—— 用户看到的是方块中文，看到的日志说成功了。
+        // 这与 exeonmac 第 7 轮修的 `suppress_restart` 是同一个根因（把导出格式当成
+        // 存储格式），只是这边在 Swift 侧、当时没被同一条判据扫描到。
+        // ## 回查「这次写进去了没有」：用一次性戳，不用删旧键
+        //
+        // 第一版判据是「导入后 reg query 读得到字体名即成功」。负向验证当场判红：
+        // 把内部格式注回去，日志仍写「已导入」、reg query 也确实读得到 —— 键是
+        // **上一轮**成功写的，本次一个字节都没写。判据测的是「注册表里有没有」，
+        // 不是「这次写没写进去」。
+        //
+        // 第二版想「导入前先 reg delete 旧键」把状态清空。否决了：那一步是破坏性
+        // 操作 —— 万一本次导入失败，用户原本能用的替换值反倒被清掉，从「旧值可用」
+        // 变成「什么都没」。也否决了「只删不写回」以外的写法。
+        //
+        // 现在用一个**随机 token** 当戳：同一份 .reg 里既写字体映射、又写
+        // `ExeOnMac\FontSubstitutionStamp = <token>`（launcher 自有命名空间，
+        // 不碰系统配置）。导入后查这个 token，查到才说明本次的整个文件被吃进去了。
+        // 令牌每次都不同，旧值绝不可能蒙对；写失败时旧值仍在，不会倒退。
+        let stamp = UUID().uuidString
         var lines = [
-            "WINE REGISTRY Version 2",
-            ";; 由 ExeOnMac launcher 生成，请勿手工修改",
+            "Windows Registry Editor Version 5.00",
             "",
-            "[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\FontSubstitutes]",
+            "[\(keyPath)]",
         ]
         for (windowsName, macName) in fonts.sorted(by: { $0.key < $1.key }) {
             lines.append("\"\(windowsName)\"=\"\(macName)\"")
         }
+        lines.append("")
+        lines.append("[\(stampKeyPath)]")
+        lines.append("\"\(stampValueName)\"=\"\(stamp)\"")
         let text = lines.joined(separator: "\r\n") + "\r\n"
 
         let regFile = layout.privateDir.appendingPathComponent("fontsub.reg")
         do {
-            try text.write(to: regFile, atomically: true, encoding: .utf8)
+            // UTF-16LE + BOM：与 Windows 上 `regedit /E` 导出的形态一致，便于人工比对。
+            // 纯 ASCII 也实测可用（第 7 轮已验证两种编码都行），选前者只为可比对。
+            var data = Data([0xFF, 0xFE])
+            data.append(contentsOf: Array(text.utf16).flatMap { u -> [UInt8] in
+                let v = UInt16(u)
+                return [UInt8(v & 0xFF), UInt8(v >> 8)]
+            })
+            try data.write(to: regFile, options: .atomic)
         } catch {
             LauncherLog.write("WARN 写 fontsub.reg 失败：\(error.localizedDescription)", to: log)
             return false
@@ -325,11 +372,11 @@ enum FontSubstitution {
         //
         // 走统一入口后，`current` 覆盖到它，信号在这里也有对象可停。
         // 轮询间隔取 50ms：regedit 只跑一两秒，要让它尽快响应信号。
-        let outcome = WineRunner.runChild(
+        let result = WineRunner.runChild(
             plan: plan, arguments: ["regedit", "/S", regFile.path],
             output: FileHandle.nullDevice, log: log, drainLimit: 0.05)
 
-        switch outcome {
+        switch result.outcome {
         case .late:
             // 启动前就欠着信号：压根没起 regedit。用户已经在关，直接收工。
             LauncherLog.write("fontsub 未执行：信号先到", to: log)
@@ -344,6 +391,18 @@ enum FontSubstitution {
                 LauncherLog.write(
                     "WARN fontsub 导入退出码 \(status)，界面字体可能显示为方块",
                     to: log)
+            } else if !stampPresent(plan: plan, stamp: stamp, log: log) {
+                // ## 退出码 0 不能证明写入成功（实测过两次）
+                //
+                // `regedit /S` 对格式不对的文件不报错：退出码 0、stderr 空、零键写入。
+                // 第 7 轮在 Python 侧（`install.suppress_restart`）踩过一次，本轮在
+                // 这里的**内部格式**上又踩了一次 —— 「命令跑完没抛异常」从来不是证据。
+                //
+                // 查不到戳就落 WARN 并说明后果。仍然不阻断启动：
+                // 字体不对只是观感问题，能跑起来比字体正确更重要。
+                LauncherLog.write(
+                    "WARN fontsub 导入退出码 0 但本次的戳查不到：字体替换未生效，界面中文可能显示为方块",
+                    to: log)
             } else {
                 LauncherLog.write("fontsub 已导入 \(fonts.count) 条替换", to: log)
             }
@@ -352,6 +411,40 @@ enum FontSubstitution {
             LauncherLog.write("WARN 无法执行 regedit", to: log)
             return false
         }
+    }
+
+    /// 回查：本次那枚随机戳有没有真的落进注册表。
+    ///
+    /// ## 为什么是戳而不是字体名
+    ///
+    /// 查字体名无法区分「本次写的」与「上一轮留下的」—— 负向验证当场证明过：
+    /// 内部格式注回去，本次零写入，`reg query` 照样读得到旧值。戳每次运行都重新
+    /// 生成（UUID），旧值绝不可能蒙对，所以「查得到」只可能意味着本次文件被吃进去了。
+    ///
+    /// ## 为什么不是先删旧键
+    ///
+    /// 删是破坏性的：本次导入若失败，用户原本能用的替换值被清掉，从「旧值可用」
+    /// 倒退成「什么都没有」。戳是**额外写**，最坏情况只是多一个无用的字符串值。
+    ///
+    /// 走 launcher 自有命名空间 `HKCU\Software\Wine\ExeOnMac`，不碰微软那个键，
+    /// 也不响应在任何 Windows 软件会读的位置。
+    private static func stampPresent(plan: RuntimePlan, stamp: String, log: URL?) -> Bool {
+        let query = runQuery(plan: plan, key: stampKeyPath, log: log)
+        return query.contains(stamp)
+    }
+
+    /// 跑一次 `reg query` 并把它说的话原样带回来（失败返回空串）。
+    private static func runQuery(plan: RuntimePlan, key: String, log: URL?) -> String {
+        let result = WineRunner.runChild(
+            plan: plan, arguments: ["reg", "query", key],
+            output: nil, log: log, drainLimit: 0.05, capture: true)
+        guard case .finished(0) = result.outcome else {
+            if case .finished(let code) = result.outcome {
+                LauncherLog.write("fontsub 回查退出码 \(code)", to: log)
+            }
+            return ""
+        }
+        return String(decoding: result.stdout, as: UTF8.self)
     }
 }
 
@@ -415,6 +508,18 @@ enum WineRunner {
         case failedToStart
     }
 
+    /// 跑一个 wine 子进程的结果：结局 + 被抓下来的 stdout（未捕获时为空）。
+    ///
+    /// ## 为什么把 stdout 也带出来
+    ///
+    /// `regedit /S` 静默失败（退出码 0、零写入）已被实测两次，唯一能判真假的
+    /// 办法是导入后跑一次 `reg query` 看回话。要看回话就得能收 stdout，
+    /// 而「所有子进程都走 runChild」这条守卫不许另开第二个进程构造点。
+    struct ChildResult {
+        let outcome: Outcome
+        let stdout: Data
+    }
+
     /// 跑一个 wine 子进程并等它结束。**所有** wine 子进程都走这里。
     ///
     /// ## 为什么必须收成一个入口
@@ -429,20 +534,41 @@ enum WineRunner {
     static func runChild(plan: RuntimePlan, arguments: [String],
                          output: Any? = nil,
                          log: URL?,
-                         drainLimit: TimeInterval = 0.2) -> Outcome {
+                         drainLimit: TimeInterval = 0.2,
+                         capture: Bool = false,
+                         announce: Bool = false) -> ChildResult {
         // 起子进程之前先看有没有欠着的信号。有就压根别起 —— 起了再杀会留下
         // 一棵需要收尾的进程树，不起是干净的。
-        if pending != nil {
+        //
+        // ## 为什么不能只看 pending（本轮修）
+        //
+        // `drainPending` 送达时会清空 pending、只留 deliveredSignal。于是「信号已
+        // 送达并停掉上一个子进程」之后再调 runChild，pending 是 nil，这里就放行了 ——
+        // 又拉起一个子进程，而那个信号已经用掉、`signal(sig, SIG_IGN)` 又吃掉了默认
+        // 处置，新的子进程只能等着被谁再停一次，实际上永远等不到。
+        //
+        // 实测：加了回查那次 `reg query` 之后，`TestSignalDuringStartupWindow` 的
+        // SIGTERM / SIGINT 两条立刻变红（15 秒仍在）。根因不是回查本身，而是
+        // 「信号已被送达」这件事没有参与判断。
+        if pending != nil || deliveredSignal != nil {
             // 不清空：留给调用方判断「本次启动被信号叫停」，由主流程统一收尾。
             LauncherLog.write("已有待处理信号，不再启动 wine 子进程", to: log)
-            return .late
+            return ChildResult(outcome: .late, stdout: Data())
         }
 
         let process = Process()
         process.executableURL = plan.wineBinary
         process.arguments = arguments
         process.environment = plan.environment
-        if let output {
+        var pipe: Pipe?
+        if capture {
+            // 捕获模式下 stdout/stderr 都进同一个管道：`reg query` 的键值走 stdout，
+            // 出错走 stderr，调用方只关心「有没有读到我们写的名字」。
+            let p = Pipe()
+            pipe = p
+            process.standardOutput = p
+            process.standardError = p
+        } else if let output {
             process.standardOutput = output
             process.standardError = output
         }
@@ -456,13 +582,19 @@ enum WineRunner {
         } catch {
             current = nil
             LauncherLog.write("FATAL 无法启动 wine：\(error.localizedDescription)", to: log)
-            return .failedToStart
+            return ChildResult(outcome: .failedToStart, stdout: Data())
         }
         // 「已启动」这一行必须留在 runChild 里 —— 它是「wine 真的起来了」的
         // 唯一证据，`test_phase3.TestRealLaunch` 与排障的人都靠它。重构时漏掉
         // 过一次，表现为用例报「没等到 wine 已启动」而 wine 其实在跑。
-        // regedit 这类短命令不写，避免日志噪音；带 output 的是主程序。
-        if output != nil {
+        //
+        // ## 为什么由调用方显式声明，而不是靠「有没有 output」推断
+        //
+        // 早先是 `output != nil` 就写。加上 `reg delete` 那一步之后，它传的是
+        // `FileHandle.nullDevice`（非 nil），于是日志里冒出两条莫须有的
+        // 「wine 已启动」—— 一句**只该在主程序启动时出现一次**的日志出现了三次。
+        // 日志是排障的唯一线索，宁可多一个参数，也不能让它说假话。
+        if announce {
             LauncherLog.write("wine 已启动 pid=\(process.processIdentifier)", to: log)
         }
 
@@ -481,12 +613,19 @@ enum WineRunner {
         let status = process.terminationStatus
         current = nil
 
+        // 必须在子进程退出之后、关句柄之前读，否则管道可能还挂着写端。
+        var captured = Data()
+        if let pipe {
+            captured = pipe.fileHandleForReading.readDataToEndOfFile()
+            try? pipe.fileHandleForReading.close()
+        }
+
         // 不在这里清空 deliveredSignal：调用方（`apply` 与 `main`）要靠它
         // 决定退出码。下一个 `runChild` 开头会重置，不会串到别的子进程。
         if let sig = deliveredSignal {
-            return .stoppedBySignal(sig)
+            return ChildResult(outcome: .stoppedBySignal(sig), stdout: captured)
         }
-        return .finished(status)
+        return ChildResult(outcome: .finished(status), stdout: captured)
     }
 
     /// signal handler 的唯一入口：先记下信号，再由轮询环送达。
@@ -545,17 +684,19 @@ enum WineRunner {
         }
 
         // 启动前就欠着信号：连日志文件都不必开，直接返回。
-        if pending != nil {
+        // 同 runChild：`deliveredSignal` 非空也算「欠着」—— 它代表信号已被送达过
+        // 某个子进程，那个信号已经用掉，不能当作还能再停一个新子进程。
+        if pending != nil || deliveredSignal != nil {
             LauncherLog.write("启动前已有待处理信号，不拉起主程序", to: log)
-            return pending ?? 0
+            return consumePendingSignal()
         }
 
         guard let handle = try? FileHandle(forWritingTo: wineLog) else {
             LauncherLog.write("WARN 无法写入 wine 日志，输出改到 stderr", to: log)
-            switch runChild(plan: plan, arguments: plan.arguments, log: log) {
+            switch runChild(plan: plan, arguments: plan.arguments, log: log).outcome {
             case .finished(let status): return status
             case .stoppedBySignal(let sig): return sig
-            case .late: return pending ?? 0
+            case .late: return consumePendingSignal()
             case .failedToStart: return 1
             }
         }
@@ -567,10 +708,10 @@ enum WineRunner {
         // 退出码语义：被我们发信号停掉时返回信号值本身（15）。这与
         // 「wine 自己收到 SIGTERM 后以 15 退出」是同一个码 —— 同一个用户
         // 操作必须给出同一个码，否则脚本里按退出码判断会时灵时不灵。
-        let outcome = runChild(plan: plan, arguments: plan.arguments, output: handle,
-                              log: log)
+        let result = runChild(plan: plan, arguments: plan.arguments, output: handle,
+                              log: log, announce: true)
         try? handle.close()
-        switch outcome {
+        switch result.outcome {
         case .finished(let status):
             LauncherLog.write("wine 退出 status=\(status)", to: log)
             return status
@@ -578,8 +719,8 @@ enum WineRunner {
             LauncherLog.write("wine 被信号 \(sig) 停掉", to: log)
             return sig
         case .late:
-            let sig = pending ?? 0
-            pending = nil
+            // 不能只读 pending（送达后它已清空），要连 deliveredSignal 一起算。
+            let sig = consumePendingSignal()
             LauncherLog.write("启动前已有待处理信号 \(sig)，未拉起主程序", to: log)
             return sig
         case .failedToStart:

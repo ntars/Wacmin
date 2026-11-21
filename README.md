@@ -558,10 +558,10 @@ cargo xwin build --target i686-pc-windows-msvc --release
 | 环节 | 机制 | 位置 |
 |---|---|---|
 | 声明映射 | `compat.yaml` 的 `font_map`：`微软雅黑: PingFang SC`、`宋体: Songti SC` | 配方 |
-| 生成注册表 | 写 `Contents/Resources/Private/fontsub.reg`，往 **`HKLM`** 的 `FontSubstitutes` 段加条目 | `launcher/Sources/main.swift` 的 `FontSubstitution` |
+| 生成注册表 | 写 `Contents/Resources/Private/fontsub.reg`，同时往 **`HKLM`** 的 `FontSubstitutes`（GDI 读）与 **`HKCU`** 的 `Wine\Fonts\Replacements`（DirectWrite 读）各加一份条目 | `launcher/Sources/main.swift` 的 `FontSubstitution` |
 | 生效 | 启动前跑 `wine regedit /S fontsub.reg`，再 `reg query` 回查本次的 UUID 戳；失败只 WARN 不阻断启动 | 同上 |
 
-**根键必须是 `HKLM` 而不是 `HKCU`**（2026-11-21 实测）：wine 的 GDI 只读 Machine 树那一份，写 `HKCU` 的键确实落盘、也查得到，但 `WINEDEBUG=+font` 里替换表没有它、最终仍选中缺中文字形的字体。三组对照与判据细节见 15.24。
+**两条键都要写，因为 GDI 与 DirectWrite 各读各的**（2026-11-21 实测）：GDI 只读 `HKLM` 的 `FontSubstitutes`；DirectWrite 的 `dwrite.dll` 里根本没有 `FontSubstitutes` 这个字符串，它只读 **`HKCU\Software\Wine\Fonts\Replacements`**。根键正好相反，错一个就全无效。四组对照与 PE 探针实证见 15.25，GDI 那一半见 15.24。
 
 也就是说：`font_map` 解决「软件写死微软雅黑」的显示问题，`fonts-cn` 层解决「产物的字体不依赖宿主」的分发问题。两者互不替代，别指望装个层就自动有了名字映射。
 
@@ -2403,13 +2403,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 487 项 | 约 2 分 50 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、7 项字体替换格式/根键/判据守卫 |
+| exeonmac | 490 项 | 约 2 分 57 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径） |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1379 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1382 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3075,6 +3075,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | launcher 在启动窗口内关不掉：信号「收下了」但没人执行 | 在 `runtime ready` 之后、`wine 已启动` 之前发 SIGTERM（固定延迟 0.8 / 1.0 / 1.2 秒各两次，**6/6 复现**）：日志写了「收到信号 15，正在停止 wine」，随后 `fontsub 已导入` 与 `wine 已启动` 照常出现，25 秒后进程仍在，只能 SIGKILL。日志本身完整、无异常 | ① `signal(sig, SIG_IGN)` 已吃掉默认处置；② handler 里是 `current?.terminate()`；③ 而 `current` 只由主程序登记，`FontSubstitution.apply` 里那次 `wine regedit /S`（实测约 3 秒）自己 new 了 `Process` 走 `waitUntilExit()`，**从不登记** → 空操作。第一版修法「记 pending」仍不通：主线程阻塞在 `waitUntilExit()` 里，走不到任何检查点 | 新增 `WineRunner.runChild` 作为全文件唯一的 `Process()`，`current` 语义从「主程序」改为「当前 wine 子进程」，apply 那次 regedit 也走它；handler 只调 `noteSignal(sig)`（先记再送达），不自己判空。`runChild` 返回 `Outcome` 枚举区分 `.stoppedBySignal` 与 `.finished(15)`，避免「被打断」被当成「导入失败」后仍启动主程序。顺带修正退出码：SIGINT/2、SIGTERM/15、SIGHUP/1 各自独立（修前一律 15）。5 项回归锁（假 wine 撑开窗口），两处负向验证各 3 项红 |
 
 | 字体替换写进了没人读的注册表根键 | 15.23 修完格式后，键确实写进去了、戳也查得到、日志写「已导入 2 条替换」，但把 `lfFaceName` 设成「微软雅黑」再跑，`WINEDEBUG=+font` 里 `dump_gdi_font_subst` **没有这条映射**、`substituting` **0 次**、`select_font` 最终选中 `Courier New` —— 字还是方块 | launcher 写的是 `HKCU\...\FontSubstitutes`。`win32u.so` 里按 UTF-16 扫字符串只有 `\Registry\Machine\...\FontSubstitutes`，没有任何 `\Registry\User\` 对应项 —— **HKCU 那份是合法注册表数据，但没有代码去读它**。与 15.23 的格式错是两层独立的错：那层让数据进得去，这层才让它被读到 | 根键改 `HKEY_LOCAL_MACHINE`（实测 `substituting` 触发、`select_font` 选中 `PingFang SC Regular`）；戳同步搬到 HKLM（否则「查得到戳」只证明写进去了、不证明在 GDI 会读的树里，判据又退化成测存在）。三组对照坐实（HKCU 无效 / HKLM 有效 / `Wine\Fonts\Replacements` 有效但因是别名语义未采用）。守卫 6 → 7 项，其中旧那条断言写死了 HKCU —— **把错误结论写进了断言**，改代码时当场变红。详见 15.24 |
+| 明明两条键都写了，DirectWrite 的软件还是方块 | 15.24 修好 GDI 后，把 `lfFaceName` 设成「微软雅黑」再跑，`select_font` 选中 `PingFang SC Regular`、`substituting` 触发；但换成走 DirectWrite 的程序（同一 prefix、同一份字体），中文仍是方块，`+font` 那侧一行日志都没有 | `FontSubstitutes` 是 GDI 专用：按 UTF-16 与 ASCII 两种编码扫 `lib/wine` 全部 ELF/PE，该字面量只在 `x86_64-unix/win32u.so` 里出现 1 处，`x86_64-windows/dwrite.dll` 里一处都没有；后者只认 `HKCU\Software\Wine\Fonts\Replacements`（单字节 ANSI），反汇编 `0x18000b8a5` 处指向该串、`RegOpenKeyA` 的根键实参是 `0x80000001` 即 HKEY_CURRENT_USER | 同一份 .reg 里两条键各写一份（根键正好相反：GDI 要 HKLM，DirectWrite 要 HKCU）；戳搬到 `HKCU\Software\Wine\ExeOnMac` 与 `replacePath` 同根。六组 PE 探针对照坐实：只写 HKLM 时 `familyCount` 292、查不到「微软雅黑」；只写 HKCU 时 293、查得到；两条同写仍 293、`HKLM` 那份换成 `Wine\Fonts\Replacements` 则 292 —— 根键比键名更关键。守卫 7 → 10 项（2 项扫真实二进制的两种编码、1 项断言两条键在同一份文件里），端到端断言改为 SIGTERM 后 `wineserver -k` 再读盘（`-w` 不回写，实测 0 次）。详见 15.25 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -4337,7 +4338,99 @@ wine 已启动 pid=18519
 
 #### ⑨ 仍未处理
 
-(a) 人眼未确认字形质量 —— 只到「选中的是 PingFang SC」，没到「笔画正常、无缺字」；(b) 只测 `notepad.exe` 一种载荷，且它需要 `lfFaceName` 指向被替换的字体才会触发替换 —— 真实软件若用 DirectWrite 而非 GDI，走的可能是另一条路径（`dwrite.dll` 里没有 `FontSubstitutes` 字面量，这条未查清）；(c) `HKLM` 级替换对「只读 HKCU 覆盖」的软件是否仍然生效未测 —— 本轮只验了「GDI 会读 HKLM」，不涉及软件自身的偏好设置；(d) 15.23 ⑨(c) 的「同类 `.reg` 写入路径全量扫描」仍未做。
+(a) 人眼未确认字形质量 —— 只到「选中的是 PingFang SC」，没到「笔画正常、无缺字」；(b) 只测 `notepad.exe` 一种载荷，且它需要 `lfFaceName` 指向被替换的字体才会触发替换 —— 真实软件若用 DirectWrite 而非 GDI，走的可能是另一条路径（`dwrite.dll` 里没有 `FontSubstitutes` 字面量）。**本轮由 15.25 查清：确实是另一条路径，且只认 `HKCU\Software\Wine\Fonts\Replacements`，原修法对它零作用**；(c) `HKLM` 级替换对「只读 HKCU 覆盖」的软件是否仍然生效未测 —— 本轮只验了「GDI 会读 HKLM」，不涉及软件自身的偏好设置；(d) 15.23 ⑨(c) 的「同类 `.reg` 写入路径全量扫描」仍未做。
+
+### 15.25 DirectWrite 根本不看 `FontSubstitutes`：GDI 修好了，现代软件还是方块（2026-11-21 实测，已修）
+
+**这一节是 15.24 ⑨(b) 的处置。** 15.24 把 GDI 那条路修通了（`select_font` 确实选中了苹方），但留了一句「真实软件若用 DirectWrite，可能是另一条路径」。本轮把这条查清了：**不是「可能是」，是「一定是另一条路径」，而且原来那条对它完全无效。**
+
+#### ① 先把「谁读哪个键」用静态扫描钉死
+
+不猜、不读文档，直接扫整个 wine 运行时（`lib/wine/` 下全部 ELF 与 PE），数两个键名各自出现在哪些模块里：
+
+| 键名 | 出现在 | 编码 |
+|---|---|---|
+| `FontSubstitutes` | 只有 `x86_64-unix/win32u.so`（GDI） | UTF-16 |
+| `Software\Wine\Fonts\Replacements` | 只有 `x86_64-windows/dwrite.dll` | **单字节 ANSI** |
+
+`dwrite.dll` 里 `FontSubstitutes` **一处都没有**。编码也不同不是巧合：`win32u.so` 走宽字符 API，`dwrite.dll` 走 `RegOpenKeyA`（ANSI 版）—— 反汇编里那条调用的根键实参是 `0x80000001`，即 `HKEY_CURRENT_USER`，键名指向 `.rdata` 里的 `Software\Wine\Fonts\Replacements`。
+
+> 这个编码差异本轮绊过一次：守卫第一版只扫 UTF-16，`Replacements` 明明在文件里却数出 0 个命中。判据得同时认两种编码 —— 同一个键名，走 ANSI API 的模块存 ANSI、走宽字符的存 UTF-16，两者都是真的。
+
+#### ② 运行时实证：现搓一个只走 DirectWrite 的 PE 探针
+
+静态扫描只能证明「字符串在里面」，证明不了「它真的决定结果」。所以写了一个 4 KB 的探针：手写 COM vtable 直接调 `DWriteCreateFactory` → `GetSystemFontCollection` → `FindFamilyName`，**完全不碰 GDI**。用 `clang-cl` + `lld-link` 交叉编成 PE32+，跑在真实 wine-11.21 + 382 MB base 层上。
+
+同一份 prefix，只改注册表，五组对照：
+
+| 组 | 写入位置 | `familyCount` | 查到 `Microsoft YaHei` |
+|---|---|---|---|
+| A | 都不写 | 292 | **否** |
+| B | `HKLM\...\FontSubstitutes`（15.24 的修法） | 292 | **否** |
+| C | `HKCU\Software\Wine\Fonts\Replacements` | **293** | **是** |
+| D | `HKLM\Software\Wine\Fonts\Replacements` | 292 | **否** |
+| E | `HKCU\...\Replacements`，键名用中文「微软雅黑」 | **293** | 是（中文名同样生效） |
+| F | B + C 同时写 | **293** | **是** |
+
+四个结论，每个都是单独一次实测：
+
+1. **`FontSubstitutes` 对 DirectWrite 零作用**（B 组，292 不变）。15.24 的修法只修好了 GDI 半边。
+2. **根键必须是 `HKCU`**（C 有效 / D 无效）。与 GDI 的要求正好相反 —— 两条路径的根键不同，这是本轮最容易搞错的一点。
+3. **两条键可以共存、互不干扰**（F 组）。所以正确做法是两条都写，不是二选一。
+4. **中文键名同样有效**（E 组）。`font_map` 里写「微软雅黑」不需要额外转成英文名。
+
+#### ③ 为什么 15.24 明确否决过 `Replacements`，本轮又用上了
+
+15.24 ④ 的理由是：「`Replacements` 走别名语义（把苹方反向登记成微软雅黑），枚举字体的程序会看到多出来的『微软雅黑』，兼容层对 Windows 程序说谎越少越好。」
+
+**那个取舍的前提是「两条路都有效，选语义更干净的那条」。** 本轮实测推翻了这个前提：对 DirectWrite 而言 `FontSubstitutes` 一条路都不通。不写 `Replacements` 的代价不是「语义差一点」，而是**所有走 DirectWrite 的软件中文一直是方块**。
+
+所以现在两条都写：GDI 走真替换语义（`FontSubstitutes`），DirectWrite 走它唯一认的那条（`Replacements`）。别名语义的副作用（`add_family_replacement mapping L"PingFang SC" to L"Microsoft YaHei"`）只能接受 —— 替代方案是完全没有替换。
+
+#### ④ 戳跟着搬回 HKCU，判据的表述也跟着改
+
+15.24 把戳搬到 HKLM，理由是「与消费方同根」。本轮多了一个消费方（DirectWrite 只读 HKCU），戳只能落一处。取 `HKCU`：它与 `replacePath` 同根，且 `HKCU\Software\Wine` 是 wine 自己的命名空间，对 Windows 软件完全不可见。
+
+守卫 `test_stamp_shares_the_root_the_consumer_reads` 的断言随之改为「戳与 `replacePath` 同根」，并加一条「两条字体路径的根键必须不同」。**判据本身没变**（戳必须住在某个真实消费方读的那棵树里），变的是「哪个消费方」—— 这也正是不能把 `HKLM`/`HKCU` 写死进断言的原因：写死的那一刻，下一个人会为了「让测试变绿」去搬常量，而不是去查「到底谁在读」。
+
+#### ⑤ 端到端：两条键都要真的落盘
+
+静态守卫只能保证「代码里写了这两行」。所以 `TestRealLaunch` 里加了一段：SIGTERM 之后读 prefix 的 `system.reg` 与 `user.reg`，断言两处都有键、都有映射值。
+
+**这段断言本轮红了两次，两次都不是产品缺陷：**
+
+| 版本 | 做法 | 结果 |
+|---|---|---|
+| v1 | 在「wine 已启动」之后立刻读文件 | 红 —— 注册表还在内存里，未落盘 |
+| v2 | 先 `wineserver -w` 再读 | **仍红** —— `-w` 只是「等 wineserver 退出」，launcher 退出后它仍以服务身份活着，等到超时；只有 `-k` 才触发回写 |
+| v3 | `wineserver -k` + 轮询等 `Replacements` 出现 | 绿 |
+
+对照实测：`-w` 后 `user.reg` 里 `Replacements` 命中 **0** 次，`-k` 后命中 **1** 次。这条经验值得记：**「日志说成功」与「磁盘上是这样」之间隔着一次落盘，中间任何时刻读文件都不算证据。**
+
+#### ⑥ 回归锁：+3 项，其中 2 项守的是运行时事实
+
+| 用例 | 守什么 |
+|---|---|
+| `test_both_font_paths_written_in_one_file` | 两条键必须在同一份 `.reg` 里；只许生成一份文本；两条共用同一份 fonts 映射 |
+| `test_font_substitutes_is_read_by_gdi_only` | **扫真实运行时**：`FontSubstitutes` 必须命中 `win32u.so`、且不许命中任何 dwrite |
+| `test_replacements_is_read_by_dwrite` | **扫真实运行时**：`Replacements` 必须命中 dwrite |
+
+后两条守的不是代码而是**运行时的事实**。哪天 wine 升级、上游把 `FontSubstitutes` 也接进 DirectWrite，它们会自己变红 —— 而不是留一份过期结论继续骗人。这类「守着环境事实」的用例在本仓库是第一次出现。
+
+#### ⑦ 负向验证（四处，均有效）
+
+| 注入 | 结果 |
+|---|---|
+| 删掉 `Replacements` 那段写入 | **1 项红**（两条键守卫） |
+| `replacePath` 根键改回 `HKLM` | **1 项红**（同根键守卫） |
+| 只把两条键合并成一个循环（少写一条） | **1 项红**（两条键守卫） |
+| 删掉 `Replacements` 写入后跑端到端 | **1 项红**（`user.reg` 里找不到 `Replacements`） |
+
+还原后全绿。
+
+#### ⑧ 仍未处理
+
+(a) **人眼仍未确认字形质量** —— 15.24 到「选中的是苹方」，本轮到「DirectWrite 也认这个名字了」，但「笔画正常、无缺字」仍然只有人眼能判；(b) DirectWrite 的实际渲染结果（fallback 到哪张字模）未验，本轮只验了「家族名解析得到」；(c) 只验了 `Microsoft YaHei` 一个名字，其它字体族（宋体、黑体）未逐个验；(d) 探针在读取 `GetFamilyNames`（家族名字符串）时会 page fault，所以只取了 `FindFamilyName` 这一层的结果 —— 手写 COM vtable 的脆弱处，不影响本条结论（`exists` 与 `familyCount` 都已决定性），但「解析到的家族名是什么」这一层没有取到。
 
 
 ---

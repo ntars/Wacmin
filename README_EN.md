@@ -558,10 +558,10 @@ The missing `SimSun` described above is handled on the launcher side, independen
 | Stage | Mechanism | Location |
 |---|---|---|
 | Declare the mapping | `font_map` in `compat.yaml`: `微软雅黑: PingFang SC`, `宋体: Songti SC` | Recipe |
-| Generate the registry file | Writes `Contents/Resources/Private/fontsub.reg`, adding entries to `FontSubstitutes` under **`HKLM`** | `FontSubstitution` in `launcher/Sources/main.swift` |
+| Generate the registry file | Writes `Contents/Resources/Private/fontsub.reg` with entries under **both** `HKLM`'s `FontSubstitutes` and `HKCU`'s `Wine\Fonts\Replacements` | `FontSubstitution` in `launcher/Sources/main.swift` |
 | Apply it | Runs `wine regedit /S fontsub.reg` before launch, then `reg query` reads back this run's UUID stamp; failure logs a WARN without blocking startup | Same |
 
-**The root key must be `HKLM`, not `HKCU`** (measured 2026-11-21): wine's GDI reads only the Machine tree. Keys written under `HKCU` really do land and are queryable, but `WINEDEBUG=+font` shows no such entry in the substitution table and a font without Chinese glyphs is still selected. Three-way comparison and criterion details are in 15.24.
+**Both keys have to be written, because GDI and DirectWrite each read their own** (measured 2026-11-21): GDI reads only `HKLM`'s `FontSubstitutes`, while `dwrite.dll` contains no `FontSubstitutes` string at all and reads only **`HKCU\Software\Wine\Fonts\Replacements`**. The root keys are exact opposites — get one wrong and it has no effect. Six-group comparison and the PE probe are in 15.25; the GDI half is in 15.24.
 
 In other words: `font_map` fixes the display problem when software hard-codes Microsoft YaHei, while the `fonts-cn` layer fixes whether an artefact's fonts depend on the host. They are not substitutes for each other—do not expect installing a layer to give you name mapping for free.
 
@@ -2404,13 +2404,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 487 | about 2m50s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 7 font-substitution format/root-key/check guards |
+| exeonmac | 490 | about 2m57s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1379** | — | See "0 skipped repository-wide" below |
+| **Total** | **1382** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3055,6 +3055,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | The launcher cannot be closed inside its startup window: the signal is "received" but nobody executes it | Sending SIGTERM after `runtime ready` and before `wine 已启动` (fixed delays 0.8 / 1.0 / 1.2 s, twice each, **6/6 reproduced**): the log says "收到信号 15，正在停止 wine", then `fontsub 已导入` and `wine 已启动` appear as usual, and 25 seconds later the process is still alive — SIGKILL is the only way out. The log itself is complete and error-free | ① `signal(sig, SIG_IGN)` already removed the default disposition; ② the handler body is `current?.terminate()`; ③ `current` is only registered by the main program, while the `wine regedit /S` inside `FontSubstitution.apply` (measured ~3 s) creates its own `Process` and calls `waitUntilExit()` — **never registered** → no-op. The first fix ("record `pending`") still failed: the main thread is blocked inside `waitUntilExit()` and never reaches any checkpoint | Added `WineRunner.runChild` as the only `Process()` in the file; `current` now means "the current wine child" instead of "the main program", and apply's regedit goes through it too; the handler only calls `noteSignal(sig)` (record, then deliver) and no longer branches on nil. `runChild` returns an `Outcome` enum separating `.stoppedBySignal` from `.finished(15)`, so "interrupted" is not mistaken for "import failed" and the main program is not started afterwards. Exit codes fixed too: SIGINT/2, SIGTERM/15, SIGHUP/1 are now distinct (all were 15 before). 5 regression locks (fake wine widens the window); two injections, 3 red each |
 
 | Font substitution written into a registry root nobody reads | After 15.23 fixed the format, the keys really land, the stamp is queryable and the log reads "fontsub 已导入 2 条替换" — yet with `lfFaceName` set to `Microsoft YaHei`, `WINEDEBUG=+font` shows **no such mapping** in `dump_gdi_font_subst`, `substituting` fires **0 times**, and `select_font` picks `Courier New`. The text stays tofu | The launcher writes `HKCU\...\FontSubstitutes`. Scanning `win32u.so` for UTF-16 strings yields only `\Registry\Machine\...\FontSubstitutes`, with no `\Registry\User\` counterpart — **the HKCU copy is valid registry data that no code reads**. This is a second, independent defect from 15.23: that one made the data land, this one makes it be read | Root key changed to `HKEY_LOCAL_MACHINE` (measured: `substituting` fires, `select_font` picks `PingFang SC Regular`); the stamp moved to HKLM as well (otherwise "stamp found" only proves the write landed, not that it is in the tree GDI reads — the criterion degrades back to testing existence). Three-way comparison settles it (HKCU ineffective / HKLM effective / `Wine\Fonts\Replacements` effective but rejected as alias semantics). Guards 6 → 7; the old one asserted HKCU — **baking the wrong conclusion into the assertion** — and went red the moment the code changed. Details in 15.24 |
+| Both keys written, yet DirectWrite software is still tofu | After 15.24 fixed GDI, setting `lfFaceName` to `Microsoft YaHei` shows `select_font` picking `PingFang SC Regular` and `substituting` firing; but a DirectWrite program on the same prefix with the same fonts still renders Chinese as tofu, with not a single `+font` line | `FontSubstitutes` is GDI-only: scanning every ELF/PE under `lib/wine` for both UTF-16 and ASCII, the literal appears once, in `x86_64-unix/win32u.so`, and not at all in `x86_64-windows/dwrite.dll`; the latter reads only `HKCU\Software\Wine\Fonts\Replacements` (single-byte ANSI), and in the disassembly at `0x18000b8a5` the string is loaded before `RegOpenKeyA` is called with root `0x80000001`, i.e. HKEY_CURRENT_USER | Write both keys into the same .reg (the roots are exact opposites: GDI wants HKLM, DirectWrite wants HKCU); the stamp moves to `HKCU\Software\Wine\ExeOnMac`, sharing `replacePath`'s root. Six PE-probe groups settle it: HKLM only → `familyCount` 292 and `Microsoft YaHei` not found; HKCU only → 293 and found; both → still 293; HKLM with `Wine\Fonts\Replacements` → 292 — the root matters more than the key name. Guards 7 → 10 (2 scan the real binaries in both encodings, 1 asserts both keys land in one file); the end-to-end assertion now runs `wineserver -k` after SIGTERM before reading from disk (`-w` does not write back — measured 0 hits). Details in 15.25 |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -4316,7 +4317,99 @@ The new guard asserts "the two constants share a prefix" rather than repeating `
 
 #### ⑨ Still open
 
-(a) Glyph quality never eyeballed — the evidence stops at "PingFang SC is selected", not "the strokes look right and nothing is missing"; (b) only `notepad.exe` was tested, and only with `lfFaceName` pointing at a substituted font — real software using DirectWrite instead of GDI may take another path (`dwrite.dll` contains no `FontSubstitutes` literal; this is unresolved); (c) whether an HKLM-level substitution still applies to software that keeps its own HKCU overrides is untested — this round verified "GDI reads HKLM", nothing about an application's own preferences; (d) 15.23 ⑨(c), a repo-wide sweep of the same `.reg` write pattern, remains undone.
+(a) Glyph quality never eyeballed — the evidence stops at "PingFang SC is selected", not "the strokes look right and nothing is missing"; (b) only `notepad.exe` was tested, and only with `lfFaceName` pointing at a substituted font — real software using DirectWrite instead of GDI may take another path (`dwrite.dll` contains no `FontSubstitutes` literal). **Settled by 15.25: it is indeed another path, and it only reads `HKCU\Software\Wine\Fonts\Replacements`, so the old fix had zero effect on it**; (c) whether an HKLM-level substitution still applies to software that keeps its own HKCU overrides is untested — this round verified "GDI reads HKLM", nothing about an application's own preferences; (d) 15.23 ⑨(c), a repo-wide sweep of the same `.reg` write pattern, remains undone.
+
+### 15.25 DirectWrite does not read `FontSubstitutes` at all: GDI is fixed, modern software is still tofu (measured 2026-11-21, fixed)
+
+**This section disposes of 15.24 ⑨(b).** 15.24 got the GDI path working (`select_font` really does pick PingFang), but left one sentence open: "real software using DirectWrite may take another path." This round settles it: **not "may" — it definitely takes another path, and the old one has no effect on it whatsoever.**
+
+#### ① First, pin down who reads which key with a static scan
+
+No guessing, no docs — scan the entire wine runtime (every ELF and PE under `lib/wine/`) and count which modules each key name appears in:
+
+| Key name | Appears in | Encoding |
+|---|---|---|
+| `FontSubstitutes` | only `x86_64-unix/win32u.so` (GDI) | UTF-16 |
+| `Software\Wine\Fonts\Replacements` | only `x86_64-windows/dwrite.dll` | **single-byte ANSI** |
+
+`dwrite.dll` contains `FontSubstitutes` **not once**. The encoding difference is not a coincidence either: `win32u.so` goes through the wide-character API, while `dwrite.dll` goes through `RegOpenKeyA` (the ANSI version) — in the disassembly that call's root-key argument is `0x80000001`, i.e. `HKEY_CURRENT_USER`, with the key name pointing at `Software\Wine\Fonts\Replacements` in `.rdata`.
+
+> The encoding difference tripped us up once this round: the first version of the guard scanned UTF-16 only, so `Replacements` — plainly present in the file — counted as zero hits. A criterion has to accept both encodings: the same key name is stored as ANSI by modules using the ANSI API and as UTF-16 by modules using the wide API, and both are real.
+
+#### ② Runtime proof: hand-build a PE probe that uses DirectWrite only
+
+A static scan proves "the string is in there", not "it actually decides the outcome". So we wrote a 4 KB probe: hand-rolled COM vtable calling `DWriteCreateFactory` → `GetSystemFontCollection` → `FindFamilyName`, **never touching GDI**. Cross-compiled to PE32+ with `clang-cl` + `lld-link`, run against real wine-11.21 plus the 382 MB base layer.
+
+Same prefix, only the registry changes, six groups:
+
+| Group | Written where | `familyCount` | Finds `Microsoft YaHei` |
+|---|---|---|---|
+| A | nothing written | 292 | **No** |
+| B | `HKLM\...\FontSubstitutes` (15.24's fix) | 292 | **No** |
+| C | `HKCU\Software\Wine\Fonts\Replacements` | **293** | **Yes** |
+| D | `HKLM\Software\Wine\Fonts\Replacements` | 292 | **No** |
+| E | `HKCU\...\Replacements`, key name in Chinese (`微软雅黑`) | **293** | Yes (Chinese names work too) |
+| F | B + C both written | **293** | **Yes** |
+
+Four conclusions, each from a separate measurement:
+
+1. **`FontSubstitutes` has zero effect on DirectWrite** (group B, still 292). 15.24's fix only repaired half the picture.
+2. **The root key must be `HKCU`** (C works / D does not). Exactly the opposite of GDI's requirement — the two paths use different roots, and this is the easiest thing to get wrong this round.
+3. **The two keys coexist without interfering** (group F). So the correct move is to write both, not pick one.
+4. **Chinese key names work too** (group E). `font_map` does not need to translate 微软雅黑 into an English name.
+
+#### ③ Why 15.24 explicitly rejected `Replacements`, and why this round uses it anyway
+
+15.24 ④'s reasoning was: "`Replacements` has alias semantics (it registers PingFang backwards as Microsoft YaHei), so programs that enumerate fonts see an extra 'Microsoft YaHei'. The less the compatibility layer lies to Windows programs, the better."
+
+**That trade-off assumed "both paths work; pick the one with cleaner semantics."** This round's measurements overturn the premise: for DirectWrite, `FontSubstitutes` is not a path at all. The cost of skipping `Replacements` is not "slightly worse semantics" but **every DirectWrite program rendering Chinese as tofu, permanently**.
+
+So now we write both: GDI gets real substitution semantics (`FontSubstitutes`), DirectWrite gets the only key it recognises (`Replacements`). The alias side effect (`add_family_replacement mapping L"PingFang SC" to L"Microsoft YaHei"`) has to be accepted — the alternative is no substitution at all.
+
+#### ④ The stamp moves back to HKCU, and the criterion's wording changes with it
+
+15.24 moved the stamp to HKLM, reasoning "same root as the consumer". This round adds a second consumer (DirectWrite reads HKCU only), and the stamp can live in one place. We chose `HKCU`: same root as `replacePath`, and `HKCU\Software\Wine` is wine's own namespace, entirely invisible to Windows software.
+
+The guard `test_stamp_shares_the_root_the_consumer_reads` now asserts "the stamp shares the root with `replacePath`", plus a new assertion that "the two font paths must have different roots". **The criterion itself did not change** (the stamp must live in a tree some real consumer reads); what changed is *which* consumer — which is precisely why `HKLM`/`HKCU` must not be hard-coded into the assertion: the moment it is, the next person moves the constant to make the test green instead of asking who is actually reading.
+
+#### ⑤ End to end: both keys must really land on disk
+
+A static guard only ensures "these two lines exist in the code". So `TestRealLaunch` gained a segment: after SIGTERM, read the prefix's `system.reg` and `user.reg` and assert both keys and both mapping values are present.
+
+**That assertion went red twice this round, and neither was a product defect:**
+
+| Version | Approach | Result |
+|---|---|---|
+| v1 | read the file right after "wine started" | red — the registry is still in memory, not on disk |
+| v2 | `wineserver -w` first, then read | **still red** — `-w` only means "wait for wineserver to exit", and it stays alive as a service after the launcher exits, waiting out the timeout; only `-k` triggers the write-back |
+| v3 | `wineserver -k` + poll until `Replacements` appears | green |
+
+Comparative measurement: after `-w`, `Replacements` hits **0** times in `user.reg`; after `-k`, **1** time. Worth recording: **between "the log says success" and "the disk says so" lies a write-back, and reading the file at any point in between is not evidence.**
+
+#### ⑥ Regression locks: +3, two of which guard runtime facts
+
+| Test | What it guards |
+|---|---|
+| `test_both_font_paths_written_in_one_file` | both keys must be in the same `.reg`; exactly one text is generated; both share the same fonts mapping |
+| `test_font_substitutes_is_read_by_gdi_only` | **scans the real runtime**: `FontSubstitutes` must hit `win32u.so` and must hit no dwrite module |
+| `test_replacements_is_read_by_dwrite` | **scans the real runtime**: `Replacements` must hit dwrite |
+
+The last two guard not code but **facts about the runtime**. The day wine is upgraded and upstream wires `FontSubstitutes` into DirectWrite as well, they go red on their own — instead of leaving a stale conclusion behind to keep misleading people. Tests of this "guarding an environment fact" shape appear here for the first time in this repository.
+
+#### ⑦ Negative verification (four injections, all effective)
+
+| Injection | Result |
+|---|---|
+| Delete the `Replacements` write block | **1 red** (two-keys guard) |
+| Change `replacePath`'s root back to `HKLM` | **1 red** (same-root guard) |
+| Merge both keys into one loop (writing only one) | **1 red** (two-keys guard) |
+| Delete the `Replacements` write, then run end to end | **1 red** (`Replacements` missing from `user.reg`) |
+
+All green after restore.
+
+#### ⑧ Still open
+
+(a) **Glyph quality still not eyeballed** — 15.24 got to "PingFang is selected", this round to "DirectWrite recognises that name too", but "the strokes look right and nothing is missing" remains a human judgement; (b) DirectWrite's actual rendering result (which face it falls back to) is unverified — this round only verified that the family name resolves; (c) only `Microsoft YaHei` was tested, other families (SimSun, SimHei) were not checked one by one; (d) the probe page-faults when reading `GetFamilyNames` (the family name strings), so only the `FindFamilyName` layer was taken — a fragile spot in hand-rolled COM vtables, which does not affect the conclusion (`exists` and `familyCount` are both decisive), but the "which family name did it resolve to" layer was not captured.
 
 
 ---

@@ -317,21 +317,60 @@ enum FontSubstitution {
     /// `system.reg`（已是 clonefile 出来的私有副本），不碰共享层。
     static let keyPath = "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes"
 
+    /// DirectWrite 唯一认的那条键。**必须另写，`FontSubstitutes` 对它无效。**
+    ///
+    /// ## 为什么光有 `keyPath` 不够（2026-11-21 第 13 轮实测）
+    ///
+    /// 第 12 轮证明 GDI 读 `HKLM\...\FontSubstitutes`，修完 `select_font`
+    /// 确实选中了 `PingFang SC Regular`。但那只是 GDI 一条路。真要跑现代软件
+    /// 得看 DirectWrite，而 `dwrite.dll` 里**根本没有 `FontSubstitutes` 这个
+    /// 字面量** —— 全 wine 运行时只有 `win32u.so`（GDI）含它。
+    ///
+    /// 实测方法：用 clang-cl + lld-link 手搓一个 4 KB 的 PE 探针，只调
+    /// `DWriteCreateFactory` → `GetSystemFontCollection` → `FindFamilyName`，
+    /// 完全不碰 GDI。同一个 base 层、同一份 wine-11.21，只改注册表：
+    ///
+    /// | 写入位置 | `familyCount` | 查到 `Microsoft YaHei` |
+    /// |---|---|---|
+    /// | 都不写 | 292 | **否** |
+    /// | `HKLM\...\FontSubstitutes` | 292 | **否** |
+    /// | `HKLM\Software\Wine\Fonts\Replacements` | 292 | **否** |
+    /// | `HKCU\Software\Wine\Fonts\Replacements` | **293** | **是** |
+    /// | 上面两条 `FontSubstitutes` + `HKCU\Replacements` 同时写 | **293** | **是** |
+    ///
+    /// 也就是说：根键是 `HKCU`（不是 HKLM），键名是 `Replacements`（不是
+    /// `FontSubstitutes`），两处错一个就全无效。反汇编也对得上：
+    /// `dwrite.dll` 调 `RegOpenKeyA` 时根键实参是 `0x80000001`（`HKEY_CURRENT_USER`），
+    /// 键名指向 `.rdata` 里的 `Software\Wine\Fonts\Replacements`。
+    ///
+    /// ## 那第 12 轮「不用 Replacements」的结论呢
+    ///
+    /// 那条取舍的前提是「两条路都有效、Replacements 走别名语义所以不选它」。
+    /// 本轮实测推翻了这个前提：对 DirectWrite 而言 `FontSubstitutes` 一条路
+    /// 都不通，不写 `Replacements` 就等于**所有 DirectWrite 软件的中文一直是
+    /// 方块**。所以现在两条都写 —— GDI 走真替换语义，DirectWrite 走它唯一
+    /// 认的那条。别名语义的代价（枚举字体时会多出一个「微软雅黑」其实是苹方）
+    /// 只能接受，因为替代方案是完全没有替换。
+    static let replacePath = "HKEY_CURRENT_USER\\Software\\Wine\\Fonts\\Replacements"
+
     /// 本次运行标记所在的键与值名。launcher 自有命名空间，不碰任何系统配置。
     ///
-    /// ## 为什么戳也必须是 `HKEY_LOCAL_MACHINE`
+    /// ## 戳与**两个**字体键必须同根
     ///
-    /// 第 11 轮把戳放在 `HKCU`（理由同样是「不碰系统配置」）。第 12 轮实测
-    /// 发现这个位置让戳失去了证明力：字体替换的**消费方**（wine 的 GDI）只读
-    /// `HKLM` 下的 `FontSubstitutes`，`HKCU` 那份没有任何代码去读。于是
-    /// 「戳查得到」只证明「regedit 把这一条写进去了」，不证明「这条会被 GDI
-    /// 采用」—— 恰好就是第 11 轮要躲开的那个「测的是存在，不是生效」。
+    /// 第 11 轮把戳放在 `HKCU`，第 12 轮改到 `HKLM`，两次理由都一样：戳必须
+    /// 和字体映射住在同一个根键，否则「戳查得到」只证明 regedit 把文件吃进去了，
+    /// 不证明这份数据会被消费方读到。
     ///
-    /// 现在戳与字体映射都在 `HKLM` 下：同一份 `.reg`、同一个根键、同一个
-    /// 消费方。戳查得到就意味着这份文件被 regedit 吃进了 GDI 会读的那棵树。
-    /// 仍然不碰微软那个键本身（另起 `Software\Wine\ExeOnMac` 子键），也仍然
-    /// 不需要管理员权限（改的是本 prefix 的 `system.reg`）。
-    static let stampKeyPath = "HKEY_LOCAL_MACHINE\\Software\\Wine\\ExeOnMac"
+    /// 第 13 轮又多了一个消费方：DirectWrite 只读 `HKCU\Software\Wine\Fonts\Replacements`。
+    /// 于是现在同一份 `.reg` 里要写两个字体键（HKLM 与 HKCU 各一），戳只能
+    /// 落在一处 —— 判据取「**至少一条路径的消费方与戳同根**」，即戳必须与
+    /// `replacePath` 同在 `HKCU`（`FontSubstitutes` 那条已由 GDI 的
+    /// `dump_gdi_font_subst` 单独验过，见 15.24）。
+    ///
+    /// 放在 `HKCU` 而不是 `HKLM`：`HKCU\Software\Wine` 是 wine 自己的命名空间，
+    /// 写进去对 Windows 软件完全不可见；`HKLM\Software\Wine` 同理但要多写一次
+    /// `system.reg`。两者都实测查得到，取与 DirectWrite 那条同根的 `HKCU`。
+    static let stampKeyPath = "HKEY_CURRENT_USER\\Software\\Wine\\ExeOnMac"
     static let stampValueName = "FontSubstitutionStamp"
 
     /// 返回「本次调用是否因收到信号而中止」。
@@ -380,6 +419,13 @@ enum FontSubstitution {
             "",
             "[\(keyPath)]",
         ]
+        for (windowsName, macName) in fonts.sorted(by: { $0.key < $1.key }) {
+            lines.append("\"\(windowsName)\"=\"\(macName)\"")
+        }
+        // 同一个映射再写一份到 DirectWrite 认的那条键。两条路各读各的：
+        // GDI 读 HKLM `FontSubstitutes`，DirectWrite 读 HKCU `Replacements`。
+        lines.append("")
+        lines.append("[\(replacePath)]")
         for (windowsName, macName) in fonts.sorted(by: { $0.key < $1.key }) {
             lines.append("\"\(windowsName)\"=\"\(macName)\"")
         }

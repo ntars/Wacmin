@@ -979,6 +979,60 @@ class TestRealLaunch(unittest.TestCase):
                     stopped,
                     f"SIGTERM 后 {SIGTERM_STOP_SECONDS} 秒仍未退出，"
                     f"只能靠 SIGKILL 收尾。日志尾部：{text[-500:]}")
+
+                # ## 两条字体键必须都真的落进 prefix 的注册表文件
+                #
+                # 静态守卫只能保证「代码里写了这两行」，不能保证「regedit 真的
+                # 把它们吃进去了」。第 11 轮栽的就是这个：代码、断言、日志全都
+                # 说「已导入 2 条替换」，实测零键写入。
+                #
+                # ## 为什么断言必须放在这里（本轮踩了两次）
+                #
+                # 第一版把这段放在「wine 已启动」之后，当场红了：`user.reg` 里
+                # 找不到 `Replacements`。不是没写进去，而是**wine 还没落盘** ——
+                # 注册表在 wineserver 活着期间是内存里的，日志说「已导入」时读
+                # 文件，读到的必然是变更前的旧内容。
+                #
+                # 第二版改成 `wineserver -w`（等它自己收尾）仍然红。实测：
+                # `-w` 只是「等 wineserver 退出」，而 launcher 退出后 wineserver
+                # 仍以服务身份活着，`-w` 会一直等到超时；只有 `-k`（让它退出）
+                # 才触发回写。对照实测：`-w` 后 `user.reg` 里 `Replacements`
+                # 命中 0 次，`-k` 后命中 1 次。
+                #
+                # 这也说明一件事：「日志说成功」和「磁盘上是这样」之间隔着一次
+                # 落盘，中间任何时刻读文件都不算证据。
+                try:
+                    from wepack.install import wine_binary
+
+                    subprocess.run([str(wine_binary()), "wineserver", "-k"],
+                                   env=dict(os.environ,
+                                            WINEPREFIX=str(paths["private"])),
+                                   capture_output=True, timeout=60)
+                    # 回写是异步的：`-k` 返回后文件还要过一小会儿才更新。
+                    import time as _time
+
+                    deadline = _time.monotonic() + 15
+                    while _time.monotonic() < deadline:
+                        if "Replacements" in (paths["private"] / "user.reg").read_text(
+                                encoding="utf-8", errors="replace"):
+                            break
+                        _time.sleep(0.2)
+                except Exception:      # noqa: BLE001 - 落盘失败会在下面断言里暴露
+                    pass
+
+                system_reg = (paths["private"] / "system.reg").read_text(
+                    encoding="utf-8", errors="replace")
+                user_reg = (paths["private"] / "user.reg").read_text(
+                    encoding="utf-8", errors="replace")
+                self.assertIn("FontSubstitutes", system_reg,
+                              "GDI 的 FontSubstitutes 应写进 system.reg（HKLM）")
+                self.assertIn("Replacements", user_reg,
+                              "DirectWrite 的 Replacements 应写进 user.reg（HKCU）")
+                # 映射本身也得在：键在但值为空等于没替换。
+                self.assertIn("PingFang SC", system_reg,
+                              "GDI 那条键里缺少中文映射值")
+                self.assertIn("PingFang SC", user_reg,
+                              "DirectWrite 那条键里缺少中文映射值")
             finally:
                 # ## 管道必须显式关闭
                 #
@@ -1291,26 +1345,37 @@ class TestFontSubstitutionFormat(unittest.TestCase):
                       "写文件的键路径必须取自 keyPath 常量，不许就地再抄一份")
 
     def test_stamp_shares_the_root_the_consumer_reads(self) -> None:
-        """戳必须与字体映射同一个根键，否则「查得到」证明不了「会被采用」。
+        """戳必须与**至少一条**字体映射同根，否则「查得到」证明不了「会被采用」。
 
-        ## 这条是第 12 轮自己踩的坑
+        ## 这条断言改过两次，每次都因为消费方变了
 
-        第 11 轮的戳放在 `HKCU\\Software\\Wine\\ExeOnMac`。第 12 轮把字体映射
-        改到 HKLM 后立刻暴露：戳仍在 HKCU，回查照样通过，但它证明的是
-        「regedit 写进去了」，不是「GDI 会读的那棵树里有」—— 与第 11 轮
-        想躲开的「测存在而非测生效」是同一形态。
+        第 11 轮的戳放在 `HKCU\\Software\\Wine\\ExeOnMac`，断言是「戳查得到」。
+        第 12 轮发现 GDI 只读 HKLM，于是把戳搬到 HKLM，断言改成「与 keyPath 同根」。
+        第 13 轮又发现 DirectWrite 只读 **HKCU** 的 `Replacements`，于是戳搬回
+        HKCU，断言改成「与 replacePath 同根」。
 
-        判据取「两个常量必须以同一个根键开头」，而不是把 HKLM 写两遍：
-        将来若整棵树搬家，这条会跟着两个常量一起走，不会留下半截旧结论。
+        **判据本身没变**（戳必须住在某个真实消费方读的那棵树里），变的是
+        「哪个消费方」。这也说明为什么不能把 `HKLM` 或 `HKCU` 写死进断言 ——
+        写死的那一刻，下一个人就会为了「让测试变绿」去搬常量，而不是去查
+        「到底谁在读」。
         """
-        key = self._constant_value("keyPath")
         stamp = self._constant_value("stampKeyPath")
-        self.assertTrue(key.startswith("HKEY_LOCAL_MACHINE\\\\"),
-                        f"字体映射的根键应为 HKLM，实际 {key}")
-        self.assertTrue(stamp.startswith("HKEY_LOCAL_MACHINE\\\\"),
-                        f"戳的根键必须与字体映射一致（HKLM），实际 {stamp}")
+        replace = self._constant_value("replacePath")
+        key = self._constant_value("keyPath")
+
+        # 戳与 DirectWrite 的消费路径必须同根：这是本轮新增的那个消费方。
+        self.assertEqual(stamp.split("\\\\")[0], replace.split("\\\\")[0],
+                         f"戳必须与 Replacements 同根（DirectWrite 读这条），"
+                         f"实际戳={stamp} / replace={replace}")
+        self.assertTrue(stamp.startswith("HKEY_CURRENT_USER\\\\"),
+                        f"DirectWrite 只读 HKCU，戳必须跟它同根，实际 {stamp}")
+
+        # 两条字体路径必须各写各的根键 —— 写成同一个等于放弃其中一条。
+        self.assertNotEqual(key.split("\\\\")[0], replace.split("\\\\")[0],
+                            "GDI 与 DirectWrite 的根键不同，两条都要写")
         # 戳不许落在被替换的那个键里：混进去会被当成一条字体映射。
         self.assertNotEqual(key, stamp, "戳必须另起子键，不许塞进 FontSubstitutes")
+        self.assertNotEqual(replace, stamp, "戳必须另起子键，不许塞进 Replacements")
         self.assertIn("Software\\\\Wine\\\\ExeOnMac", stamp,
                       "戳必须落在 launcher 自有命名空间，不碰微软的键")
 
@@ -1323,7 +1388,7 @@ class TestFontSubstitutionFormat(unittest.TestCase):
         return self.source[start:self.source.index("\"", start)]
 
     def test_single_source_for_key_path(self) -> None:
-        """键路径只许有一份字面量：写文件与回查共用 `keyPath`。
+        """键路径只许有一份字面量：写文件与回查共用常量。
 
         两处各写一套是本项目反复出事故的形态（README 5.3 红线）。
         """
@@ -1331,6 +1396,45 @@ class TestFontSubstitutionFormat(unittest.TestCase):
         count = self.source.count(literal)
         self.assertEqual(count, 1,
                          f"键路径字面量出现 {count} 次，只许出现在 keyPath 常量里")
+        replacement = "Software\\\\Wine\\\\Fonts\\\\Replacements"
+        count = self.source.count(replacement)
+        self.assertEqual(count, 1,
+                         f"Replacements 键路径出现 {count} 次，只许出现在 replacePath 常量里")
+
+    def test_both_font_paths_written_in_one_file(self) -> None:
+        """GDI 与 DirectWrite 两条键必须在**同一份** .reg 里写。
+
+        ## 为什么必须同批
+
+        分两次导入时，「戳查得到」不再能证明两条都写进去了 —— 只证明第二条
+        进去了。同批写入是「戳」这个判据成立的前提（第 11 轮④的同一逻辑）。
+
+        ## 为什么两条都要写（2026-11-21 第 13 轮实测）
+
+        全 wine 运行时里 `FontSubstitutes` 字面量只出现在 `win32u.so`（GDI），
+        `dwrite.dll` 里一处都没有；后者只认 `Software\\Wine\\Fonts\\Replacements`。
+        实测 PE 探针（只调 DirectWrite，不碰 GDI）五组对照：
+
+        | 写入位置 | familyCount | 查到 Microsoft YaHei |
+        |---|---|---|
+        | 都不写 | 292 | 否 |
+        | HKLM `FontSubstitutes` | 292 | 否 |
+        | HKLM `Replacements` | 292 | 否 |
+        | HKCU `Replacements` | 293 | **是** |
+        | 两条同时写 | 293 | **是** |
+
+        只写 `FontSubstitutes` 的现状下，所有 DirectWrite 软件的中文一直是方块。
+        """
+        body = self._apply_body()
+        self.assertIn("[\\(keyPath)]", body, "必须写 GDI 的 FontSubstitutes")
+        self.assertIn("[\\(replacePath)]", body, "必须写 DirectWrite 的 Replacements")
+        # 两条路径共用同一个映射来源，不许各写一份不同的字面量。
+        self.assertEqual(body.count("for (windowsName, macName) in fonts.sorted"),
+                         2,
+                         "两条键必须各写一遍同一份 fonts 映射，不许只写一条")
+        # 只许生成一份 .reg 文本：两条键与戳同批导入。
+        self.assertEqual(body.count("let text = lines.joined"), 1,
+                         "两条键与戳必须同批写入同一份 .reg")
 
     def test_import_is_verified_not_assumed(self) -> None:
         """导入后必须回查，不能凭「退出码 0」判定成功。
@@ -1397,6 +1501,90 @@ class TestFontSubstitutionFormat(unittest.TestCase):
         run = self.source.split("static func run(")[1]
         self.assertIn("announce: true", run,
                       "主程序启动必须传 announce: true —— 「wine 已启动」是 TestRealLaunch 的唯一凭据")
+
+
+class TestDirectWriteFontPath(unittest.TestCase):
+    """## 「两条字体路径」这个结论的机器守卫。
+
+    这条守卫守的不是 launcher 的代码，而是**运行时的事实**：wine 的
+    `dwrite.dll` 到底认哪个注册表键。它每次运行都去扫真实运行时二进制，
+    所以哪天 wine 升级、上游把 `FontSubstitutes` 也接进 DirectWrite，
+    这条会自己变红，而不是留着一份过期结论继续骗人。
+
+    本轮（2026-11-21 第 13 轮）扫出来的分布是：
+
+    * `FontSubstitutes`（UTF-16）→ 只出现在 `x86_64-unix/win32u.so`，1 处
+    * `Software\\Wine\\Fonts\\Replacements`（UTF-16）→ 只出现在
+      `x86_64-windows/dwrite.dll`，1 处
+
+    这个分布解释了为什么第 12 轮修完 GDI 之后，DirectWrite 软件的中文
+    仍然是方块 —— 两条完全独立的路径，只修了其中一条。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_available():
+            raise unittest.SkipTest("本机无 wine 运行时")
+        from wepack.install import wine_binary
+
+        cls.wine_lib = wine_binary().parent.parent / "lib" / "wine"
+
+    def _scan(self, needle: str) -> dict[str, int]:
+        """在真实 wine 运行时里数一个字面量出现在哪些 ELF/PE 里。
+
+        ## 两种编码都要扫（本轮实测的细节）
+
+        `FontSubstitutes` 在 `win32u.so` 里是 **UTF-16**（它走 `*W` 系列 API）；
+        `Replacements` 在 `dwrite.dll` 里是 **单字节 ANSI** —— 与它调
+        `RegOpenKeyA`（不是 `RegOpenKeyExW`）完全对得上。第一版守卫只扫
+        UTF-16，于是 `Replacements` 明明在文件里却数出 0 个命中。
+
+        判据不能只认一种编码：同一个键名，走 ANSI API 的模块存 ANSI、
+        走宽字符 API 的模块存 UTF-16，两者都是真的。
+        """
+        needles = (needle.encode("utf-16-le"), needle.encode("ascii"))
+        hits: dict[str, int] = {}
+        if not self.wine_lib.is_dir():
+            self.skipTest(f"运行时目录不存在：{self.wine_lib}")
+        for path in self.wine_lib.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            if not (raw[:2] == b"MZ" or raw[:4] == b"\xcf\xfa\xed\xfe"):
+                continue
+            count = sum(raw.count(n) for n in needles)
+            if count:
+                hits[str(path.relative_to(self.wine_lib))] = count
+        return hits
+
+    def test_font_substitutes_is_read_by_gdi_only(self) -> None:
+        """`FontSubstitutes` 只被 GDI（win32u）读，dwrite 里一处都没有。
+
+        这条是「必须再写一条 Replacements」的直接依据。若哪天 dwrite 也
+        开始读它，这条会红 —— 那就该重新评估是否还需要两条键。
+        """
+        hits = self._scan("FontSubstitutes")
+        self.assertTrue(hits, "运行时里找不到 FontSubstitutes —— 扫描范围不对")
+        self.assertIn("x86_64-unix/win32u.so", hits,
+                      f"GDI 应读 FontSubstitutes，实际命中 {hits}")
+        dwrite_hits = {k: v for k, v in hits.items() if "dwrite" in k}
+        self.assertEqual(dwrite_hits, {},
+                         f"dwrite 不该读 FontSubstitutes，实际命中 {dwrite_hits}")
+
+    def test_replacements_is_read_by_dwrite(self) -> None:
+        """`Software\\Wine\\Fonts\\Replacements` 在 dwrite.dll 里存在。
+
+        这是 DirectWrite 侧唯一生效的那条键。若它消失，说明上游改了实现，
+        launcher 写的 `replacePath` 也就失去依据。
+        """
+        hits = self._scan("Software\\Wine\\Fonts\\Replacements")
+        self.assertTrue(hits, "运行时里找不到 Replacements —— 扫描范围不对")
+        dwrite_hits = {k: v for k, v in hits.items() if "dwrite" in k}
+        self.assertTrue(dwrite_hits,
+                        f"dwrite 应读 Replacements，实际只命中 {hits}")
 
 
 if __name__ == "__main__":

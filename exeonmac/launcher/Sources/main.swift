@@ -288,10 +288,50 @@ enum LauncherLog {
 /// 也符合 ARCHITECTURE.md 第 9 节的安全约定。
 enum FontSubstitution {
     /// 字体替换的目标键。launcher 侧**只有这一份**，写文件与回查都用它。
-    static let keyPath = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes"
+    ///
+    /// ## 必须是 `HKEY_LOCAL_MACHINE`，不能是 `HKEY_CURRENT_USER`（2026-11-21 实测）
+    ///
+    /// 早先写的是 `HKEY_CURRENT_USER`，理由是「不需要管理员权限、不碰系统配置」。
+    /// 那个理由本身没错，但**wine 的 GDI 根本不读 HKCU 这一项** —— 于是第 11 轮
+    /// 把格式修对了（键确实写进去了、戳也查得到），字体依然没有替换成功。
+    ///
+    /// 三组对照（同一份 base 层、同一份 wine-11.21，只改根键与写入位置）：
+    ///
+    /// | 写法 | `dump_gdi_font_subst` 里有这条 | `substituting` | `select_font` 选中 |
+    /// |---|---|---|---|
+    /// | HKCU `FontSubstitutes` | **无** | 0 次 | `Courier New`（未替换） |
+    /// | HKLM `FontSubstitutes` | 有 | 1 次 | **`PingFang SC Regular`** |
+    /// | HKCU `Wine\Fonts\Replacements` | 有（走别名路径） | 0 次 | **`PingFang SC Regular`** |
+    ///
+    /// 原因是 wine 的字体后端只有一条注册表路径。`win32u.so` 里能找到的
+    /// UTF-16 字面量只有 `\Registry\Machine\Software\Microsoft\Windows NT\
+    /// CurrentVersion\FontSubstitutes`，没有任何 `\Registry\User\` 对应项；
+    /// 也就是说 HKCU 那份写进去也算注册表数据，但**没有代码去读它**。
+    ///
+    /// 之所以不改成 `HKCU\Software\Wine\Fonts\Replacements`（winecfg 用的那条、
+    /// 同样实测有效）：它走的是「别名」语义（把 `PingFang SC` 也登记成
+    /// `Microsoft YaHei`），而 `FontSubstitutes` 是 Windows 本来的替换语义。
+    /// 兼容层对 Windows 程序说谎的地方越少越好。
+    ///
+    /// 写 HKLM 在这里不需要额外权限：`regedit` 改的是本 prefix 里的
+    /// `system.reg`（已是 clonefile 出来的私有副本），不碰共享层。
+    static let keyPath = "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes"
 
     /// 本次运行标记所在的键与值名。launcher 自有命名空间，不碰任何系统配置。
-    static let stampKeyPath = "HKEY_CURRENT_USER\\Software\\Wine\\ExeOnMac"
+    ///
+    /// ## 为什么戳也必须是 `HKEY_LOCAL_MACHINE`
+    ///
+    /// 第 11 轮把戳放在 `HKCU`（理由同样是「不碰系统配置」）。第 12 轮实测
+    /// 发现这个位置让戳失去了证明力：字体替换的**消费方**（wine 的 GDI）只读
+    /// `HKLM` 下的 `FontSubstitutes`，`HKCU` 那份没有任何代码去读。于是
+    /// 「戳查得到」只证明「regedit 把这一条写进去了」，不证明「这条会被 GDI
+    /// 采用」—— 恰好就是第 11 轮要躲开的那个「测的是存在，不是生效」。
+    ///
+    /// 现在戳与字体映射都在 `HKLM` 下：同一份 `.reg`、同一个根键、同一个
+    /// 消费方。戳查得到就意味着这份文件被 regedit 吃进了 GDI 会读的那棵树。
+    /// 仍然不碰微软那个键本身（另起 `Software\Wine\ExeOnMac` 子键），也仍然
+    /// 不需要管理员权限（改的是本 prefix 的 `system.reg`）。
+    static let stampKeyPath = "HKEY_LOCAL_MACHINE\\Software\\Wine\\ExeOnMac"
     static let stampValueName = "FontSubstitutionStamp"
 
     /// 返回「本次调用是否因收到信号而中止」。

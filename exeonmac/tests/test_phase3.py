@@ -1264,16 +1264,63 @@ class TestFontSubstitutionFormat(unittest.TestCase):
                          "内部格式（WINE REGISTRY Version 2）会被 regedit /S 静默丢弃")
 
     def test_key_path_is_fully_qualified_and_single_escaped(self) -> None:
-        """键路径必须是 `HKEY_CURRENT_USER\\...` 全名 + 单反斜杠。
+        """键路径必须是 `HKEY_LOCAL_MACHINE\\...` 全名 + 单反斜杠。
 
         内部格式用 `Software\\\\...` 双反斜杠且不带根键，导出格式两者都不同。
+
+        ## 根键为什么从 HKCU 改成 HKLM（2026-11-21 第 12 轮实测）
+
+        早先这里断言的是 `HKEY_CURRENT_USER`，理由是「不需要管理员权限」。
+        第 12 轮三组对照证明 **wine 的 GDI 只读 HKLM 那一份**：
+
+        | 写法 | 替换表里有 | 最终选中 |
+        |---|---|---|
+        | HKCU `FontSubstitutes` | 无 | `Courier New`（未替换） |
+        | HKLM `FontSubstitutes` | 有 | `PingFang SC Regular` |
+        | HKCU `Wine\\Fonts\\Replacements` | 有 | `PingFang SC Regular` |
+
+        即 HKCU 那份写进去也算注册表数据，但**没有代码去读它** —— 第 11 轮
+        修好了格式（键写得进去了），字体仍没替换成功，原因就在这里。
         """
-        self.assertIn('"HKEY_CURRENT_USER\\\\Software\\\\Microsoft\\\\Windows NT',
+        self.assertIn('"HKEY_LOCAL_MACHINE\\\\Software\\\\Microsoft\\\\Windows NT\\\\'
+                      'CurrentVersion\\\\FontSubstitutes"',
                       self.source,
-                      "导出格式的键必须带 HKEY_CURRENT_USER 根且单反斜杠（Swift 源码里写作 \\\\）")
+                      "字体替换必须写 HKLM —— wine 的 GDI 不读 HKCU 那一份")
         body = self._apply_body()
         self.assertIn("[\\(keyPath)]", body,
                       "写文件的键路径必须取自 keyPath 常量，不许就地再抄一份")
+
+    def test_stamp_shares_the_root_the_consumer_reads(self) -> None:
+        """戳必须与字体映射同一个根键，否则「查得到」证明不了「会被采用」。
+
+        ## 这条是第 12 轮自己踩的坑
+
+        第 11 轮的戳放在 `HKCU\\Software\\Wine\\ExeOnMac`。第 12 轮把字体映射
+        改到 HKLM 后立刻暴露：戳仍在 HKCU，回查照样通过，但它证明的是
+        「regedit 写进去了」，不是「GDI 会读的那棵树里有」—— 与第 11 轮
+        想躲开的「测存在而非测生效」是同一形态。
+
+        判据取「两个常量必须以同一个根键开头」，而不是把 HKLM 写两遍：
+        将来若整棵树搬家，这条会跟着两个常量一起走，不会留下半截旧结论。
+        """
+        key = self._constant_value("keyPath")
+        stamp = self._constant_value("stampKeyPath")
+        self.assertTrue(key.startswith("HKEY_LOCAL_MACHINE\\\\"),
+                        f"字体映射的根键应为 HKLM，实际 {key}")
+        self.assertTrue(stamp.startswith("HKEY_LOCAL_MACHINE\\\\"),
+                        f"戳的根键必须与字体映射一致（HKLM），实际 {stamp}")
+        # 戳不许落在被替换的那个键里：混进去会被当成一条字体映射。
+        self.assertNotEqual(key, stamp, "戳必须另起子键，不许塞进 FontSubstitutes")
+        self.assertIn("Software\\\\Wine\\\\ExeOnMac", stamp,
+                      "戳必须落在 launcher 自有命名空间，不碰微软的键")
+
+    def _constant_value(self, name: str) -> str:
+        """从 Swift 源码里取出一个字符串常量的值。"""
+        marker = f"static let {name} = \""
+        index = self.source.find(marker)
+        self.assertNotEqual(index, -1, f"源码里找不到常量 {name}")
+        start = index + len(marker)
+        return self.source[start:self.source.index("\"", start)]
 
     def test_single_source_for_key_path(self) -> None:
         """键路径只许有一份字面量：写文件与回查共用 `keyPath`。

@@ -2402,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 472 | about 2m45s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds and 2 matches against real layers |
+| exeonmac | 474 | about 3m06s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers and 2 import-time side-effect guards |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1364** | — | See "0 skipped repository-wide" below |
+| **Total** | **1366** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3040,6 +3040,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | Contract lacks an exit-code declaration for segment `3000` (runtime) | `M2W_3001/3002/3003` map to exit code 5 in code while contract `exit 5` only declares `2001/2002` | The contract file lags behind the implementation: all three directions reserve runtime codes and mac2win genuinely uses them (Electron/NW.js download and architecture checks), but nobody came back to update the contract | The contract was **not** changed this round (changing it alters an external promise and needs human sign-off); tracked in 15.9 |
 | launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression); | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
 | `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
+| A test module compiles an installer at import, and a whole class vanishes silently | Running one test class (`python3 -m unittest tests.test_phase2.TestCliPhase2`) gives `FAILED (errors=2)` and `RuntimeError: ISCC 编译失败（退出码 0）：` with an **empty** detail; a full `discover` run in alphabetical order stayed green | `test_phase1.py` evaluates `REAL_INNO = str(fixtures.demo_inno_real() or "")` at **module top level**, so importing compiles an installer; `test_phase2` imports `tests.test_phase1` merely to borrow two pure byte builders, and its `setUp` has already pointed `WEXE_HOME` at a temp dir containing a fake wine that only does `exit 0` → ISCC is "run" by the fake wine, compiles nothing, exits cleanly | The four sample constants became lazy functions (cached per process) and the four classes use `setUpClass` + `require_sample()`, raising `SkipTest` when unavailable. Decorators evaluate at import time; `setUpClass` only when the test really runs — that is the dividing line. The "exit 0 but no artifact" message is now separate from "compilation failed", so the failure states which kind it is. Two guards added (subprocess sentinel + `ast` scan of the module body); negative check: inject the constant back → both turn red |
 | Long paths break mid-word | No overflow, all tests green, yet a 139-character path is split into 4–5 lines at 375px with breaks landing inside words (`Framewo\|rks`, `dir\|ectory`); **15** occurrences across three viewports (criterion: both sides of the break belong to `[A-Za-z0-9._]`) | `overflow-wrap: anywhere` fixed the overflow but only looks for breaks **between arbitrary characters**, never using the natural `/` `\` `-` boundaries; `.result-val` additionally carried `word-break: break-all`, which **ignores** `<wbr>` | New pure function `pathSegments()` slices on separators, `app.js`'s `writeText()` appends `Text` per slice and inserts `<wbr>` after each separator, and `el()` routes everything through it; `.result-val`'s `break-all` became `overflow-wrap: anywhere`. Zero occurrences after the fix. The stress injector now `import('./app.js')` and calls the product function — otherwise it measures itself |
 | A registry file that merely "exists and is non-empty" is judged healthy | Replacing `system.reg` with 35 bytes of plain text leaves `validate_prefix` returning `[]` and packaging verification at 10/10 green; the same prefix handed to wine produces `system.reg is not a valid registry file` plus "32-bit installation", `rc=1`. A broken `user.reg` is subtler: `reg add` returns 0 but the key never lands | The check only looked at `is_file()` and `st_size > 0`, never at content. The test fixture wrote the same broken format (UTF-16LE + BOM, no `#arch`), so **the fixture could not produce a prefix that even boots** — check and fixture were loose together, which is why the defect stayed green forever | Added `_check_reg_file()`: the first line must be `WINE REGISTRY Version 2` (all three files), and `system.reg` must also carry `#arch=win64`. The three files were measured to have different fatality levels; `user.reg` / `userdef.reg` are deliberately not required to carry arch (that would be a false positive). Both fixtures fixed, constants imported from `wepack.prefix` |
 | The placeholder registry is written in a format wine rejects | `prefix._write_placeholder_regs` produced a placeholder that made wine report `not a valid registry file` plus "32-bit installation", `rc=1` — yet the whole point of the placeholder is to let wine boot | It claimed "wine's .reg is UTF-16LE + BOM", which is only true for files **exported** by `regedit /E`; the on-disk format inside a prefix is plain ASCII and must carry `#arch=win64` | Switched to plain ASCII plus `#arch=win64`. Measured `rc=0`, after which wine expands the placeholder itself into a complete 200 KB registry |
@@ -3844,6 +3845,67 @@ In other words, "restart suppression" had never taken effect, while the log kept
 | Drop the post-import query and always log INFO | "ineffective must log WARN" turns red |
 
 **⑨ Still unverified / not handled**: (a) **wine-11.21 only** — how other versions tolerate the first line and arch is untested; (b) the criterion covers "wine can read it in", **not "the registry content is semantically correct"** — a key whose value was replaced with garbage still boots wine, and only running the actual application would surface it; (c) 32-bit prefixes (`WINEARCH=win32`) are unsupported in this repository, so `#arch=win32` is always an error; supporting them would require changing that rule; (d) whether `regedit /S`'s silent failure affects other `.reg` import paths was not surveyed systematically — only `suppress_restart` was examined.
+
+
+### 15.20 Compiling an installer at module import: how "borrowing one pure function" made a whole test class vanish (measured 2026-11-21, fixed)
+
+**This section handles leftover (a) from 15.19.** 15.19 recorded "`ISCC 编译失败（退出码 0）` is a pre-existing error on HEAD" and pinned down its root cause; this section fixes it, and also removes the structure that let such a defect survive so long.
+
+**① Symptom: running one test class crashes, while a full run in alphabetical order is fine.** `cd exeonmac && python3 -m unittest tests.test_phase2.TestCliPhase2` gives:
+
+```
+Ran 7 tests in 1.285s
+FAILED (errors=2)
+RuntimeError: ISCC 编译失败（退出码 0）：
+```
+
+`detail` is **empty**. Exit code 0, empty stderr, no artifact — three mutually contradictory facts that read as "ISCC itself is broken". And under `discover`'s alphabetical order (`test_phase0` → `test_phase1` → `test_phase2`) it stayed green, which is why the defect hid for so long.
+
+**② The root cause is a four-link chain; break any link and it does not reproduce.**
+
+1. `tests/test_phase1.py:53` evaluates `REAL_INNO = ... str(fixtures.demo_inno_real() or "")` at **module top level** — importing the module compiles an Inno installer on the spot.
+2. `tests/test_phase2.py` has four `from tests.test_phase1 import build_min_pe, build_nsis_overlay` lines, only to borrow two **pure byte builders**.
+3. `test_phase2`'s `IsolatedWexe.setUp` points `WEXE_HOME` at a temporary directory and drops a fake wine that just does `exit 0` (`make_fake_wine`).
+4. So the import in step 2 (which happens after step 3) resolves `wine_binary()` to the fake wine; ISCC is "run" by it, compiles nothing, exits cleanly, `demo-setup.exe` is absent → `RuntimeError`.
+
+**This is an order-dependent defect**: the same code is fine in alphabetical order and explodes when a single class is run. `check_no_skips.py` cannot catch it (that script only looks at `Ran N tests` and skipped counts), and neither can "the full suite is green".
+
+**③ The fix is not a `try` — it is removing the import-time side effect.** The four sample constants became **lazy functions** (`sample_nsis()` / `sample_inno()` / `sample_msi()` / `real_inno()`), cached per process; the four classes that used `@unittest.skipUnless(constant and ...)` now use `setUpClass` + `require_sample()`, raising `unittest.SkipTest(...)` when the fixture is unavailable. **Decorators are evaluated at import time; `setUpClass` only when the test is actually about to run** — that is exactly the dividing line.
+
+**④ The error message now says which failure it is.** `fixtures.demo_inno_real()` used one sentence for both "compilation failed" and "wine did nothing". Now they are separated:
+
+```
+ISCC exited 0 but produced no artifact — this wine did nothing:
+  wine = /tmp/.../wexe/runtime/wine/bin/wine64
+  WEXE_HOME = /tmp/...
+Most likely a test pointed WEXE_HOME at a temporary directory containing only a
+fake wine that just does `exit 0`; wine itself may also be damaged.
+```
+
+Same family as 15.19 — "exit code 0, fake success". Same principle: **let the failure state which kind it is**, so the next person does not go hunting in the compiler.
+
+**⑤ Two new guards, both negatively verified.**
+
+| Guard | Criterion | Negative check (constant injected back at module level) |
+|---|---|---|
+| `test_importing_module_runs_no_external_tool` | In a subprocess, plant a fake wine that leaves a trace when called plus an existing `WEXE_ISCC`; after import the sentinel file **must not exist** | Sentinel appears → the test turns red |
+| `test_no_fixture_call_at_module_level` | `ast`-scan the module body; **no** `fixtures.demo_*` call may appear there (calls inside function bodies do not count) | Reports "line 63: fixtures.demo_inno_real()" → turns red |
+
+The first version of the guard **was a soft criterion**: it only asserted "import does not fail, and the synthetic fixture can be built". Under negative verification it stayed green — because with an empty `WEXE_HOME`, `demo_inno_real()` merely returns `None` instead of raising. After planting the sentinel, the very same negative code turns both tests red. **Once again: a criterion that has not survived negative verification is a criterion that was never written.**
+
+**⑥ Why this deserves its own section.** It is not "some function is wrong"; it is **implicit coupling between test suites**: `test_phase2` depends on `test_phase1` having already finished (at which point `WEXE_HOME` has been restored). That precondition was never written down and never checked. **Any module-level code that "runs on import" manufactures such undeclared preconditions.**
+
+**⑦ Systematically scanned: three more instances of the same shape exist; not touched this round.** An `ast` scan of every statement that executes on import in `tests/test_*.py` (skipping function bodies, walking class bodies) found:
+
+| Location | Import-time call | Nature |
+|---|---|---|
+| `test_phase2.py:53/54` | `fixtures.demo_nsis()`, `fixtures.wine_available()` | The first runs `makensis` (external tool); the second only probes for a file |
+| `test_phase3.py:56/57` | same | same |
+| `test_phase7_layers.py:341/394` | `fixtures.wine_available()` | Only probes for a file; no side effect |
+
+None of them currently manifests as a failure: `discover` imports these modules before running any test, at which point `WEXE_HOME` is still the real one. But the shape is identical to `test_phase1` — if anyone imports them while `WEXE_HOME` is redirected, `REAL_WINE` / `SAMPLE_NSIS` get pinned to the fake environment **and are never corrected** (module-level constants are evaluated once). Following "change one variable per round", only the one that actually blew up is fixed here; these three are left for the next round.
+
+**⑧ Still unhandled**: (a) `test_phase2` still does `from tests.test_phase1 import build_min_pe` — harmless now that it is lazy, but the cleaner move is to sink those two pure builders into `fixtures.py` so test modules stop importing each other; (b) the three import-time calls in table ⑦ should become lazy; (c) CI only runs `discover` (alphabetical), never single classes, so this class of order dependency stays green on CI forever — a job that runs each test class on its own would be worth adding.
 
 
 ---

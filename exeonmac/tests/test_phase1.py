@@ -44,13 +44,164 @@ import fixtures  # noqa: E402
 
 #: 环境变量优先（想用真实样本对照时指过去），否则用现场构造的夹具。
 #:
-#: `REAL_INNO` 与 `SAMPLE_INNO` 分开：前者是真编译产物（有载荷，能解包），
-#: 后者是最小骨架（只有标记，够测检测）。混用一个常量会让「检测」类测试
+#: `real_inno()` 与 `sample_inno()` 分开：前者是真编译产物（有载荷，能解包），
+#: 后者是最小骨架（只有标记，够测检测）。混用会让「检测」类测试
 #: 无谓地背上「编译 + wine」的成本。
-SAMPLE_NSIS = os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or "")
-SAMPLE_INNO = os.environ.get("WEXE_SAMPLE_INNO") or str(fixtures.demo_inno())
-SAMPLE_MSI = os.environ.get("WEXE_SAMPLE_MSI") or str(fixtures.demo_msi())
-REAL_INNO = os.environ.get("WEXE_SAMPLE_INNO") or str(fixtures.demo_inno_real() or "")
+#:
+#: ## 为什么这四个都改成了惰性函数，而不是模块级常量
+#:
+#: 早先它们是在**导入时**求值的常量，其中 `fixtures.demo_inno_real()` 会经
+#: `wine_binary()` 读 `WEXE_HOME`。而 `test_phase2` 的用例把 `WEXE_HOME`
+#: 指到临时目录、塞一个只 `exit 0` 的假 wine，只为借本模块的 `build_min_pe`
+#: 就会 `import tests.test_phase1` —— 于是 ISCC 在假 wine 下空编、退出码 0、
+#: 产物不存在，抛出 `RuntimeError: ISCC 编译失败（退出码 0）：`（detail 为空，
+#: 因为假 wine 什么也没说）。整类消失、剩下的用例变成 error。
+#:
+#: **导入一个测试模块不应该有外部副作用**。夹具在「用例真的要跑」时才构造。
+_SAMPLE_CACHE: dict[str, str] = {}
+
+
+def sample_nsis() -> str:
+    if "nsis" not in _SAMPLE_CACHE:
+        _SAMPLE_CACHE["nsis"] = (
+            os.environ.get("WEXE_SAMPLE_NSIS") or str(fixtures.demo_nsis() or ""))
+    return _SAMPLE_CACHE["nsis"]
+
+
+def sample_inno() -> str:
+    """合成骨架：只有标记，够测检测与版本读取，零依赖。"""
+    if "inno" not in _SAMPLE_CACHE:
+        _SAMPLE_CACHE["inno"] = (
+            os.environ.get("WEXE_SAMPLE_INNO") or str(fixtures.demo_inno()))
+    return _SAMPLE_CACHE["inno"]
+
+
+def sample_msi() -> str:
+    if "msi" not in _SAMPLE_CACHE:
+        _SAMPLE_CACHE["msi"] = (
+            os.environ.get("WEXE_SAMPLE_MSI") or str(fixtures.demo_msi()))
+    return _SAMPLE_CACHE["msi"]
+
+
+def real_inno() -> str:
+    """真编译产物：ISCC + wine 现场编译，约 13 秒。**只在用例要跑时才调**。"""
+    if "real-inno" not in _SAMPLE_CACHE:
+        _SAMPLE_CACHE["real-inno"] = (
+            os.environ.get("WEXE_SAMPLE_INNO") or str(fixtures.demo_inno_real() or ""))
+    return _SAMPLE_CACHE["real-inno"]
+
+
+def require_sample(getter, reason: str) -> Path:
+    """在 `setUpClass` 里取夹具：拿不到就如实跳过，拿到就返回路径。
+
+    替代原先的 `@unittest.skipUnless(常量 and ...)`：装饰器在**导入时**求值，
+    正是上面那段踩坑的入口。
+    """
+    value = getter()
+    if not value or not Path(value).is_file():
+        raise unittest.SkipTest(reason)
+    return Path(value)
+
+
+# --------------------------------------------------------------------------
+# 导入期副作用守卫（见上面那段说明的踩坑）
+# --------------------------------------------------------------------------
+
+
+class TestImportHasNoSideEffects(unittest.TestCase):
+    """导入一个测试模块不许碰环境、不许调外部工具。
+
+    ## 为什么要专门守这件事
+
+    `test_phase2` 里有几处 `from tests.test_phase1 import build_min_pe`。
+    早先 `test_phase1` 把夹具求值写在模块级，于是「借一个纯函数」的代价
+    变成「跑一次 ISCC 编译」；而当 `test_phase2` 的用例已把 `WEXE_HOME`
+    指到临时目录（那里有只 `exit 0` 的假 wine），编译静默失败，抛出的
+    `RuntimeError` 让 `test_phase2` 的两条用例变 error。**整类消失是不会
+    被 `check_no_skips.py` 抓到的** —— 它只看 `Ran N tests` 与 skipped。
+
+    所以守两层：① 子进程里导入模块，不许有 stderr 输出、不许非零退出；
+    ② 静态断言模块顶层不再出现夹具调用（防有人又写回常量）。
+    """
+
+    def test_importing_module_runs_no_external_tool(self) -> None:
+        """导入时不许调任何外部工具。
+
+        ## 判据怎么造才抓得住
+
+        第一版只断言「导入不报错」，负向验证时把常量写回模块顶层**仍然是
+        绿的** —— 因为空 `WEXE_HOME` 下 `demo_inno_real()` 只是返回 `None`，
+        不抛异常。判据太软了。
+
+        现在改成埋哨兵：造一个「被调用就在文件里留痕」的假 wine，并把
+        `WEXE_ISCC` 指向一个存在的文件（`find_iscc()` 因此会返回它），
+        于是**只要模块级求值了夹具，就一定会执行这个假 wine**。导入后
+        检查哨兵文件在不在 —— 在，就是导入带了副作用。
+        """
+        with tempfile.TemporaryDirectory(prefix="exeonmac-import-") as tmp:
+            root = Path(tmp)
+            sentinel = root / "wine-was-called"
+            wine = root / "wexe" / "runtime" / "wine" / "bin" / "wine64"
+            wine.parent.mkdir(parents=True)
+            wine.write_text(f'#!/bin/sh\n: > "{sentinel}"\nexit 0\n', encoding="utf-8")
+            wine.chmod(0o755)
+            # find_iscc() 只判 is_file()，不执行 —— 给个占位文件就够
+            iscc = root / "ISCC.exe"
+            iscc.write_bytes(b"stub")
+
+            env = dict(os.environ)
+            env["WEXE_HOME"] = str(root / "wexe")
+            env["WEXE_ISCC"] = str(iscc)
+            env.pop("WEXE_SAMPLE_INNO", None)
+            env["PYTHONPATH"] = str(REPO) + os.pathsep + str(REPO / "tests")
+            r = subprocess.run(
+                [sys.executable, "-c",
+                 "import tests.test_phase1 as m; print('ok', bool(m.sample_inno()))"],
+                cwd=str(REPO), capture_output=True, text=True, env=env, timeout=120)
+            self.assertEqual(r.returncode, 0,
+                             f"导入就失败了：stderr={r.stderr[-800:]}")
+            # 合成骨架零依赖，任何环境都造得出来；造不出说明它偷偷要了外部工具
+            self.assertIn("ok True", r.stdout,
+                          f"零依赖的合成夹具没造出来：{r.stdout!r}")
+            self.assertFalse(
+                sentinel.exists(),
+                "导入 test_phase1 时执行了 wine —— 模块顶层又在求值夹具了。"
+                "这会让 test_phase2 在假 wine 环境下导入它时整类崩掉。")
+
+    def test_no_fixture_call_at_module_level(self) -> None:
+        """静态守卫：`fixtures.demo_*` 不许出现在模块顶层。
+
+        判据用 `ast`：只扫**模块体直接语句**里对 `fixtures.demo_*` 的调用，
+        函数体里的不算（`sample_*()` 内部当然要调）。
+        """
+        import ast
+
+        def walk_import_time(node):
+            """遍历「导入时就会执行」的节点：跳过函数体，类体照走。
+
+            类体在 import 时执行，函数体不执行 —— 分界线就在这里，
+            所以只能手写遍历，不能直接 `ast.walk`。
+            """
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                      ast.Lambda)):
+                    continue
+                yield child
+                yield from walk_import_time(child)
+
+        tree = ast.parse((REPO / "tests" / "test_phase1.py").read_text("utf-8"))
+        offenders: list[str] = []
+        for sub in walk_import_time(tree):
+            if (isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and isinstance(sub.func.value, ast.Name)
+                    and sub.func.value.id == "fixtures"
+                    and sub.func.attr.startswith("demo_")):
+                offenders.append(f"第 {sub.lineno} 行：fixtures.{sub.func.attr}()")
+        self.assertEqual(offenders, [],
+                         "模块顶层又在求值夹具了 —— 导入会带上外部副作用，"
+                         "而 test_phase2 借本模块的函数时会踩到假 wine：\n"
+                         + "\n".join(offenders))
 
 
 def have_7z() -> bool:
@@ -503,10 +654,13 @@ class TestExtractTruncatedDiagnosis(unittest.TestCase):
             self.assertGreater(report.result.file_count, 20)
 
 
-@unittest.skipUnless(SAMPLE_MSI and Path(SAMPLE_MSI).is_file(), "需要 WEXE_SAMPLE_MSI")
 class TestMsiTables(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sample = require_sample(sample_msi, "需要 WEXE_SAMPLE_MSI")
+
     def test_open_msi_finds_tables(self) -> None:
-        tables = msi_tables.open_msi(Path(SAMPLE_MSI))
+        tables = msi_tables.open_msi(self.sample)
         # 字符串池要覆盖到「表名 + 列名 + 数据」三类，规模太小说明只解析
         # 出了其中一部分。真实安装包几百到几千条，合成样本几十条。
         self.assertGreater(len(tables.strings), 40)
@@ -514,13 +668,13 @@ class TestMsiTables(unittest.TestCase):
         self.assertIn("Directory", tables.tables)
 
     def test_file_columns(self) -> None:
-        tables = msi_tables.open_msi(Path(SAMPLE_MSI))
+        tables = msi_tables.open_msi(self.sample)
         names = [c.name for c in tables.columns.get("File", [])]
         for expected in ("File", "Component_", "FileName", "FileSize"):
             self.assertIn(expected, names)
 
     def test_file_mapping_non_empty(self) -> None:
-        mapping = msi_tables.file_mapping(Path(SAMPLE_MSI))
+        mapping = msi_tables.file_mapping(self.sample)
         # 门槛设 10：真实安装包几十到几千条，合成样本 30 条。
         # 要验的是「批量读取不丢行」，一两条数据看不出来。
         self.assertGreater(len(mapping), 10)
@@ -546,7 +700,7 @@ class TestMsiTables(unittest.TestCase):
         4 字节整数列当 2 字节读，Directory 表整体错位，relpath 退化成
         纯文件名 —— 而 file_mapping 依然「非空」，测试照样绿。
         """
-        mapping = msi_tables.file_mapping(Path(SAMPLE_MSI))
+        mapping = msi_tables.file_mapping(self.sample)
         with_dir = [item for item in mapping if "/" in item["relpath"]]
         self.assertGreater(len(with_dir), len(mapping) * 0.5,
                            "超过一半的 relpath 没有目录层级，Directory 表可能没解析出来")
@@ -558,7 +712,7 @@ class TestMsiTables(unittest.TestCase):
         读，FileSize 会读到两个错位的 u16，得到一个荒谬的数字。这里用
         「大小为正且总和接近安装包体积量级」来卡住。
         """
-        files = msi_tables.file_table(Path(SAMPLE_MSI))
+        files = msi_tables.file_table(self.sample)
         sizes = [int(item["FileSize"]) for item in files if item.get("FileSize")]
         self.assertGreater(len(sizes), 5, "没有读到任何 FileSize")
         self.assertTrue(all(size > 0 for size in sizes), "存在非正的 FileSize")
@@ -1889,11 +2043,13 @@ class TestInnoMarkerEncoding(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
-@unittest.skipUnless(SAMPLE_NSIS and Path(SAMPLE_NSIS).is_file(),
-                     "需要 makensis 才能现场编译 NSIS 样本")
 class TestRealNsis(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sample = require_sample(sample_nsis, "需要 makensis 才能现场编译 NSIS 样本")
+
     def test_detect(self) -> None:
-        detection = detect_installer(Path(SAMPLE_NSIS))
+        detection = detect_installer(self.sample)
         self.assertEqual(detection.kind, InstallerKind.NSIS)
         self.assertGreaterEqual(detection.confidence, 0.9)
         self.assertTrue(detection.supported)
@@ -1903,36 +2059,39 @@ class TestRealNsis(unittest.TestCase):
         from wepack.extract import extract
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
-            report = extract(Path(SAMPLE_NSIS), out)
+            report = extract(self.sample, out)
             self.assertTrue(report.ok)
             self.assertGreater(report.result.file_count, 0)
             self.assertTrue(report.result.candidates)
 
 
-@unittest.skipUnless(SAMPLE_INNO and Path(SAMPLE_INNO).is_file(), "需要 WEXE_SAMPLE_INNO")
 class TestRealInno(unittest.TestCase):
     """Inno 的真实路径：检测、版本读取、解包、7z 回退。
 
     ## 样本来源的层级
 
-    `SAMPLE_INNO` 优先取环境变量（真实产品包对照），否则取
+    `sample_inno()` 优先取环境变量（真实产品包对照），否则取
     `fixtures.demo_inno()` 的合成骨架 —— 骨架只有标记，够测检测与
     版本读取，但解不了包。
 
-    解包类测试要的是**真载荷**，所以单独用 `REAL_INNO`：它来自
+    解包类测试要的是**真载荷**，所以单独用 `real_inno()`：它来自
     `fixtures.demo_inno_real()`，由 Inno Setup 6.0.5 的 ISCC 在 wine
     下现场编译。这个版本号是刻意选的 —— `innoextract 1.9` 支持到
     6.0.5，正好在上限。
     """
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sample = require_sample(sample_inno, "需要 WEXE_SAMPLE_INNO")
+
     def test_detect(self) -> None:
-        detection = detect_installer(Path(SAMPLE_INNO))
+        detection = detect_installer(self.sample)
         self.assertEqual(detection.kind, InstallerKind.INNO)
         self.assertTrue(detection.supported)
 
     def test_version_is_reported(self) -> None:
         """载荷头里的版本号要能被读出来，否则无从判断 innoextract 是否支持。"""
-        detection = detect_installer(Path(SAMPLE_INNO))
+        detection = detect_installer(self.sample)
         evidence = " ".join(detection.evidence)
         self.assertIn("版本", evidence, f"未解析出 Inno 版本：{detection.evidence}")
 
@@ -1944,12 +2103,11 @@ class TestRealInno(unittest.TestCase):
         """
         from wepack.extract import _inno_payload_version
 
-        version = _inno_payload_version(Path(SAMPLE_INNO))
+        version = _inno_payload_version(self.sample)
         self.assertTrue(version, "未读出 Inno 版本")
-        self.assertIn(version, " ".join(detect_installer(Path(SAMPLE_INNO)).evidence))
+        self.assertIn(version, " ".join(detect_installer(self.sample).evidence))
 
 
-@unittest.skipUnless(REAL_INNO, "需要 ISCC + wine 才能现场编译 Inno 样本")
 class TestRealInnoPayload(unittest.TestCase):
     """真实 Inno 安装包（ISCC 编译）的解包路径。
 
@@ -1966,8 +2124,12 @@ class TestRealInnoPayload(unittest.TestCase):
     现有夹具是真编译产物、版本正好在上限，这条路才第一次被真的走通。
     """
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sample = require_sample(real_inno, "需要 ISCC + wine 才能现场编译 Inno 样本")
+
     def test_detect_says_inno(self) -> None:
-        detection = detect_installer(Path(REAL_INNO))
+        detection = detect_installer(self.sample)
         self.assertEqual(detection.kind, InstallerKind.INNO,
                          f"真编译产物没被认成 Inno：{detection.evidence}")
         self.assertTrue(detection.supported)
@@ -1978,7 +2140,7 @@ class TestRealInnoPayload(unittest.TestCase):
         这条断言是**守卫的守卫**：夹具版本一旦被改高，解包测试会静默
         跳过。这里直接把它变成红。
         """
-        need = installer_inno_version(Path(REAL_INNO))
+        need = installer_inno_version(self.sample)
         cap = innoextract_max_inno_version()
         self.assertIsNotNone(need, "读不出夹具的 Inno 版本")
         self.assertIsNotNone(cap, "读不出 innoextract 的支持上限")
@@ -2003,7 +2165,7 @@ class TestRealInnoPayload(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
-            report = extract(Path(REAL_INNO), out)
+            report = extract(self.sample, out)
 
             self.assertTrue(report.ok)
             self.assertGreater(report.result.file_count, 0)
@@ -2069,7 +2231,7 @@ class TestRealInnoPayload(unittest.TestCase):
             out = Path(tmp) / "out"
             out.mkdir()
             attempt = ExtractAttempt(method="", ok=False)
-            ok = _seven_zip_extract(Path(REAL_INNO), out, attempt)
+            ok = _seven_zip_extract(self.sample, out, attempt)
 
             self.assertFalse(
                 ok, f"7z 解 Inno 被当成了成功（detail={attempt.detail}）")
@@ -2225,10 +2387,13 @@ class _NoopTool:
         return self._Result(self._stdout)
 
 
-@unittest.skipUnless(SAMPLE_MSI and Path(SAMPLE_MSI).is_file(), "需要 WEXE_SAMPLE_MSI")
 class TestRealMsi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sample = require_sample(sample_msi, "需要 WEXE_SAMPLE_MSI")
+
     def test_detect(self) -> None:
-        detection = detect_installer(Path(SAMPLE_MSI))
+        detection = detect_installer(self.sample)
         self.assertEqual(detection.kind, InstallerKind.MSI)
         self.assertTrue(detection.supported)
 
@@ -2237,7 +2402,7 @@ class TestRealMsi(unittest.TestCase):
         from wepack.extract import extract
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
-            report = extract(Path(SAMPLE_MSI), out)
+            report = extract(self.sample, out)
             self.assertTrue(report.ok)
             # 应该还原出真实文件名，而不是只有 fil<hex>
             names = [p.name for p in out.rglob("*") if p.is_file()]
@@ -2250,18 +2415,18 @@ class TestRealMsi(unittest.TestCase):
         这是入口定位的权威来源 —— 比按体积/架构猜可靠。实测 7-Zip 的
         Shortcut 表把入口明确写成 `[#_7zFM.exe]`。
         """
-        tables = msi_tables.open_msi(Path(SAMPLE_MSI))
+        tables = msi_tables.open_msi(self.sample)
         self.assertIn("Shortcut", tables.stream_map,
                       "Shortcut 表未被识别")
 
-        items = msi_tables.shortcut_table(Path(SAMPLE_MSI))
+        items = msi_tables.shortcut_table(self.sample)
         self.assertTrue(items, "Shortcut 表解析为空")
         # 至少有一条指向文件（[#...]），而不是只打开目录
         self.assertTrue(any(x["target"].startswith("[#") for x in items),
                         f"没有指向文件的快捷方式：{items}")
 
     def test_shortcut_targets_resolve_to_real_files(self) -> None:
-        targets = msi_tables.shortcut_targets(Path(SAMPLE_MSI))
+        targets = msi_tables.shortcut_targets(self.sample)
         self.assertTrue(targets, "Shortcut 目标解析为空")
         for item in targets:
             self.assertIn("relpath", item)
@@ -2278,7 +2443,7 @@ class TestRealMsi(unittest.TestCase):
         from wepack.extract import extract
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
-            report = extract(Path(SAMPLE_MSI), out)
+            report = extract(self.sample, out)
             entry = report.result.shortcut_entry
             self.assertTrue(entry, "未从 Shortcut 表取出入口")
 
@@ -2294,7 +2459,7 @@ class TestRealMsi(unittest.TestCase):
         7-Zip 有「7-Zip Help」指向 `7-zip.chm`。只看 target 前缀会把它
         当成入口，装出来的 .app 双击打开的是帮助文档。
         """
-        targets = msi_tables.shortcut_targets(Path(SAMPLE_MSI))
+        targets = msi_tables.shortcut_targets(self.sample)
         chm = [t for t in targets if t["relpath"].lower().endswith((".chm", ".txt"))]
         # 目标列表本身允许包含它们（那是事实），但入口选取必须跳过 ——
         # 这条断言锁住「选取阶段有做 PE 校验」这一点
@@ -2302,7 +2467,7 @@ class TestRealMsi(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
             (out / "files").mkdir()
-            entry = _msi_shortcut_entry(Path(SAMPLE_MSI), out)
+            entry = _msi_shortcut_entry(self.sample, out)
             # 目录是空的，一个文件都不存在 → 不应返回任何入口
             self.assertEqual(entry, "")
             if chm:

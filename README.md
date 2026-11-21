@@ -2401,13 +2401,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 472 项 | 约 2 分 45 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配 |
+| exeonmac | 474 项 | 约 3 分 6 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、2 项导入期副作用守卫 |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1364 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1366 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3066,6 +3066,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 占位注册表写的是 wine 不收的格式 | `prefix._write_placeholder_regs` 写的占位表让 wine 报 `not a valid registry file` + 「32-bit installation」、`rc=1` —— 占位表的存在意义正是「让 wine 能起来」 | 自述「wine 的 .reg 是 UTF-16LE + BOM」，而那句话只对 `regedit /E` 的**导出**文件成立；prefix 里的存储格式是纯 ASCII，且必须带 `#arch=win64` | 改纯 ASCII + `#arch=win64`。实测 `rc=0`，wine 自己把占位补全成 20 万字节完整注册表 |
 | 重启拦截的 `.reg` 从来没生效过 | `suppress_restart` 日志写 `reboot.suppressed`，实际一个键都没写进去；导入后 `reg query` 查不到 `NoClose` | 用 wine **内部**存储格式（`WINE REGISTRY Version 2` + 相对路径 `[Software\\...]`）喂 `regedit /S`，而它只认 **Windows 导出**格式。实测喂错格式时**退出码 0、stderr 空、零写入** —— 三组对照才切开 | 改 `Windows Registry Editor Version 5.00` + 绝对键路径；导入后回查目标键，查不到写 `WARN reboot.suppress_ineffective` 而非 INFO。`regedit /S` 静默失败，「没抛异常」不能证明生效 |
 | `package --json` 失败时 stdout 两段 JSON | `wepack package <坏包> --json` 的 stdout 是「完整 payload + main 的 error 段」两段拼接，`json.load` 抛 `Extra data: line 79`，管道交给 `jq` 也直接失败 | `cmd_package` 无条件 `_emit(payload)` 之后才 `raise VerifyFailed`。与 W-02 修过的「`build --json` 两段 JSON」同因，只是发生在单个子命令内部而非父子命令之间 | 改为先判 `report.ok`：失败时只由 `main()` 输出单一段 error（带 `message` 与 `exit_code`），详细 checks 走 stderr 与 `--report`。`raw_decode` 实测修复前段数 2 → 修复后 1；回归锁 2 项，注回旧顺序即变红 |
+| 测试模块导入即编译安装包，整类用例静默消失 | 跑单个测试类 `python3 -m unittest tests.test_phase2.TestCliPhase2` → `FAILED (errors=2)`、`RuntimeError: ISCC 编译失败（退出码 0）：`，而 detail 是**空的**；全量 `discover` 按字母序跑却一直是绿的 | `test_phase1.py` 在**模块顶层**求值 `REAL_INNO = str(fixtures.demo_inno_real() or "")`，导入即编译安装包；`test_phase2` 只为借两个纯字节构造函数就 `import tests.test_phase1`，而它的 `setUp` 已把 `WEXE_HOME` 指向临时目录并塞了一个只 `exit 0` 的假 wine → ISCC 被假 wine「跑」了、什么都没编、退出码干净 | 四个样本常量改为惰性函数（进程内缓存），四个类改用 `setUpClass` + `require_sample()` 拿不到就 `SkipTest`。装饰器在导入时求值，`setUpClass` 在用例真跑时才求值 —— 分界线就在这里。另把「退出码 0 但无产物」与「编译失败」的报错分开，让失败自己说清是哪一类。补 2 项守卫（子进程埋哨兵 + `ast` 扫模块顶层），负向验证：注回常量 → 两条全红 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -3865,6 +3866,67 @@ wine64 cmd /c "echo hi"  ->  rc=1
 | `suppress_restart` 去掉回查、无条件写 INFO | 「未生效必须落 WARN」变红 |
 
 **⑨ 仍未验证 / 未处理**：(a) **只测了 wine-11.21**，其他版本对首行与 arch 的宽容度未验；(b) 判据只覆盖「wine 读得进去」，**不覆盖「读进去之后注册表内容是否语义正确」** —— 例如键值被改成垃圾值，wine 照样起来，这种只能靠实跑业务程序发现；(c) 32 位 prefix（`WINEARCH=win32`）本仓库不支持，故 `#arch=win32` 一律判错，若将来要支持需改这一条；(d) `regedit /S` 的静默失败是否也影响其他 `.reg` 导入路径未系统排查，目前只查了 `suppress_restart` 这一处。
+
+
+### 15.20 模块导入就编译安装包：一个「借个纯函数」引发的整类消失（2026-11-21 实测，已修）
+
+**这一节是 15.19 遗留 (a) 的处置。** 15.19 记下一条「`ISCC 编译失败（退出码 0）`是 HEAD 上就有的既有错误」，并已定位到根因；这一节把它修掉，并顺手改掉让这种缺陷得以长期存在的那个结构。
+
+**① 症状：跑单个测试类就崩，而全量按字母序跑却没事。** `cd exeonmac && python3 -m unittest tests.test_phase2.TestCliPhase2` 得到：
+
+```
+Ran 7 tests in 1.285s
+FAILED (errors=2)
+RuntimeError: ISCC 编译失败（退出码 0）：
+```
+
+`detail` 是**空的**。退出码 0、stderr 空、产物不存在 —— 三条信息互相矛盾，看上去像 ISCC 自己坏了。而按 `discover` 的字母序跑（`test_phase0` → `test_phase1` → `test_phase2`）时它一直是绿的，所以这个缺陷藏了很久。
+
+**② 根因链条有四环，缺任何一环都不成立。**
+
+1. `tests/test_phase1.py:53` 在**模块顶层**求值 `REAL_INNO = ... str(fixtures.demo_inno_real() or "")` —— 导入模块 = 现场编译一个 Inno 安装包。
+2. `tests/test_phase2.py` 有 4 处 `from tests.test_phase1 import build_min_pe, build_nsis_overlay`，只为借两个**纯字节构造函数**。
+3. `test_phase2` 的 `IsolatedWexe.setUp` 把 `WEXE_HOME` 指到临时目录，并在那里写一个只 `exit 0` 的假 wine（`make_fake_wine`）。
+4. 于是第 2 步的导入（发生在第 3 步之后）里，`wine_binary()` 解析到假 wine，ISCC 被假 wine「跑」了、什么也没编、退出码干净，`demo-setup.exe` 不存在 → 抛 `RuntimeError`。
+
+**这是个顺序依赖的缺陷**：同样的代码，字母序跑没事，跑单个类就炸。它既不会被 `check_no_skips.py` 抓到（那脚本只看 `Ran N tests` 与 skipped），也不会被「全量绿」发现。
+
+**③ 修法不是加 `try`，是把导入期的副作用去掉。** 四个样本常量改为**惰性函数**（`sample_nsis()` / `sample_inno()` / `sample_msi()` / `real_inno()`），进程内缓存；原来靠 `@unittest.skipUnless(常量 and ...)` 跳过的四个类改用 `setUpClass` + `require_sample()`，拿不到就 `raise unittest.SkipTest(...)`。**装饰器在导入时求值，`setUpClass` 在用例真的要跑时才求值** —— 分界线就在这里。
+
+**④ 顺带让报错说清是哪一种失败。** `fixtures.demo_inno_real()` 原来对「编译失败」与「wine 什么也没做」用同一句话。现在分开：
+
+```
+ISCC 退出码 0 但没生成产物 —— 这个 wine 什么也没做：
+  wine = /tmp/.../wexe/runtime/wine/bin/wine64
+  WEXE_HOME = /tmp/...
+多半是测试把 WEXE_HOME 指到了临时目录、那里只有一个只 exit 0 的假 wine；
+也可能是 wine 自身损坏。
+```
+
+与 15.19 同属「退出码 0 的假成功」，处置原则一致：**让失败自己说出它是哪一类**，别让下一个人往编译器上找原因。
+
+**⑤ 新增 2 项守卫，都做过负向验证。**
+
+| 守卫 | 判据 | 负向验证（把常量注回模块顶层） |
+|---|---|---|
+| `test_importing_module_runs_no_external_tool` | 子进程里造一个「被调用就留痕」的假 wine + 存在的 `WEXE_ISCC`，导入后哨兵文件**不许存在** | 哨兵出现 → 该条变红 |
+| `test_no_fixture_call_at_module_level` | 用 `ast` 扫模块顶层，`fixtures.demo_*` 的调用**一个都不许有**（函数体里的不算） | 报出「第 63 行：fixtures.demo_inno_real()」→ 变红 |
+
+第一版守卫**是软判据**：只断言「导入不报错、合成夹具造得出」。负向验证时它仍然绿 —— 因为空 `WEXE_HOME` 下 `demo_inno_real()` 只是返回 `None`，不抛异常。改成埋哨兵之后同一份负向代码立刻两条全红。**这又一次证明：判据不经过负向验证就等于没写。**
+
+**⑥ 为什么这条值得单独成节。** 它不是「某个函数写错了」，而是「测试套件之间的隐式耦合」：`test_phase2` 依赖 `test_phase1` 已经跑完（因为跑完之后 `WEXE_HOME` 已还原），这个前提从未被写下来，也从未被检查。**凡是「导入即执行」的模块级代码，都在制造这种未声明的前置条件。**
+
+**⑦ 已系统扫描，同类代码共 3 处，本轮不改。** 用 `ast` 对 `tests/test_*.py` 的「导入时会执行的语句」统一扫（跳过函数体、照走类体），命中：
+
+| 位置 | 导入期调用 | 性质 |
+|---|---|---|
+| `test_phase2.py:53/54` | `fixtures.demo_nsis()`、`fixtures.wine_available()` | 前者会跑 `makensis`（外部工具），后者只探文件 |
+| `test_phase3.py:56/57` | 同上 | 同上 |
+| `test_phase7_layers.py:341/394` | `fixtures.wine_available()` | 只探文件，无副作用 |
+
+它们目前**不表现为故障**：`discover` 在跑任何用例之前就导入了这几个模块，那时 `WEXE_HOME` 还是真实的。但与 `test_phase1` 是同一形态 —— 一旦有人在 `WEXE_HOME` 被重定向期间导入它们，`REAL_WINE` / `SAMPLE_NSIS` 就会按假环境定型且**不会再纠正**（模块级常量只求值一次）。按「每轮只改一个变量」的规矩，本轮只修真正炸掉的那一处，这三处留作下一轮。
+
+**⑧ 仍未处理**：(a) `test_phase2` 依然 `from tests.test_phase1 import build_min_pe` —— 惰性化之后它已无副作用，但更彻底的做法是把这两个纯构造函数下沉到 `fixtures.py`，让测试模块之间不再互相导入；(b) ⑦ 表里那 3 处导入期调用待改惰性；(c) CI 只跑 `discover`（字母序），不跑单类，所以这类顺序依赖在 CI 上永远是绿的 —— 值得给 CI 加一条「单独跑每一个测试类」的作业。
 
 
 ---

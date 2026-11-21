@@ -338,10 +338,10 @@ def _build_payload_exe(path: Path) -> None:
 
     ## 为什么不从 test_phase1 借 `build_min_pe`
 
-    那样会形成循环导入：`test_phase1` 在模块级调用 `fixtures.demo_nsis()`，
-    而 `fixtures` 又要 `from test_phase1 import build_min_pe` →
-    `partially initialized module`。夹具必须能独立构造样本，不该反向
-    依赖测试模块。
+    夹具必须能独立构造样本，不该反向依赖测试模块 —— 那是循环依赖，
+    而且会把「导入测试模块」与「构造样本」这两件事绑在一起（详见
+    README 15.20：`test_phase1` 早先确实在模块级求值夹具，导致
+    `test_phase2` 借一个纯函数时踩到假 wine）。
     """
     path.write_bytes(minimal_pe())
 
@@ -644,6 +644,20 @@ def demo_inno_real() -> Path | None:
     outfile = build / "demo-setup.exe"
     if not outfile.is_file():
         detail = (result.stderr or result.stdout or b"").decode("utf-8", "replace")[-500:]
+        # ## 退出码 0 但没产物，与「编译失败」是两件事
+        #
+        # 实测踩到过：`WEXE_HOME` 被指到临时目录后，`wine_binary()` 解析成
+        # 测试自己塞进去的假 wine（只 `exit 0`），ISCC 什么也没编、退出码
+        # 干净、stderr 空。此时报「ISCC 编译失败（退出码 0）」会让下一个
+        # 看到它的人往编译器上找原因，而问题在**用哪个 wine 跑**。
+        # 和 15.19 同属「退出码 0 的假成功」，所以至少要让报错说清是哪一种。
+        if result.returncode == 0 and not detail.strip():
+            raise RuntimeError(
+                "ISCC 退出码 0 但没生成产物 —— 这个 wine 什么也没做：\n"
+                f"  wine = {wine}\n"
+                f"  WEXE_HOME = {os.environ.get('WEXE_HOME', '(未设置)')}\n"
+                "多半是测试把 WEXE_HOME 指到了临时目录、那里只有一个只 "
+                "exit 0 的假 wine；也可能是 wine 自身损坏。")
         raise RuntimeError(f"ISCC 编译失败（退出码 {result.returncode}）：{detail}")
 
     _inno_cache["real"] = outfile

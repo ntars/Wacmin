@@ -1012,5 +1012,216 @@ class TestRealLaunch(unittest.TestCase):
                     pass
 
 
+# --------------------------------------------------------------------------
+# 启动窗口内的信号（不需要真实 wine）
+# --------------------------------------------------------------------------
+
+
+class TestSignalDuringStartupWindow(unittest.TestCase):
+    """信号落在「已注册 handler、但 wine 还没起来」这段窗口里，必须也能停下。
+
+    ## 这是第 2 轮遗留①，实测 6/6 复现的真缺陷
+
+    第 2 轮把信号源从 `.main` 队列挪到独立串行队列，修掉了「SIGTERM 后
+    90 秒仍在」的问题；但当时只测了「wine 已启动之后」发信号这一种时序。
+    实际情况是信号源注册在 `FontSubstitution.apply` **之前**，而 apply 里
+    要跑一次 `wine regedit /S`（本机实测约 3 秒）。这段时间：
+
+      - `WineRunner.current` 还是 nil
+      - `signal(sig, SIG_IGN)` 已经把默认处置吃掉了
+
+    于是 handler 里 `current?.terminate()` 是**空操作**：日志写了「收到信号
+    15」，进程却照常把 wine 拉起来，然后永远不退出。实测（固定 1.0 秒延迟
+    发 SIGTERM，6/6 复现）：只等到「收到信号」，25 秒后进程仍在，只能
+    SIGKILL。日志本身看着一切正常 —— **信号"收下了"，只是没人执行**。
+
+    ## 为什么不用真实 wine 也能测
+
+    缺陷出在「handler 到了、子进程还没有」这个**时序**上，与 wine 是什么
+    无关。用一个「起来就睡住」的假 wine 反而更好：窗口被撑到可控，不依赖
+    真机上 apply 恰好耗时几秒，也不会在快机器上偶发通过。
+
+    假 wine 一被调用就写哨兵文件，所以「信号被忽略、wine 照样被拉起」这个
+    失败态有直接证据，而不只是看退出码。
+    """
+
+    #: 假 wine 收到调用后睡多久。远大于下面等信号的时间，保证它不会自己退出。
+    FAKE_WINE_SLEEP = 120.0
+
+    def _bundle(self, tmp: Path, sentinel: Path) -> Path:
+        """造一个 .app，其 wine 是「留痕 + 睡住」的假货。"""
+        app_dir = make_app(tmp, entry="drive_c/App/app.exe", app_name="Sigwin")
+        private = app_dir / "Contents" / "Resources" / "Private"
+
+        conf = CompatConfig(
+            app="Sigwin", version="1.0", entry="drive_c/App/app.exe",
+            installer=InstallerRecord(kind=InstallerKind.UNKNOWN, completed=True),
+            bundle_id="com.wexe.win.sigwin.sigwin",
+            # 非空 font_map 才会真的跑 apply 里那次 regedit，
+            # 而这正是缺陷窗口的来源。留空就绕过了，测不到东西。
+            font_map={"微软雅黑": "PingFang SC"},
+        )
+        write_compat(conf, app_dir)
+        build_bundle(app_dir, app_name="Sigwin",
+                     bundle_id="com.wexe.win.sigwin.sigwin", version="1.0",
+                     entry="drive_c/App/app.exe", installer=conf.installer,
+                     font_map=conf.font_map, register=False)
+
+        # 假 wine 放在共享根目录下，launcher 只认 $WEXE_HOME/runtime/wine/bin/wine64
+        wine_bin = tmp / "home" / "runtime" / "wine" / "bin"
+        wine_bin.mkdir(parents=True)
+        script = wine_bin / "wine64"
+        script.write_text(
+            "#!/bin/sh\n"
+            # 每次被调用都留痕：regedit 那次与主程序那次都会记。
+            f'printf "%s\\n" "$*" >> "{sentinel}"\n'
+            f"sleep {self.FAKE_WINE_SLEEP}\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return app_dir
+
+    def _run_and_signal(self, app_dir: Path, tmp: Path, sig: int):
+        """启动 launcher，等它进入窗口后发信号，返回 (是否停, 退出码, 日志)。"""
+        import signal as signal_mod
+        import time
+
+        home = tmp / "home"
+        env = dict(os.environ, WEXE_HOME=str(home))
+        proc = subprocess.Popen(
+            [str(app_dir / "Contents" / "MacOS" / "launcher")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        log = home / "logs" / "launcher.log"
+        try:
+            # ## 等什么、不等什么，是这组用例的关键
+            #
+            # 早先所有启动类用例都等「wine 已启动」才发信号 —— 那正好**跳过**
+            # 了缺陷窗口，所以 6 次实测全绿。这里必须等到「runtime ready」，
+            # 即信号源已注册、但 wine 还没起来的那一刻。
+            deadline = time.monotonic() + 30
+            entered = False
+            while time.monotonic() < deadline:
+                text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+                if "runtime ready" in text:
+                    entered = True
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(entered, "launcher 没走到 runtime ready，无法定位窗口")
+
+            proc.send_signal(sig)
+            stopped = True
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                stopped = False
+                proc.kill()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    if stream is not None and not stream.closed:
+                        stream.close()
+                except (OSError, ValueError):
+                    pass
+
+        text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+        return stopped, proc.returncode, text
+
+    def _assert_stopped_in_window(self, sig: int, name: str) -> None:
+        import signal as signal_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sentinel = tmp_path / "wine-calls.log"
+            app_dir = self._bundle(tmp_path, sentinel)
+
+            stopped, code, text = self._run_and_signal(app_dir, tmp_path, sig)
+
+            self.assertTrue(
+                stopped,
+                f"{name} 落在启动窗口内时 launcher 停不下来（15 秒仍在）。"
+                f"日志尾部：{text[-600:]}")
+            # 退出码要与「wine 被信号停掉」那条路径一致，同一个用户操作
+            # 不能给出两个码（详见 main.swift 第一道检查点处的说明）。
+            self.assertEqual(code, sig,
+                             f"{name} 的退出码应为 {sig}（与 wine 被停掉时一致），"
+                             f"实际 {code}。日志尾部：{text[-600:]}")
+
+            calls = sentinel.read_text(encoding="utf-8") if sentinel.is_file() else ""
+            # ## 这条才是缺陷的直接证据，比退出码更硬
+            #
+            # 修复前：信号被忽略后 launcher 照常把 wine 拉起来，于是哨兵里
+            # 有主程序那次调用（`drive_c/App/app.exe`）。修复后：启动前就
+            # 发现 pending，直接返回，主程序一次都不许被调用 ——
+            # **只在 regedit 那次留痕是允许的**（它发生在窗口之前）。
+            self.assertNotIn(
+                "app.exe", calls,
+                f"{name} 落在启动窗口内时 wine 主程序仍被拉起（哨兵记录：{calls!r}）"
+                "—— 说明信号被静默丢弃了")
+
+    def test_sigterm_in_startup_window_stops_launcher(self) -> None:
+        """SIGTERM 落在窗口内也要停得下来。"""
+        import signal as signal_mod
+
+        self._assert_stopped_in_window(signal_mod.SIGTERM, "SIGTERM")
+
+    def test_sigint_in_startup_window_stops_launcher(self) -> None:
+        """SIGINT 同一条路径（三个信号共用一段 handler，但只测一个不够）。"""
+        import signal as signal_mod
+
+        self._assert_stopped_in_window(signal_mod.SIGINT, "SIGINT")
+
+    def test_pending_is_consumed_not_replayed(self) -> None:
+        """pending 只能送达一次，不许在后续轮询里反复 terminate。
+
+        反复 `terminate()` 本身不致命（进程已死时是空操作），但会掩盖
+        「pending 没被清空」这类编程错误，也让日志里出现一串无意义的
+        「送达信号」。这里静态断言送达路径有清空动作。
+        """
+        source = (REPO / "launcher" / "Sources" / "main.swift").read_text(
+            encoding="utf-8")
+        drain = source.split("static func drainPending")[1].split("\n    }")[0]
+        self.assertIn("pending = nil", drain,
+                      "送达后必须清空 pending，否则每轮轮询都会重复送达")
+
+    def test_handler_records_pending_when_no_child(self) -> None:
+        """handler 必须把信号记下来，不能只写日志、也不能自己判空后丢弃。
+
+        这是缺陷的根因所在：`current?.terminate()` 在 nil 上是空操作，
+        而默认处置已被 `signal(sig, SIG_IGN)` 关掉 —— 只写日志等于吞信号。
+        """
+        source = (REPO / "launcher" / "Sources" / "main.swift").read_text(
+            encoding="utf-8")
+        handler = source.split("source.setEventHandler")[1].split("source.resume()")[0]
+        self.assertIn("WineRunner.noteSignal(sig", handler,
+                      "handler 必须调 noteSignal 把信号记下来，否则窗口内到达的信号会被丢弃")
+        # noteSignal 内部必须真的写 pending，否则「记下」是空的。
+        note = source.split("static func noteSignal")[1].split("\n    }")[0]
+        self.assertIn("pending = sig", note,
+                      "noteSignal 必须写 pending，它是「信号已到但还没送达」的唯一事实来源")
+
+    def test_every_wine_child_goes_through_one_runner(self) -> None:
+        """所有 wine 子进程必须走 `runChild`，不许有第二份 Process 实现。
+
+        这条是本缺陷的结构性成因：`FontSubstitution.apply` 早先自己 new 一个
+        `Process` 再 `waitUntilExit()`，于是整个 regedit 期间 `current` 都是
+        nil，信号没有可停对象。同一件事两套实现、宽松的那套落在大窗口上 ——
+        只修「记 pending」而不统一入口，下次再加一个 wine 调用就会重现。
+        """
+        source = (REPO / "launcher" / "Sources" / "main.swift").read_text(
+            encoding="utf-8")
+        # 允许的出现处：runChild 自己一处（它在函数体内 argv 已定）。
+        occurrences = source.count("Process()")
+        self.assertEqual(
+            occurrences, 1,
+            f"launcher 里只许有一处 `Process()`（即 runChild），实际 {occurrences} 处 —— "
+            "另起一个就会再次出现「有子进程但信号找不到它」")
+
+
 if __name__ == "__main__":
     unittest.main()

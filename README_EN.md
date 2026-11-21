@@ -2402,13 +2402,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 475 | about 3m03s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers and 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard) |
+| exeonmac | 480 | about 2m42s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard) and 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1367** | — | See "0 skipped repository-wide" below |
+| **Total** | **1372** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3048,6 +3048,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | The contract-check button sets `disabled` inside its click handler, so a keyboard Enter drops focus instantly | Clicking with a mouse works fine; pressing Enter on a keyboard sends focus to `<body>`, a screen reader restarts from the top, reaching the panel's "close" button takes 12 more Tabs, and closing the panel drops focus to `body` again. The first three viewport stages stay fully green | `Enter` is keydown → click → keyup. Setting `disabled` inside click makes the element stop being a focus target, so the browser returns focus to the document root and the trailing keyup has no receiver. A programmatic `.click()` has no trailing keyup, so the defect never reproduced and every existing test was green | Re-entry is guarded by a boolean plus `aria-disabled` (semantics only, focusability intact); the panel gains `tabindex="-1"` and gets `panel.focus()` after the check completes; closing hands focus back to the trigger. The criterion became stage 5 of `viewport-check.mjs`, using real key events plus a full `focusin`/`focusout` trace |
 
 | A criterion at module level: concluded at import, skip becomes permanent | `test_phase2` / `test_phase3` had `SAMPLE_NSIS = ... demo_nsis()` at module level, so **importing either module ran `makensis`**; measured with a sentinel fake `makensis`, the marker appeared and the failure was exactly `makensis 编译失败（退出码 0）：`. The two `@skipUnless(fixtures.wine_available())` decorators in `test_phase7_layers` were fixed at import time: importing under `WEXE_HOME=/nonexistent` left `__unittest_skip__` permanently `True` | Same shape as 15.20 but with three entrances: ① the same `SAMPLE_NSIS` written three times (a 5.3 violation); ② `REAL_WINE = fixtures.wine_available()` looks side-effect free but pins the conclusion at import; ③ decorator arguments are also evaluated at import and live in `decorator_list`, invisible to a module-body scan | The criterion moved into `fixtures` (`sample_*()` / `require_sample()` / `wine_ready()`); `test_phase1` now re-exports it, the other three files drop their module-level constants for `setUpClass`; cache keys include the current environment value. The guard widened from one module to all 6 files, now scanning `decorator_list` and asserting its own scan scope (so an empty glob cannot pass green). Negative verification: re-inject module-level evaluation → 2 static findings + sentinel → 2 red; restore the decorator → 1 red |
+| The launcher cannot be closed inside its startup window: the signal is "received" but nobody executes it | Sending SIGTERM after `runtime ready` and before `wine 已启动` (fixed delays 0.8 / 1.0 / 1.2 s, twice each, **6/6 reproduced**): the log says "收到信号 15，正在停止 wine", then `fontsub 已导入` and `wine 已启动` appear as usual, and 25 seconds later the process is still alive — SIGKILL is the only way out. The log itself is complete and error-free | ① `signal(sig, SIG_IGN)` already removed the default disposition; ② the handler body is `current?.terminate()`; ③ `current` is only registered by the main program, while the `wine regedit /S` inside `FontSubstitution.apply` (measured ~3 s) creates its own `Process` and calls `waitUntilExit()` — **never registered** → no-op. The first fix ("record `pending`") still failed: the main thread is blocked inside `waitUntilExit()` and never reaches any checkpoint | Added `WineRunner.runChild` as the only `Process()` in the file; `current` now means "the current wine child" instead of "the main program", and apply's regedit goes through it too; the handler only calls `noteSignal(sig)` (record, then deliver) and no longer branches on nil. `runChild` returns an `Outcome` enum separating `.stoppedBySignal` from `.finished(15)`, so "interrupted" is not mistaken for "import failed" and the main program is not started afterwards. Exit codes fixed too: SIGINT/2, SIGTERM/15, SIGHUP/1 are now distinct (all were 15 before). 5 regression locks (fake wine widens the window); two injections, 3 red each |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -3531,6 +3532,8 @@ The behavioural test alone would catch it too, but only after waiting out the 20
 
 **⑦ Still unverified**: this section proves only that "SIGTERM is forwarded to wine and the launcher exits". All three signals share the same code path but only SIGTERM was exercised. **Whether wine writes every window's state back into the prefix on SIGTERM** (`wineserver`'s shutdown completeness) is unverified — the local probe used `notepad.exe`, which has no state to save; stateful commercial software needs a real-machine check.
 
+> **Follow-up (2026-11-21)**: all three signals were then exercised individually and each stops in 0.18 s — but this very path is broken in another window (a signal arriving during `FontSubstitution.apply` is silently swallowed), and all three used to exit with 15, indistinguishable from each other. See **15.22**.
+
 ### 15.15 Packaging "succeeds" on a half-broken prefix (measured 2026-11-20, fixed)
 
 **This defect is the same family as 15.14: the packaging flow is all green, exit code 0, verification 10/10 — and the product is a `.app` that does nothing when double-clicked.**
@@ -3992,6 +3995,111 @@ Restored afterwards: 3/3 green.
 #### ⑦ Still open
 
 (a) `test_phase2` still does `from tests.test_phase1 import build_min_pe` — side-effect free now, but the cleaner move is to sink those two pure byte builders into `fixtures.py` so test modules no longer import each other; (b) CI only runs `discover` (alphabetical), never a single class, so ordering dependencies stay green on CI — worth adding a "run every test class on its own" job; (c) `fixtures._SAMPLE_CACHE` is process-wide, so constructing first and clearing via `reset_sample_cache()` afterwards in the wrong order will still hand back a stale value.
+
+### 15.22 A signal that was "received" but never executed: the launcher cannot be closed during its startup window (measured 2026-11-21, fixed)
+
+**This section disposes of 15.14 ⑦.** 15.14 fixed the root cause "the signal source is attached to the `.main` queue" but explicitly left one thing unverified: three signals share one code path, yet only SIGTERM was ever sent. This round tried exactly that first — and all three behaved fine (each exited in 0.18 s). **The real problem was elsewhere.** Every 15.14 test waits for "wine 已启动" before signalling, which happens to step over a much wider window.
+
+#### ① Symptom: the log says "signal received", then wine starts anyway
+
+Same probe as 15.14 (real base layer + real wine + real launcher), only the timing changes — instead of waiting for "wine 已启动", signal after a fixed delay of 0.8 / 1.0 / 1.2 seconds, twice each:
+
+| Delay | Stopped | Elapsed | Log has "signal received" | Log has "wine started" |
+|---|---|---|---|---|
+| 0.8s | no | 25.0s | yes | no |
+| 0.8s | no | 25.0s | yes | no |
+| 1.0s | no | 25.0s | yes | no |
+| 1.0s | no | 25.0s | yes | no |
+| 1.2s | no | 25.0s | yes | no |
+| 1.2s | no | 25.0s | yes | no |
+
+**6/6 reproduced.** The log tail looks like this (complete, no errors):
+
+```
+[04:59:18Z] launch start: .../Note (Win).app
+[04:59:18Z] app=Note entry=drive_c/windows/notepad.exe
+[04:59:18Z] runtime ready: .../runtime/wine/bin/wine64
+[04:59:18Z] 收到信号 15，正在停止 wine
+[04:59:21Z] fontsub 已导入 1 条替换        ← note the timestamp: 3 seconds later
+[04:59:21Z] wine 已启动 pid=17638 → ...
+```
+
+The user pressed Ctrl-C, the log says "stopping wine", and then wine starts anyway and **not one further line appears**. The shape differs from 15.14: not "the signal was never received" but "**received, acknowledged, and executed by nobody**".
+
+#### ② Root cause: the 3 seconds during which `current` is nil
+
+The signal sources are registered **before** `FontSubstitution.apply`, and apply runs `wine regedit /S` to import font substitutions. During that window:
+
+| Step | State |
+|---|---|
+| `signal(sig, SIG_IGN)` | already executed — SIGTERM's default disposition is **already gone** |
+| handler | does run, but its body is `WineRunner.current?.terminate()` |
+| `WineRunner.current` | **nil** — the main program hasn't started, and apply's regedit creates its own `Process` and calls `waitUntilExit()`, so it is **never registered** |
+
+So `current?.terminate()` is a no-op. The "signal received" line is genuinely written, then nothing happens. The 3-second gap before "wine 已启动" in the log above is exactly apply's regedit.
+
+#### ③ Second problem: recording `pending` was not enough
+
+The first fix was "when the handler sees `current == nil`, record it into `pending`, and have the main flow check once before starting wine". The regression lock **turned red immediately**, correctly: the main thread is blocked inside apply's `waitUntilExit()`, so it **never reaches that checkpoint**. The signal was recorded and nobody executed it — the defect went from "signal dropped" to "signal stored, then dropped".
+
+Which says something larger: **fixing the handler is not enough, because the problem isn't the handler — it's that one code path bypasses the shared registration.** The real defect is the design assumption that `current` only covers the main program.
+
+#### ④ Fix: every wine child goes through one entry point
+
+| Change | Detail |
+|---|---|
+| New `WineRunner.runChild` | The only `Process()` in the file. Registers `current` → run → poll → clear `current` |
+| `FontSubstitution.apply` now uses `runChild` | That regedit now also has a `current`, so the signal has something to stop. Poll interval 50 ms (it runs one or two seconds, so it must react fast) |
+| Handler does one thing: `noteSignal(sig)` | Record `pending`, then try to deliver. It does **not** branch on `current == nil` itself |
+| `runChild` returns an `Outcome` enum | `.finished(code)` / `.stoppedBySignal(sig)` / `.late` / `.failedToStart` |
+
+`Outcome` is not decoration. It used to return a bare `Int32`, and "wine exited with 15 on its own" and "we signalled it" are the same 15 — the caller cannot tell whether to continue. That divergence happened for real once: after the first fix, regedit was stopped by the signal and the log read `WARN fontsub 导入退出码 15，界面字体可能显示为方块` (treating "interrupted" as "font import failed"), and then **the main program was started anyway**. The user had already asked it to close; the window appeared again.
+
+`apply` now returns `Bool` (aborted by signal) and `main` exits with that signal directly instead of starting the main program.
+
+#### ⑤ Also fixed: one user action, three different exit codes
+
+Before the fix, closing the app produced a different code depending on which path the signal took:
+
+| Scenario | Before | After |
+|---|---|---|
+| SIGINT in the window | 2 (default disposition, handler not yet registered) | **2** |
+| SIGINT stopping the main program | **15** (wine terminated, reported as 15) | **2** |
+| SIGTERM stopping the main program | 15 | 15 |
+| SIGHUP stopping the main program | **15** | **1** |
+
+The middle rows are the point: three signals share one code path, but `terminate()` sends SIGTERM, so wine always exits 15 — **Ctrl-C and kill -HUP were indistinguishable from SIGTERM**. After the fix each signal returns its own value. Measured: `SIGINT → 2 / SIGTERM → 15 / SIGHUP → 1`, each exiting in 0.02–0.04 s.
+
+#### ⑥ Regression locks: 5 tests, no real wine needed
+
+The defect is about the **timing** of "the handler arrived, the child does not exist yet" and has nothing to do with what wine is. A fake wine that "logs its invocation, then sleeps 120 s" is actually better: the window becomes controllable, it does not depend on apply happening to take a few seconds on a real machine, and it cannot pass by luck on a fast machine.
+
+New `test_phase3.TestSignalDuringStartupWindow` (5 tests):
+
+| Test | Criterion |
+|---|---|
+| `test_sigterm_in_startup_window_stops_launcher` | Wait for `runtime ready` (sources registered, wine not started), send SIGTERM: exits within 15 s, exit code == 15, and **the sentinel has no main-program invocation** |
+| `test_sigint_in_startup_window_stops_launcher` | Same, exit code == 2 |
+| `test_pending_is_consumed_not_replayed` | `drainPending` must clear `pending`; no repeated delivery every poll |
+| `test_handler_records_pending_when_no_child` | The handler must call `noteSignal`, and `noteSignal` must actually write `pending` |
+| `test_every_wine_child_goes_through_one_runner` | Exactly **one** `Process()` in the whole file |
+
+The last one is structural: fixing only "record pending" without unifying the entry point means the next wine call reproduces this verbatim. It is also the defect's own cause — one job with two implementations, and the looser one (no registration) landed squarely on the big window (rule 5.3).
+
+The sentinel assertion is harder than the exit code: before the fix the launcher started the main program anyway, so the sentinel contained `drive_c/App/app.exe`; after the fix `pending` is seen before startup and the main program **must never be invoked**. Only the regedit invocation may appear, since it happens before the window.
+
+#### ⑦ Negative verification (two injections, both effective)
+
+| Injection | Result |
+|---|---|
+| Handler reverted to `WineRunner.current?.terminate()` (i.e. only direct terminate, no pending) | **3 red**: both behavioural tests report "still running after 15 s" with the log tail; the static test reports the handler does not call `noteSignal` |
+| `apply` reverted to its own `Process` + `waitUntilExit()` | **3 red**: both behavioural tests report "still running after 15 s" (the log shows "已记下信号 15", i.e. recorded but executed by nobody); the static test reports 2 occurrences of `Process()` |
+
+Restored afterwards: 5/5 green.
+
+#### ⑧ Still open
+
+(a) Only the in-window paths for SIGTERM and SIGINT are tested; SIGHUP sits in the same `signals` array but is not tested separately (all three share one code path — low risk, but "one code path" was already proven unreliable in 15.14); (b) stopping regedit means the font substitution never took effect, so Chinese text may render as boxes — a deliberate trade-off (the user is already closing it; spawning another process for fonts is wrong), but **the product gives no hint**; (c) whether wine writes all window state back to the prefix on SIGTERM remains unverified (same as 15.14 ⑦).
 
 ---
 

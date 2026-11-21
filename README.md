@@ -2401,13 +2401,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 475 项 | 约 3 分 3 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）|
+| exeonmac | 480 项 | 约 2 分 42 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）|
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1367 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1372 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3069,6 +3069,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 测试模块导入即编译安装包，整类用例静默消失 | 跑单个测试类 `python3 -m unittest tests.test_phase2.TestCliPhase2` → `FAILED (errors=2)`、`RuntimeError: ISCC 编译失败（退出码 0）：`，而 detail 是**空的**；全量 `discover` 按字母序跑却一直是绿的 | `test_phase1.py` 在**模块顶层**求值 `REAL_INNO = str(fixtures.demo_inno_real() or "")`，导入即编译安装包；`test_phase2` 只为借两个纯字节构造函数就 `import tests.test_phase1`，而它的 `setUp` 已把 `WEXE_HOME` 指向临时目录并塞了一个只 `exit 0` 的假 wine → ISCC 被假 wine「跑」了、什么都没编、退出码干净 | 四个样本常量改为惰性函数（进程内缓存），四个类改用 `setUpClass` + `require_sample()` 拿不到就 `SkipTest`。装饰器在导入时求值，`setUpClass` 在用例真跑时才求值 —— 分界线就在这里。另把「退出码 0 但无产物」与「编译失败」的报错分开，让失败自己说清是哪一类。补 2 项守卫（子进程埋哨兵 + `ast` 扫模块顶层），负向验证：注回常量 → 两条全红 |
 
 | 判据写在模块顶层：导入即定论，跳过成了永久的 | `test_phase2` / `test_phase3` 顶层写 `SAMPLE_NSIS = ... demo_nsis()`，**导入这两个模块就会跑 `makensis`**；用哨兵假 `makensis` 实测 marker 出现，且失败报的正是 `makensis 编译失败（退出码 0）：`。`test_phase7_layers` 的两个 `@skipUnless(fixtures.wine_available())` 在导入时定型：`WEXE_HOME=/nonexistent` 下导入后 `__unittest_skip__` 恒为 `True` | 与 15.20 同一形态，但入口有三个：① 同一份 `SAMPLE_NSIS` 在三个文件里各写一套（违反 5.3）；② `REAL_WINE = fixtures.wine_available()` 看着无副作用，实际把结论在导入时定死；③ 装饰器参数同样在导入时求值，且挂在 `decorator_list` 上，静态扫描看不到 | 判据收进 `fixtures`（`sample_*()` / `require_sample()` / `wine_ready()`），`test_phase1` 改为同名引用，另三个文件删掉模块级常量改用 `setUpClass`；缓存键带上环境变量现值。守卫从「守一个模块」扩到全仓 6 个文件，并补扫描 `decorator_list` + 加一条扫描范围守卫（防 glob 返回空集导致全绿）。负向验证：注回模块级求值 → 静态 2 条 + 动态哨兵 → 2 项红；注回装饰器 → 1 项红 |
+| launcher 在启动窗口内关不掉：信号「收下了」但没人执行 | 在 `runtime ready` 之后、`wine 已启动` 之前发 SIGTERM（固定延迟 0.8 / 1.0 / 1.2 秒各两次，**6/6 复现**）：日志写了「收到信号 15，正在停止 wine」，随后 `fontsub 已导入` 与 `wine 已启动` 照常出现，25 秒后进程仍在，只能 SIGKILL。日志本身完整、无异常 | ① `signal(sig, SIG_IGN)` 已吃掉默认处置；② handler 里是 `current?.terminate()`；③ 而 `current` 只由主程序登记，`FontSubstitution.apply` 里那次 `wine regedit /S`（实测约 3 秒）自己 new 了 `Process` 走 `waitUntilExit()`，**从不登记** → 空操作。第一版修法「记 pending」仍不通：主线程阻塞在 `waitUntilExit()` 里，走不到任何检查点 | 新增 `WineRunner.runChild` 作为全文件唯一的 `Process()`，`current` 语义从「主程序」改为「当前 wine 子进程」，apply 那次 regedit 也走它；handler 只调 `noteSignal(sig)`（先记再送达），不自己判空。`runChild` 返回 `Outcome` 枚举区分 `.stoppedBySignal` 与 `.finished(15)`，避免「被打断」被当成「导入失败」后仍启动主程序。顺带修正退出码：SIGINT/2、SIGTERM/15、SIGHUP/1 各自独立（修前一律 15）。5 项回归锁（假 wine 撑开窗口），两处负向验证各 3 项红 |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -3552,6 +3553,8 @@ except subprocess.TimeoutExpired:
 
 **⑦ 仍未验证的边界**：本节只证明「SIGTERM 会被转给 wine 且 launcher 能退出」。三个信号共用同一段代码，但实测只发了 SIGTERM。**wine 收到 SIGTERM 后是否把所有窗口状态写回 prefix**（`wineserver` 收尾的完整性）没有验证 —— 本机测的是 `notepad.exe`，它没有需要保存的状态；有状态的商业软件需实机确认。
 
+> **后续（2026-11-21）**：三个信号已逐个实测，各自都能在 0.18 秒内停下 —— 但这条路径本身在另一个窗口里是断的（信号落在 `FontSubstitution.apply` 期间会被静默吞掉），且三个信号的退出码此前一律是 15、无法区分。见 **15.22**。
+
 ### 15.15 prefix 半坏时打包照样「成功」（2026-11-20 实测，已修）
 
 **这一节记录的缺陷与 15.14 同族：打包流程一路绿灯、退出码 0、校验 10/10，产物却是双击毫无反应的 .app。**
@@ -4013,6 +4016,111 @@ RuntimeError: makensis 编译失败（退出码 0）：
 #### ⑦ 仍未处理
 
 (a) `test_phase2` 依然 `from tests.test_phase1 import build_min_pe` —— 已无副作用，但更彻底的做法是把这两个纯字节构造函数下沉到 `fixtures.py`，让测试模块之间不再互相导入；(b) CI 只跑 `discover`（字母序），不跑单类，顺序依赖在 CI 上永远是绿的 —— 值得加一条「单独跑每一个测试类」的作业；(c) `fixtures._SAMPLE_CACHE` 是进程级的，同一进程内若先构造、后被 `reset_sample_cache()` 清掉的顺序用错仍会拿到旧值。
+
+### 15.22 信号「收下了」但没人执行：launcher 在启动窗口内关不掉（2026-11-21 实测，已修）
+
+**这一节是 15.14 ⑦ 的处置。** 15.14 修了「信号源挂在 `.main` 队列」这个根因，但明确留了一条未验证：三个信号共用同一段代码，实测只发了 SIGTERM。本轮先试那条 —— 结果三个信号各自都正常（各 0.18 秒退出），**真正的问题在别处**：15.14 的所有用例都等到「wine 已启动」才发信号，恰好绕过了另一个更宽的窗口。
+
+#### ① 症状：日志写了「收到信号」，进程却照常把 wine 拉起来
+
+复现方式与 15.14 相同（真实 base 层 + 真实 wine + 真实 launcher），只改发信号的时机 —— 不等「wine 已启动」，固定延迟 0.8 / 1.0 / 1.2 秒各发两次：
+
+| 延迟 | 停了 | 耗时 | 日志里有「收到信号」 | 日志里有「wine 已启动」 |
+|---|---|---|---|---|
+| 0.8s | 否 | 25.0s | 是 | 否 |
+| 0.8s | 否 | 25.0s | 是 | 否 |
+| 1.0s | 否 | 25.0s | 是 | 否 |
+| 1.0s | 否 | 25.0s | 是 | 否 |
+| 1.2s | 否 | 25.0s | 是 | 否 |
+| 1.2s | 否 | 25.0s | 是 | 否 |
+
+**6/6 复现**。日志尾巴是这样的（完整、无异常）：
+
+```
+[04:59:18Z] launch start: .../Note (Win).app
+[04:59:18Z] app=Note entry=drive_c/windows/notepad.exe
+[04:59:18Z] runtime ready: .../runtime/wine/bin/wine64
+[04:59:18Z] 收到信号 15，正在停止 wine
+[04:59:21Z] fontsub 已导入 1 条替换        ← 注意时间戳：3 秒后
+[04:59:21Z] wine 已启动 pid=17638 → ...
+```
+
+用户按了 Ctrl-C，日志说「正在停止 wine」，然后 wine 照样起来了，并且此后**再也没有任何一行**。这个缺陷的形态与 15.14 不同：不是「信号没被收到」，而是「**收到了、也认了，但没人执行**」。
+
+#### ② 根因：`current` 是 nil 的那 3 秒
+
+信号源注册的位置是 `FontSubstitution.apply` **之前**，而 apply 里要跑一次 `wine regedit /S` 导入字体替换。这段时间：
+
+| 环节 | 状态 |
+|---|---|
+| `signal(sig, SIG_IGN)` | 已执行，SIGTERM 的默认处置**已被关掉** |
+| handler | 能执行，但代码是 `WineRunner.current?.terminate()` |
+| `WineRunner.current` | **nil** —— 主程序还没起，而 apply 里那个 regedit 自己 new 了 `Process`、走 `waitUntilExit()`，**从不登记** |
+
+于是 `current?.terminate()` 是空操作。日志那行「收到信号」是真的写了，然后什么都不发生。上面日志里 `wine 已启动` 晚 3 秒出现，正是 apply 里那次 regedit 的耗时。
+
+#### ③ 第二个问题：修「记 pending」还不够
+
+第一版修法是「handler 发现 `current == nil` 就记进 pending，主流程在启动 wine 前检查一次」。写完后回归锁**立刻判红**，而且判得对：主线程在 apply 里阻塞于 `waitUntilExit()`，**根本走不到那个检查点**。pending 被记下了，但没有任何人执行它 —— 从「信号被丢弃」变成「信号被存起来然后丢弃」。
+
+这也说明一件事：**光修 handler 不够，因为问题不在 handler，在于有一段代码绕过了统一登记。** 真正要修的是「`current` 只覆盖主程序」这个设计缺陷。
+
+#### ④ 修法：所有 wine 子进程收进一个入口
+
+| 改动 | 说明 |
+|---|---|
+| 新增 `WineRunner.runChild` | 唯一一处 `Process()`。登记 `current` → run → 轮询 → 清 `current` |
+| `FontSubstitution.apply` 改走 `runChild` | 那次 regedit 从此也有 `current`，信号有对象可停。轮询间隔 50ms（它只跑一两秒，要快） |
+| handler 只做一件事：`noteSignal(sig)` | 先记 pending，再尝试送达。**不自己判 `current == nil`** |
+| `runChild` 返回 `Outcome` 枚举 | `.finished(code)` / `.stoppedBySignal(sig)` / `.late` / `.failedToStart` |
+
+`Outcome` 不是装饰。早先返回裸 `Int32`，而「wine 自己以 15 退出」与「我们发信号停了它」的退出码是同一个 15 —— 调用方分不清该不该继续。实测过一次分叉：修完第一版后 regedit 被信号停掉，日志写 `WARN fontsub 导入退出码 15，界面字体可能显示为方块`（把「被打断」当成「字体导入失败」），然后**主程序照样被拉起来**。用户已经按了关，窗口又冒出来。
+
+`apply` 现在返回 `Bool`（是否因信号中止），`main` 据此直接 `exit(sig)`，不再启动主程序。
+
+#### ⑤ 顺带修掉一处退出码语义不一致
+
+修复前，同一个用户操作（关掉这个 app）会给出三个不同的码，取决于信号从哪条路走：
+
+| 场景 | 修前 | 修后 |
+|---|---|---|
+| SIGINT 停在窗口内 | 2（默认处置，趁 handler 还没注册完） | **2** |
+| SIGINT 停主程序 | **15**（wine 被 terminate，转成 15） | **2** |
+| SIGTERM 停主程序 | 15 | 15 |
+| SIGHUP 停主程序 | **15** | **1** |
+
+中间那两行是关键：三个信号 grep 的是同一段代码，但 `terminate()` 送的是 SIGTERM，于是 wine 一律以 15 退出，**Ctrl-C 和 kill -HUP 在退出码上与 SIGTERM 不可区分**。修后每个信号返回自己的值。实测三个信号各跑一次：`SIGINT → 2 / SIGTERM → 15 / SIGHUP → 1`，各 0.02–0.04 秒退出。
+
+#### ⑥ 回归锁：5 项，不用真实 wine
+
+缺陷出在「handler 到了、子进程还没有」这个**时序**上，与 wine 是什么无关。用一个「被调用就留痕、然后 sleep 120 秒」的假 wine 反而更好：窗口被撑到可控，不依赖真机上 apply 恰好耗时几秒，也不会在快机器上偶发通过。
+
+新增 `test_phase3.TestSignalDuringStartupWindow`（5 项）：
+
+| 用例 | 判据 |
+|---|---|
+| `test_sigterm_in_startup_window_stops_launcher` | 等在 `runtime ready`（信号源已注册、wine 未起）时发 SIGTERM：15 秒内退出、退出码 = 15、**哨兵里没有主程序那次调用** |
+| `test_sigint_in_startup_window_stops_launcher` | 同上，退出码 = 2 |
+| `test_pending_is_consumed_not_replayed` | `drainPending` 必须清 `pending`，不许每轮重复送 |
+| `test_handler_records_pending_when_no_child` | handler 必须调 `noteSignal`，且 `noteSignal` 真的写 `pending` |
+| `test_every_wine_child_goes_through_one_runner` | 全文件只许有**一处** `Process()` |
+
+最后一条是结构性的：只修「记 pending」而不统一入口，下次再加一个 wine 调用就会原样重现。它也是本缺陷的成因本身 —— 同一件事两套实现，宽松的那套（不登记）正好落在大窗口上（5.3 红线）。
+
+哨兵那条判据比退出码更硬：修复前信号被忽略后 launcher 照常拉起主程序，哨兵里有 `drive_c/App/app.exe`；修复后启动前就发现 pending，主程序**一次都不许被调用**。只允许 regedit 那次留痕（它发生在窗口之前）。
+
+#### ⑦ 负向验证（两处，均有效）
+
+| 注入 | 结果 |
+|---|---|
+| handler 退回 `WineRunner.current?.terminate()`（即只有「直接 terminate」，没有 pending） | **3 项红**：两条行为用例报「15 秒仍在」并给出日志尾，静态用例报 handler 未调 `noteSignal` |
+| `apply` 退回自己 new `Process` + `waitUntilExit()` | **3 项红**：两条行为用例报「15 秒仍在」（日志里能看到「已记下信号 15」，即信号被存下了但没人执行），静态用例报 `Process()` 出现 2 处 |
+
+还原后 5/5 绿。
+
+#### ⑧ 仍未处理
+
+(a) 只测了 SIGTERM 与 SIGINT 的窗口内路径，SIGHUP 同在 `signals` 数组里但没单独测（三条走同一段代码，风险低，但「同一段代码」这个理由在 15.14 已经被证明不可靠）；(b) `regedit` 被停掉意味着字体替换没生效，界面中文可能显示为方块 —— 这是有意的取舍（用户已经在关，不该为了字体再起一个进程），但**产品上没有提示**；(c) wine 收到 SIGTERM 后是否把所有窗口状态写回 prefix，仍未验证（同 15.14 ⑦）。
 
 ---
 

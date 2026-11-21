@@ -2195,6 +2195,7 @@ Wacmin/
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher（AppKit + Foundation）
 │   ├── tools/badge.swift      图标角标合成
+│   ├── tools/dwrite-probe/    DirectWrite 探针（槽位由 dwrite.h 生成，见 15.26）
 │   ├── runtime/fetch.sh       Wine 运行时下载脚本（免装 Python 包的入口）
 │   ├── schema/compat.schema.json
 │   ├── tests/
@@ -2403,13 +2404,13 @@ $INSTDIR/
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
 | mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 490 项 | 约 2 分 57 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径） |
+| exeonmac | 499 项 | 约 3 分 36 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、9 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 三组真实 wine 对照） |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1382 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1391 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -3062,6 +3063,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 契约缺 `3000` 段（运行时）的退出码声明 | `M2W_3001/3002/3003` 在代码里映射到退出码 5，而契约 `exit 5` 只声明 `2001/2002` | 契约文件维护滞后于实现：三个方向都预留了运行时错误码，mac2win 真的在用（Electron/NW.js 下载与架构校验），但没人回来补契约 | 本轮**未改契约**（改契约属于对外承诺变更，需人工确认），已在 15.9 列为待决项 |
 | 契约检查按钮在 click 里设 `disabled`，键盘回车当场丢焦点 | 鼠标点得动，键盘按回车后焦点掉到 `<body>`、读屏从头重念；要够到面板里的「关闭」得再按 12 次 Tab；关闭后同样掉回 `body`。前三段视口检查全绿 | `Enter` 是 keydown → click → keyup 三步，click 里设 `disabled` 让元素不再是焦点目标，浏览器把焦点退回文档根，紧随的 keyup 无处投递。程序化 `.click()` 没有后续 keyup，所以复现不出来，此前所有测试都绿着 | 防重入改用布尔量 + `aria-disabled`（只改语义、不改可聚焦性）；面板加 `tabindex="-1"` 并在检查完成后 `panel.focus()`；关闭时主动把焦点交回触发按钮。判据进 `viewport-check.mjs` 第 5 段，用真实按键 + 全程 `focusin`/`focusout` 轨迹判 |
 | launcher 收不到 SIGTERM，只能 `kill -9` | 关掉 ExeOnMac 产物时进程不退出；实测 SIGTERM 后 90 秒仍在运行，`launcher.log` 里连「收到信号」都没有 | `DispatchSource.makeSignalSource(queue: .main)`：`.main` 队列的 handler 由 **main run loop** 调度，而 `WineRunner.run` 用 `Thread.sleep(0.2)` 轮询子进程、一路不跑 run loop。`signal(sig, SIG_IGN)` 又把默认处置吃掉了，于是信号既不触发 handler 也不终止进程。**每个用例因此白等 60 秒兜底超时，测试还一直是绿的** | 信号源改挂独立串行队列（`DispatchQueue(label: "com.wexe.launcher.signal")`）。实测 SIGTERM 后 **0.19 秒**退出、日志出现「收到信号 15」与「wine 退出 status=15」；测试从 63.3 秒降到 3.1 秒。补两层守卫：`test_phase0` 静态断言队列不是 `.main`（防写法回退），`test_phase3` 断言「日志出现收到信号」+「20 秒内退出」（防行为回退），两者均做过负向验证 |
+| `wineserver -w` 被当成「注册表已落盘」 | 探针脚本导入 `.reg` 后立刻读 `user.reg`，命中 0 次，断言全红；而同一份注册表在 `reg query` 里查得到 | `wineserver -w` 只等**进程退出**，regedit 退出后 wineserver 仍以服务身份活着，不触发回写。`-w` 实测量到 0 处，`-k` 才 1 处 | 改成 `-k` 之后轮询文件内容直到出现键；判据不写死某个字面量，改为「本次 .reg 里所有值都在」，以免中文键名那一组被误判 |
 | 打包对「半坏 prefix」照样报成功 | `system.reg` / `user.reg` / `userdef.reg` 全删、或 `system32` 被清空、或 `dosdevices/c:` 换成普通文件之后，`wepack package` 仍 `EXIT=0`、`ok=true`、校验 10/10 全绿；而同一份 prefix 交给 wine 直接 `could not load kernel32.dll, status c0000135`（rc=53） | 装配侧第 7 项校验只断言 `Private/drive_c` **是个目录**。prefix 是否可用，`install` 侧一直用 `prefix.validate_prefix()` 判（五项），装配侧却另写了一套更宽松的判据 —— 同一条业务规则两套实现，宽松那套恰在最后一道关口上（§5.3 红线）。测试夹具也只建 `drive_c/App/`，造出来的 prefix 本身起不来，两边一起宽松所以永远绿 | 第 7 项改为调 `prefix.validate_prefix()`，项名 `prefix.drive_c` → `prefix.valid`，失败时逐项点名缺失。补 7 项回归锁（5 项判据 + 2 项 stdout 契约），注回旧判据 5 项全红。「健康判过」那条同时防矫枉过正。夹具按 `validate_prefix` 的最低要求造齐（system32 非空、`dosdevices/c:` 相对软链、三个 `.reg` 非空） |
 | 字体替换从未生效过 | 日志写「fontsub 已导入 2 条替换」，注册表里一个键都没有；界面中文显示为方块。而 `regedit /S` **退出码 0、stderr 空**，看不出任何异常 | `fontsub.reg` 用的是 wine **内部格式**（`WINE REGISTRY Version 2` + 双反斜杠键）。实测同一份内容：内部格式零键写入，导出格式两条都写进去。与第 7 轮 `install.suppress_restart` 同一根因（把导出格式当存储格式），当时只改 Python 侧、Swift 这份没被同一条判据扫到 | 改写为导出格式（`Windows Registry Editor Version 5.00` + 根键全名 + 单反斜杠）；导入后不再凭退出码判成功，改为「同一份 .reg 里写一枚 UUID 戳，查戳在不在」。补 5 项静态守卫，四处负向验证均有效。**注：根键当轮取 `HKEY_CURRENT_USER`，该值在第 12 轮被证明无效，见 15.24**。详见 15.23 |
 | 长路径断在词中间 | 页面不溢出、测试全绿，但 139 字符路径在 375px 下被断成 4–5 行，断点落在 `Framewo\|rks`、`dir\|ectory` 这类词正中间；三档合计 **15 处**（口径：断点两侧都属于 `[A-Za-z0-9._]`） | 为解决溢出用了 `overflow-wrap: anywhere`，它只在**任意字符之间**找断点，不利用 `/` `\\` `-` 这些天然边界；`.result-val` 还额外带 `word-break: break-all`，它**无视** `<wbr>` | 新增纯函数 `pathSegments()` 按分隔符切片、`app.js` 的 `writeText()` 逐片 `append(Text)` 并在分隔符后插 `<wbr>`，`el()` 统一走它；`.result-val` 的 `break-all` 换成 `overflow-wrap: anywhere`。修后三档 0 处。压测改为 `import('./app.js')` 调产品函数，否则压测量的是它自己 |
@@ -4430,7 +4432,69 @@ wine 已启动 pid=18519
 
 #### ⑧ 仍未处理
 
-(a) **人眼仍未确认字形质量** —— 15.24 到「选中的是苹方」，本轮到「DirectWrite 也认这个名字了」，但「笔画正常、无缺字」仍然只有人眼能判；(b) DirectWrite 的实际渲染结果（fallback 到哪张字模）未验，本轮只验了「家族名解析得到」；(c) 只验了 `Microsoft YaHei` 一个名字，其它字体族（宋体、黑体）未逐个验；(d) 探针在读取 `GetFamilyNames`（家族名字符串）时会 page fault，所以只取了 `FindFamilyName` 这一层的结果 —— 手写 COM vtable 的脆弱处，不影响本条结论（`exists` 与 `familyCount` 都已决定性），但「解析到的家族名是什么」这一层没有取到。
+(a) **人眼仍未确认字形质量** —— 15.24 到「选中的是苹方」，本轮到「DirectWrite 也认这个名字了」，但「笔画正常、无缺字」仍然只有人眼能判；(b) DirectWrite 的实际渲染结果（fallback 到哪张字模）未验，本轮只验了「家族名解析得到」；(c) 只验了 `Microsoft YaHei` 一个名字，其它字体族（宋体、黑体）未逐个验；(d) 探针在读取 `GetFamilyNames`（家族名字符串）时会 page fault，所以只取了 `FindFamilyName` 这一层的结果 —— 手写 COM vtable 的脆弱处，不影响本条结论（`exists` 与 `familyCount` 都已决定性），但「解析到的家族名是什么」这一层没有取到。**15.26 把探针收进仓库并给槽位加了生成式守卫，但仍绕开了这一层（改走 `GetFontCount` + `GetFaceNames`），(d) 未彻底解决**。
+
+### 15.26 探针从 `/tmp` 搬进仓库：结论能复核，槽位有守卫（2026-11-21 实测）
+
+15.25 的六组对照全部依赖一个现场手搓的 4 KB PE 探针，它当时只存在于 `/tmp/dwprobe/`。**跑完就没了，clone 下来的人无法复核任何一条结论** —— 而这正是 15.25 里最容易出错的那部分（手写 COM vtable 槽位，算错一个数字的症状是段错误或死循环）。
+
+本轮做三件事：把探针收进 `exeonmac/tools/dwrite-probe/`、让槽位由头文件生成、把「名字解析到了 ≠ 字画得出来」这一层也验掉。
+
+#### ① 槽位不再是手写数字
+
+`vtable.py` 从真实 SDK 的 `dwrite.h` 里机械抽出 7 个接口的方法声明顺序，展开成槽位表（`vtable.json`）并生成宏表（`vtable.h`），探针里只许写 `V(coll, DW_IDWriteFontCollection_FindFamilyName)`，不许出现裸数字（有静态守卫守着）。
+
+提取逻辑的关键一条：**派生接口必须累计基接口占用的槽位**。`IDWriteFontFamily : public IDWriteFontList`，后者占 slot 3–5，所以 `GetFamilyNames` 是 **6** 不是 3 —— 15.25 就是在这里错过一次。`--self-test` 用一份合成的假头文件守住这条，不需要 SDK，任何机器上都会真跑：
+
+```
+✓ 基接口 BaseCount: 3
+✓ 基接口 BaseGet: 4
+✓ 派生 DerivedFirst: 5     # = 3 + 基接口 2 个方法
+✓ 派生 DerivedSecond: 6
+✓ 派生接口可见基接口方法 BaseCount: 3
+```
+
+生成结果与 SDK 一致：`IDWriteFactory.GetSystemFontCollection` = 3、`IDWriteFontCollection.FindFamilyName` = 5、`IDWriteFontFamily.GetFamilyNames` = **6**、`IDWriteFont.GetFaceNames` = 8、`IDWriteFontFace.GetGlyphIndices` = 11。
+
+#### ② 编译不再依赖 SDK 缓存路径
+
+第一版 `build.sh` 从 `~/Library/Caches/cargo-xwin/xwin/unpack/…/lib/um/x64` 取 `dwrite.lib`。那是本机 cargo-xwin 的副产物，**别人机器上没有** —— 路径写死等于让这个工具只能在当前这台机器上编，报错还是「could not open 'dwrite.lib'」，读起来像缺组件。现改为现场用 `lld-link /lib /def:` 从 `imports.dwrite.def` / `imports.kernel32.def`（共 5 个符号）生成导入库，依赖只剩 Xcode 的 clang 与 rustup 的 rust-lld。
+
+#### ③ 新增「字形覆盖」判据（本轮唯一的实质推进）
+
+15.25 只到「`FindFamilyName` 返回 true」。但 `Replacements` 是**别名**语义：把一个没有中文字形的拉丁字体登记成「微软雅黑」，名字照样查得到，界面照样方块。所以探针现在走 `GetGlyphIndices`，对同一张字模查 `U+4E2D` 与 `U+9ED1`，判据是**下标非 0**（0 是 `.notdef` 缺字框 —— 缺字时调用同样返回 `S_OK`，只看 HRESULT 会把缺字判成有字）。
+
+三组对照（每组从 base 层重新 clone、只改注册表；`cp -cR` clonefile，单组约 10 秒）：
+
+| 组 | 写入位置 | `familyCount` | `Microsoft YaHei` | `faceCount` | `U+4E2D` |
+|---|---|---|---|---|---|
+| N | 都不写 | 292 | 否 | — | — |
+| S | `HKLM\...\FontSubstitutes` | 292 | 否 | — | — |
+| R | `HKCU\Software\Wine\Fonts\Replacements` | **293** | **是** | 12 | **present** |
+
+另跑两组补充：**中文键名**（写「微软雅黑」→ 中文名 exists=1、英文名 exists=0，说明别名不会同时登记两种写法）与**两条同写**（293 / 是，与只写 R 相同 —— GDI 那条对 DirectWrite 是纯冗余，但 GDI 需要它）。`PingFang SC` 在三组里都存在且有中文字形，这排除了「差别来自找不到苹方」这个替代解释。
+
+#### ④ 两个必踩的坑，脚本里各有一处注释
+
+- **`regedit` 不认宿主绝对路径**：传 `/tmp/x.reg` 报 `ShellExecuteEx failed`，必须转成 `z:/tmp/x.reg`。
+- **`wineserver -w` 不等于「落盘了」**：它只等进程退出，regedit 退出后 wineserver 仍以服务身份活着、不回写。实测 `-w` 之后 `user.reg` 命中 0 次、`-k` 之后 1 次。脚本改成 `-k` 后轮询文件内容直到出现键。
+
+#### ⑤ 守卫 9 项（分三层，全部负向验证过）
+
+| 层 | 断言 | 负向验证 |
+|---|---|---|
+| 槽位 | 自检（派生接口累计基接口） | 改 `--self-test` 期望值 → 红 |
+| 槽位 | `vtable.h` 与 `vtable.json` 逐槽一致 | 把 `GetFamilyNames` 改成 3 → **1 项红** |
+| 静态 | `V()` 第二个实参只许 `DW_` 宏 | 改成裸 `6` → **1 项红** |
+| 静态 | 必须查字形覆盖且判据是「下标非 0」 | 换成 `GetType` + 查 `0x0042` → **1 项红** |
+| 静态 | `build.sh` 不许指回 SDK 缓存 | 写回 `unpack/Win11SDK` → **1 项红** |
+| 运行时 | N 组：292 / 查不到 / 苹方在 | 把 R 组的 reg 换成 S 组那份 → 断言必然不成立（实测 292 / 否） |
+| 运行时 | S 组：292 / 查不到（且先断言 HKLM 真写进去了） | 同上 |
+| 运行时 | R 组：293 / 查得到 / `faceCount`=12 / 两个中文字形 present | 同上 |
+
+#### ⑥ 仍未处理
+
+(a) **`GetFamilyNames` 层仍会 page fault** —— 15.25 遗留 (d) 未解决。本轮改为先 `GetFontCount` 判「有没有字面」、再 `GetFont(0)` → `GetFaceNames`，绕开了家族名那一层；`faceCount` 与字形覆盖已经能决定性地区分「有字模」与「只有名字」，但「DirectWrite 解析到的家族名到底是什么字符串」这一层仍然取不到；(b) 渲染层仍未验（本轮验的是「DirectWrite 说这张字模里有 U+4E2D 的字形」，不是「屏幕上画出来了」），仍只有人眼能判；(c) 只验了微软雅黑与宋体两个键名，黑体、等线等未逐个验。
 
 
 ---

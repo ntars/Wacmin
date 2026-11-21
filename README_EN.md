@@ -2195,6 +2195,7 @@ Wacmin/
 │   │   └── models.py / errors.py / paths.py / log.py
 │   ├── launcher/              Swift launcher (AppKit + Foundation)
 │   ├── tools/badge.swift      Icon badge composition
+│   ├── tools/dwrite-probe/    DirectWrite probe (slots generated from dwrite.h, see 15.26)
 │   ├── runtime/fetch.sh       Wine runtime download script (entry point without installing the Python package)
 │   ├── schema/compat.schema.json
 │   ├── tests/
@@ -2404,13 +2405,13 @@ Performance in each direction is determined by its foundation; this project only
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
 | mac2win | 167 | about 28 seconds | |
-| exeonmac | 490 | about 2m57s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths) |
+| exeonmac | 499 | about 3m36s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine) and 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), and 9 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / three real-wine arms) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1382** | — | See "0 skipped repository-wide" below |
+| **Total** | **1391** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -3041,6 +3042,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | `win2mac --strict-host` produces a self-contradictory report | `--strict-host` exits 2 with `W2M_1001`, but none of the contract's 13 exit codes declares 1001 | It threw `HOST_UNSUPPORTED` (1001) and `exitCodeFor` fell back to 2 by segment. The user reads "bad argument" and hunts for a path typo, while the real cause is "this machine cannot do this" | Throw `UNSUPPORTED` (1005 → exit code 4, explicitly unsupported). `doctor`'s failure code changed for the same reason to `TOOL_OUTDATED` (2002 → exit code 5; the only way doctor fails is an old Node). The same defect in `apponwin doctor` was fixed too |
 | Contract lacks an exit-code declaration for segment `3000` (runtime) | `M2W_3001/3002/3003` map to exit code 5 in code while contract `exit 5` only declares `2001/2002` | The contract file lags behind the implementation: all three directions reserve runtime codes and mac2win genuinely uses them (Electron/NW.js download and architecture checks), but nobody came back to update the contract | The contract was **not** changed this round (changing it alters an external promise and needs human sign-off); tracked in 15.9 |
 | launcher never receives SIGTERM, `kill -9` is the only way out | Closing an ExeOnMac bundle leaves the process running: 90 seconds after SIGTERM it was still alive and `launcher.log` did not even contain "signal received" | `DispatchSource.makeSignalSource(queue: .main)`: handlers on the `.main` queue are dispatched by the **main run loop**, while `WineRunner.run` polls the child with `Thread.sleep(0.2)` and never runs a run loop. `signal(sig, SIG_IGN)` also swallowed the default disposition, so the signal neither fired the handler nor terminated the process. **Every test case therefore burned 60 seconds in a fallback timeout while staying green** | Signal sources moved to a dedicated serial queue (`DispatchQueue(label: "com.wexe.launcher.signal")`). Measured: exit **0.19 s** after SIGTERM, with "received signal 15" and "wine exit status=15" in the log; the case dropped from 63.3 s to 3.1 s. Two guards added: `test_phase0` statically asserts the queue is not `.main` (blocks a code-level regression), `test_phase3` asserts both "signal received is logged" and "exits within 20 s" (blocks a behaviour-level regression) |
+| `wineserver -w` treated as "the registry has been flushed" | The probe script read `user.reg` right after importing a `.reg` and found 0 hits, so every assertion went red — yet the same registry was readable via `reg query` | `wineserver -w` only waits for the **process** to exit; after regedit exits, wineserver keeps running as a service and does not write back. Measured 0 hits after `-w`, 1 after `-k` | Do `-k` and then poll the file contents until the keys appear; the criterion does not hard-code a literal but requires **every** value from that `.reg` to be present, so the Chinese-key-name arm is not misjudged |
 | Packaging reports success on a half-broken prefix | After deleting `system.reg` / `user.reg` / `userdef.reg`, or emptying `system32`, or replacing `dosdevices/c:` with a regular file, `wepack package` still returns `EXIT=0`, `ok=true` and 10/10 green; the same prefix handed to wine dies with `could not load kernel32.dll, status c0000135` (rc=53) | Item 7 of the packaging verifier only asserted that `Private/drive_c` **is a directory**. The install side has always judged prefix usability with `prefix.validate_prefix()` (five conditions); the packaging side wrote a second, looser predicate — one business rule with two implementations, and the loose one sat on the last gate (§5.3 red line). The test fixture also only created `drive_c/App/`, so its own prefix could not boot; both sides loose kept it green forever | Item 7 now calls `prefix.validate_prefix()`; the check was renamed `prefix.drive_c` → `prefix.valid` and names every missing item. 7 regression locks added (5 predicate + 2 stdout contract); injecting the old predicate turns 5 red. The "healthy prefix must pass" case guards against over-correction. The fixture now meets `validate_prefix`'s minimum (non-empty system32, relative-symlink `dosdevices/c:`, three non-empty `.reg`) |
 | `package --json` emits two JSON documents on failure | `wepack package <bad app> --json` writes "full payload + main's error document" to stdout; `json.load` throws `Extra data: line 79` and piping to `jq` fails outright | `cmd_package` always `_emit(payload)` before `raise VerifyFailed`. Same cause as the `build --json` two-document defect fixed in W-02, but inside a single subcommand instead of between parent and child | Now checks `report.ok` first: on failure only `main()` emits one error document (with `message` and `exit_code`); detailed checks go to stderr and `--report`. `raw_decode` measured 2 documents before, 1 after; 2 regression locks, red when the old order is injected |
 | A test module compiles an installer at import, and a whole class vanishes silently | Running one test class (`python3 -m unittest tests.test_phase2.TestCliPhase2`) gives `FAILED (errors=2)` and `RuntimeError: ISCC 编译失败（退出码 0）：` with an **empty** detail; a full `discover` run in alphabetical order stayed green | `test_phase1.py` evaluates `REAL_INNO = str(fixtures.demo_inno_real() or "")` at **module top level**, so importing compiles an installer; `test_phase2` imports `tests.test_phase1` merely to borrow two pure byte builders, and its `setUp` has already pointed `WEXE_HOME` at a temp dir containing a fake wine that only does `exit 0` → ISCC is "run" by the fake wine, compiles nothing, exits cleanly | The four sample constants became lazy functions (cached per process) and the four classes use `setUpClass` + `require_sample()`, raising `SkipTest` when unavailable. Decorators evaluate at import time; `setUpClass` only when the test really runs — that is the dividing line. The "exit 0 but no artifact" message is now separate from "compilation failed", so the failure states which kind it is. Two guards added (subprocess sentinel + `ast` scan of the module body); negative check: inject the constant back → both turn red |
@@ -4409,7 +4411,69 @@ All green after restore.
 
 #### ⑧ Still open
 
-(a) **Glyph quality still not eyeballed** — 15.24 got to "PingFang is selected", this round to "DirectWrite recognises that name too", but "the strokes look right and nothing is missing" remains a human judgement; (b) DirectWrite's actual rendering result (which face it falls back to) is unverified — this round only verified that the family name resolves; (c) only `Microsoft YaHei` was tested, other families (SimSun, SimHei) were not checked one by one; (d) the probe page-faults when reading `GetFamilyNames` (the family name strings), so only the `FindFamilyName` layer was taken — a fragile spot in hand-rolled COM vtables, which does not affect the conclusion (`exists` and `familyCount` are both decisive), but the "which family name did it resolve to" layer was not captured.
+(a) **Glyph quality still not eyeballed** — 15.24 got to "PingFang is selected", this round to "DirectWrite recognises that name too", but "the strokes look right and nothing is missing" remains a human judgement; (b) DirectWrite's actual rendering result (which face it falls back to) is unverified — this round only verified that the family name resolves; (c) only `Microsoft YaHei` was tested, other families (SimSun, SimHei) were not checked one by one; (d) the probe page-faults when reading `GetFamilyNames` (the family name strings), so only the `FindFamilyName` layer was taken — a fragile spot in hand-rolled COM vtables, which does not affect the conclusion (`exists` and `familyCount` are both decisive), but the "which family name did it resolve to" layer was not captured. **15.26 moved the probe into the repository and added generated guards for the slots, but still routes around that layer (via `GetFontCount` + `GetFaceNames`) — (d) is not fully resolved.**
+
+### 15.26 The probe moves out of `/tmp`: conclusions become reviewable, slots get a guard (measured 2026-11-21)
+
+Every one of 15.25's six arms depended on a 4 KB PE probe hand-built on the spot, and it lived only in `/tmp/dwprobe/`. **It vanished when the run ended, so nobody cloning this repository could re-check any of those conclusions** — and that is exactly the part of 15.25 most likely to be wrong (hand-written COM vtable slots, where one wrong number shows up as a segfault or a hang).
+
+This round does three things: move the probe into `exeonmac/tools/dwrite-probe/`, make the slots generated from the header, and verify the "the name resolves" → "the face really has the glyph" step that was previously missing.
+
+#### ① Slots are no longer hand-written numbers
+
+`vtable.py` mechanically extracts the 7 relevant interfaces from the real SDK's `dwrite.h` in declaration order, expands them into a slot table (`vtable.json`) and generates a macro header (`vtable.h`). The probe may only write `V(coll, DW_IDWriteFontCollection_FindFamilyName)`; bare numbers are rejected by a static guard.
+
+One critical rule in the extraction: **a derived interface accumulates the slots its base occupies**. `IDWriteFontFamily : public IDWriteFontList`, and the latter takes slots 3–5, so `GetFamilyNames` is **6**, not 3 — the exact mistake 15.25 made. `--self-test` guards this with a synthetic header, needs no SDK, and therefore really runs on any machine:
+
+```
+✓ base BaseCount: 3
+✓ base BaseGet: 4
+✓ derived DerivedFirst: 5     # = 3 + the base's two methods
+✓ derived DerivedSecond: 6
+✓ derived interface sees base method BaseCount: 3
+```
+
+The generated table matches the SDK: `IDWriteFactory.GetSystemFontCollection` = 3, `IDWriteFontCollection.FindFamilyName` = 5, `IDWriteFontFamily.GetFamilyNames` = **6**, `IDWriteFont.GetFaceNames` = 8, `IDWriteFontFace.GetGlyphIndices` = 11.
+
+#### ② Compilation no longer depends on an SDK cache path
+
+The first `build.sh` pulled `dwrite.lib` from `~/Library/Caches/cargo-xwin/xwin/unpack/…/lib/um/x64`. That is a by-product of cargo-xwin **on this machine only** — hard-coding it means the tool compiles on exactly one computer, and the failure reads `could not open 'dwrite.lib'`, which looks like a missing component. It now generates the import libraries on the spot with `lld-link /lib /def:` from `imports.dwrite.def` / `imports.kernel32.def` (5 symbols total). Remaining dependencies: Xcode's clang and rustup's rust-lld.
+
+#### ③ A new "glyph coverage" criterion (the only substantive advance this round)
+
+15.25 stopped at "`FindFamilyName` returned true". But `Replacements` uses **alias** semantics: register a Latin font with no Chinese glyphs under the name "Microsoft YaHei" and the name still resolves while the UI still shows tofu. So the probe now calls `GetGlyphIndices` for `U+4E2D` and `U+9ED1` on the same face, and the criterion is **a non-zero glyph index** (0 is `.notdef`; a missing glyph also returns `S_OK`, so checking HRESULT alone would call tofu a success).
+
+Three arms (each cloned fresh from the base layer, only the registry differs; `cp -cR` clonefile, ~10 s per arm):
+
+| Arm | Written to | `familyCount` | `Microsoft YaHei` | `faceCount` | `U+4E2D` |
+|---|---|---|---|---|---|
+| N | nothing | 292 | no | — | — |
+| S | `HKLM\...\FontSubstitutes` | 292 | no | — | — |
+| R | `HKCU\Software\Wine\Fonts\Replacements` | **293** | **yes** | 12 | **present** |
+
+Two extra arms: **Chinese key names** (writing 微软雅黑 → Chinese name exists=1, English name exists=0, so the alias does not register both spellings) and **both keys written** (293 / yes, identical to R alone — the GDI key is pure redundancy for DirectWrite but GDI needs it). `PingFang SC` exists with Chinese glyphs in all three arms, ruling out "the difference is that PingFang was missing".
+
+#### ④ Two traps, each documented where it bites
+
+- **`regedit` rejects host absolute paths**: passing `/tmp/x.reg` yields `ShellExecuteEx failed`; it must be `z:/tmp/x.reg`.
+- **`wineserver -w` does not mean "flushed"**: it only waits for the process to exit, and wineserver keeps running as a service afterwards without writing back. Measured: `-w` leaves 0 hits in `user.reg`, `-k` leaves 1. The script now does `-k` and then polls the file contents until the keys appear.
+
+#### ⑤ Nine guards in three layers, all negatively verified
+
+| Layer | Assertion | Negative verification |
+|---|---|---|
+| Slots | self-test (derived accumulates base) | change the expected value → red |
+| Slots | `vtable.h` matches `vtable.json` slot by slot | set `GetFamilyNames` to 3 → **1 red** |
+| Static | second `V()` argument must be a `DW_` macro | bare `6` → **1 red** |
+| Static | glyph coverage must be queried, criterion "index non-zero" | swap in `GetType` and `0x0042` → **1 red** |
+| Static | `build.sh` must not point back at the SDK cache | restore `unpack/Win11SDK` → **1 red** |
+| Runtime | arm N: 292 / not found / PingFang present | feed arm R the S registry file → the assertion cannot hold (measured 292 / no) |
+| Runtime | arm S: 292 / not found (after asserting HKLM really got written) | as above |
+| Runtime | arm R: 293 / found / `faceCount`=12 / both Chinese glyphs present | as above |
+
+#### ⑥ Still open
+
+(a) **`GetFamilyNames` still page-faults** — 15.25's item (d) is unresolved. This round sidesteps it by checking `GetFontCount` for "are there faces", then `GetFont(0)` → `GetFaceNames`; `faceCount` plus glyph coverage now decisively separates "has a face" from "name only", but "which family-name string DirectWrite resolved to" is still not captured; (b) the rendering layer is still unverified (this round proves DirectWrite says the face contains U+4E2D, not that it is drawn on screen) — still a human judgement; (c) only the YaHei and SimSun key names were tested; SimHei and DengXian were not checked one by one.
 
 
 ---

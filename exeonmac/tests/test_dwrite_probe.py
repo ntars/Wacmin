@@ -385,6 +385,10 @@ class TestRegistryLandingGuard(unittest.TestCase):
 class TestDirectWriteRuntime(unittest.TestCase):
     """真跑 wine 的三组对照：DirectWrite 只认 HKCU 那条键。
 
+    家族数不写死成 292：不同 macOS 版本暴露给 wine 的宿主字体集合不同，
+    同一个 base 层在不同机器上可以是 225 / 226 / 292。这里守的是差分
+    不变量：S 组与 N 组相等、R 组比 N 组恰好多一个别名家族。
+
     ## 为什么三组都要跑，而不是只跑「有效」那一组
 
     只跑 R 组（写 Replacements）能证明「写了就有效」，但证明不了「不写就无效」——
@@ -418,6 +422,16 @@ class TestDirectWriteRuntime(unittest.TestCase):
     def _run(self, group: str, reg: Path | None) -> dict:
         return load_runner().run_group(group, reg, keep_prefix=False)
 
+    _baseline_family_count: int | None = None
+
+    def _baseline_count(self) -> int:
+        """当前宿主上的空前缀家族数；只跑一次，后续用例复用。"""
+        if type(self)._baseline_family_count is None:
+            result = self._run("N", None)
+            self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
+            type(self)._baseline_family_count = result["familyCount"]
+        return type(self)._baseline_family_count
+
     def test_baseline_does_not_know_the_name(self) -> None:
         """什么都不写：DirectWrite 的集合里没有「微软雅黑」，`PingFang SC` 在。
 
@@ -426,13 +440,14 @@ class TestDirectWriteRuntime(unittest.TestCase):
         """
         result = self._run("N", None)
         self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
-        self.assertEqual(result["familyCount"], 292,
-                         "base 层的字体家族数变了；家族数变化会让下一条的差分成噪声")
+        type(self)._baseline_family_count = result["familyCount"]
+        self.assertGreater(result["familyCount"], 0,
+                           "base 层没暴露任何字体家族；后续差分没有意义")
         self.assertFalse(result["families"]["Microsoft YaHei"]["exists"])
         self.assertTrue(result["families"]["PingFang SC"]["exists"])
 
     def test_font_substitutes_alone_has_no_effect_on_directwrite(self) -> None:
-        """只写 `HKLM\\...\\FontSubstitutes`：家族数仍 292、名字仍查不到。
+        """只写 `HKLM\\...\\FontSubstitutes`：家族数不变、名字仍查不到。
 
         这是第 12 轮修法（GDI 那条）对现代软件零作用的直接证据。若哪天 wine 把
         两条路径合并，这条会红 —— 那就该重新评估还要不要写第二条键。
@@ -441,7 +456,8 @@ class TestDirectWriteRuntime(unittest.TestCase):
         self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
         self.assertTrue(result["registry"]["system.reg"],
                         "本组的前提是「HKLM 里确实写进去了」，落盘检查失败则本组无意义")
-        self.assertEqual(result["familyCount"], 292)
+        self.assertEqual(result["familyCount"], self._baseline_count(),
+                         "FontSubstitutes 不该改变 DirectWrite 家族数")
         self.assertFalse(result["families"]["Microsoft YaHei"]["exists"])
 
     def test_replacements_makes_the_name_resolve_with_chinese_glyphs(self) -> None:
@@ -456,7 +472,8 @@ class TestDirectWriteRuntime(unittest.TestCase):
         self.assertTrue(result["ok"], f"探针没给出结论：{result.get('raw')}")
         self.assertTrue(result["registry"]["user.reg"],
                         "本组的前提是「HKCU 里确实写进去了」")
-        self.assertEqual(result["familyCount"], 293)
+        self.assertEqual(result["familyCount"], self._baseline_count() + 1,
+                         "Replacements 应只新增一个别名家族；差分数不对说明前缀被污染")
         family = result["families"]["Microsoft YaHei"]
         self.assertTrue(family["exists"], "Replacements 写进去后 DirectWrite 应认得这个名字")
         self.assertEqual(family["faces"], 12,

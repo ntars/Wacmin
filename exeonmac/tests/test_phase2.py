@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1332,18 +1333,26 @@ class TestRestartSuppressionTakesEffect(IsolatedWexe):
         self.assertNotIn("reboot.suppressed", joined)
 
     def test_effective_import_logs_info(self) -> None:
-        """回查得到 NoClose 时必须走 INFO —— 防矫枉过正。"""
+        """回查得到本次戳与 NoClose 时必须走 INFO —— 防矫枉过正。
+
+        假 wine 要**按被查的键分别作答**：戳那条键回本次 token，策略键回
+        `NoClose`。早先这里对任意键都吐同一段 `NoClose` 输出，于是判据
+        加严（要求戳）后它必然红 —— 那是夹具太粗，不是判据过严。
+        """
         from wepack.install import suppress_restart
         from wepack.install import _Log
 
+        token = "fixed-token-for-fake-wine"
         bin_dir = wexe_paths.wine_root() / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         script = bin_dir / "wine64"
         script.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "reg" ]; then\n'
-            "  echo 'HKEY_CURRENT_USER\\\\\\\\Software\\\\\\\\...\\\\\\\\Explorer'\n"
-            "  echo '    NoClose    REG_DWORD    0x0'\n"
+            f'  case "$3" in\n'
+            f'    *ExeOnMac*) echo "    RestartSuppressStamp    REG_SZ    {token}" ;;\n'
+            f'    *) echo "    NoClose    REG_DWORD    0x0" ;;\n'
+            f"  esac\n"
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -1356,11 +1365,233 @@ class TestRestartSuppressionTakesEffect(IsolatedWexe):
         create_prefix(private, layers=["base"])
 
         log = _Log(None)
-        suppress_restart(private, log)
+        suppress_restart(private, log, token=token)
 
         joined = "\n".join(log.lines)
         self.assertIn("reboot.suppressed", joined)
         self.assertNotIn("reboot.suppress_ineffective", joined)
+
+
+class TestRestartStampCatchesStaleKey(IsolatedWexe):
+    """「键早就在」不许被读成「这次写进去了」。
+
+    ## 这条守的是第 17 轮实测出的假阳性（2026-11-22）
+
+    旧回查是「`reg query` 目标键、输出里有 `NoClose` 即成功」。真实
+    wine-11.21 实测：先正确导入一次让键存在，再用 wine 内部格式导一次
+    （`regedit /S` 退出码 0、stderr 空、零写入），`reg query` 仍报
+    `rc=0` 且有 `NoClose` —— 旧判据判成功、日志写 `INFO reboot.suppressed`，
+    而本次一个键都没写。
+
+    base 层自带的 `user.reg` 里 `NoClose` / `NoRun` /
+    `NoDriveTypeAutoRun` 各 **0** 次，所以新建 prefix 上不会误判；
+    但**第二次安装**会，而那才是最常见场景。
+
+    与第 11 轮 launcher 的 `FontSubstitutionStamp` 同根因、同修法，
+    当时只修了 launcher 一侧。
+    """
+
+    def _fake_wine_always_has_key(self, token: str) -> Path:
+        """假 wine：目标键永远答「有 NoClose」，但戳永远答上一轮那个值。
+
+        这正是「上一次安装写成功了、这一次没有」的形态。
+        """
+        bin_dir = wexe_paths.wine_root() / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        script = bin_dir / "wine64"
+        script.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "reg" ]; then\n'
+            '  case "$3" in\n'
+            '    *ExeOnMac*) echo "    RestartSuppressStamp    REG_SZ    STALE-OLD-TOKEN" ;;\n'
+            '    *) echo "    NoClose    REG_DWORD    0x0" ;;\n'
+            "  esac\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return script
+
+    def test_stale_stamp_is_not_success(self) -> None:
+        from wepack.install import suppress_restart
+        from wepack.install import _Log
+
+        self._fake_wine_always_has_key("fresh")
+        make_fake_layer(wexe_paths.layers_root(), "base")
+        private = self.tmp / "private"
+        create_prefix(private, layers=["base"])
+
+        log = _Log(None)
+        suppress_restart(private, log, token="THIS-RUN-TOKEN")
+
+        joined = "\n".join(log.lines)
+        self.assertIn("reboot.suppress_ineffective", joined,
+                      "戳是上一轮的，必须判失败")
+        self.assertNotIn("reboot.suppressed", joined)
+
+    def test_stamp_value_must_match_exactly(self) -> None:
+        """戳对得上才算 —— 防「输出里出现过」这种软判据。"""
+        from wepack.install import _query_has_stamp
+
+        token = "abc123"
+        good = f"    RestartSuppressStamp    REG_SZ    {token}"
+        self.assertTrue(_query_has_stamp(good, token))
+        # 前缀相同但值不同
+        self.assertFalse(_query_has_stamp(
+            "    RestartSuppressStamp    REG_SZ    abc1234", token))
+        # 值出现在键路径里，不在值的位置
+        self.assertFalse(_query_has_stamp(
+            'HKEY_CURRENT_USER\\Software\\Wine\\ExeOnMac\\abc123\n'
+            "    Other    REG_SZ    x", token))
+        # 类型不是 REG_SZ
+        self.assertFalse(_query_has_stamp(
+            f"    RestartSuppressStamp    REG_DWORD    {token}", token))
+        # 值名不是戳的值名
+        self.assertFalse(_query_has_stamp(
+            f"    FontSubstitutionStamp    REG_SZ    {token}", token))
+        # 空 token 不许判真
+        self.assertFalse(_query_has_stamp(good, ""))
+
+    def test_reg_text_writes_stamp_in_one_file(self) -> None:
+        """戳与策略键必须在同一份 `.reg`、只生成一份文本。
+
+        分两次导入会让「戳进去了、策略键没进去」这种半成品无人察觉 ——
+        与 launcher 第 13 轮「两条字体键必须同文件」同一条规则。
+        """
+        from wepack.install import (RESTART_POLICY_KEY, RESTART_STAMP_KEY,
+                                    RESTART_STAMP_VALUE, restart_reg_text)
+
+        text = restart_reg_text("t-1")
+        self.assertEqual(text.count("Windows Registry Editor Version 5.00"), 1)
+        self.assertIn(f"[{RESTART_POLICY_KEY}]", text)
+        self.assertIn(f"[{RESTART_STAMP_KEY}]", text)
+        self.assertIn(f'"{RESTART_STAMP_VALUE}"="t-1"', text)
+        self.assertNotIn("WINE REGISTRY", text)
+
+    def test_stamp_key_is_not_a_policy_key(self) -> None:
+        """戳不许写进策略键里 —— 那会被 Windows 软件看到，也会污染回查。"""
+        from wepack.install import RESTART_POLICY_KEY, RESTART_STAMP_KEY
+
+        self.assertNotEqual(RESTART_STAMP_KEY, RESTART_POLICY_KEY)
+        self.assertFalse(RESTART_STAMP_KEY.startswith(RESTART_POLICY_KEY))
+        # 必须落在 wine 自有命名空间下
+        self.assertTrue(RESTART_STAMP_KEY.startswith(
+            "HKEY_CURRENT_USER\\Software\\Wine\\"))
+
+    def test_token_is_fresh_each_call(self) -> None:
+        """不传 token 时，两次调用必须产生不同的戳 —— 固定值会被上一轮蒙中。
+
+        ## 初版这条是空转（发现的当场改掉）
+
+        初版断言 `restart_reg_text("a") != restart_reg_text("b")`：**两个入参
+        本来就不同**，无论默认戳是不是常量，这条都成立。它测的是「字面量被
+        原样拼进文本」，跟「戳会不会重复」没有关系。
+
+        改成直接看默认值的来源：`_new_token()` 连续两次必须不同，且长度是
+        uuid4 的 32 位十六进制。
+        """
+        from wepack.install import _new_token
+
+        a, b = _new_token(), _new_token()
+        self.assertNotEqual(a, b)
+        self.assertEqual(len(a), 32)
+        self.assertTrue(all(c in "0123456789abcdef" for c in a))
+
+    def test_written_file_actually_contains_the_token(self) -> None:
+        """落盘文件里必须真有本次 token。
+
+        ## 这条补的是一个盲区（负向验证当场暴露）
+
+        前三项守卫都靠假 wine「按剧本作答」，假 wine 不读磁盘上的 `.reg`。
+        于是把 `suppress_restart` 改成「只写策略键、不写戳」时，假 wine 照旧
+        回答「戳在」，5 项测试**全绿** —— 判据被测对象绕过去了。
+
+        改成读真实落盘文件，同一次篡改立刻红。**假实现能证明判据的逻辑，
+        证明不了被测代码真的写了那些字节**，两者都要有。
+        """
+        from wepack.install import suppress_restart
+
+        self._fake_wine_always_has_key("x")
+        make_fake_layer(wexe_paths.layers_root(), "base")
+        private = self.tmp / "private"
+        create_prefix(private, layers=["base"])
+
+        reg = suppress_restart(private, token="FILE-CHECK-TOKEN")
+        text = reg.read_bytes().decode("utf-16-le")
+        self.assertIn('"RestartSuppressStamp"="FILE-CHECK-TOKEN"', text)
+        self.assertIn("NoClose", text)
+        self.assertIn("Windows Registry Editor Version 5.00", text)
+
+
+class TestRestartStampRealWine(unittest.TestCase):
+    """真实 wine 上验「戳确实落盘且可逐字查回」。
+
+    只有这一层能证明 `.reg` 里的戳与 `reg query` 读到的戳是同一个 ——
+    假 wine 只是按剧本作答，它证明不了格式对不对。
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if not fixtures.wine_ready():
+            raise unittest.SkipTest("需要真实 wine 运行时")
+        if not fixtures.base_layer_available():
+            raise unittest.SkipTest("需要真实 base 层")
+
+    def test_stamp_lands_and_reads_back_verbatim(self) -> None:
+        import subprocess
+        import time
+
+        from wepack import paths as wexe_paths
+        from wepack.install import (RESTART_POLICY_KEY, RESTART_STAMP_KEY,
+                                    RESTART_STAMP_VALUE, _policy_imported,
+                                    _query_has_stamp, _wine_env,
+                                    restart_reg_text, wine_binary)
+        from wepack.prefix import create_prefix
+
+        base = wexe_paths.layers_root() / "base"
+        self.assertTrue(base.is_dir(), f"base 层不存在：{base}")
+
+        token = "r17-" + uuid.uuid4().hex
+        with tempfile.TemporaryDirectory(prefix="exeonmac-r17-") as tmp:
+            private = Path(tmp) / "private"
+            create_prefix(private, layers=["base"])
+
+            wine = wine_binary()
+            env = _wine_env(private)
+            reg = private / "exeonmac-suppress-restart.reg"
+            reg.write_bytes(b"\xff\xfe" + restart_reg_text(token).encode("utf-16-le"))
+            result = subprocess.run(
+                [str(wine), "regedit", "/S", str(reg)],
+                env=env, capture_output=True, text=True, timeout=180)
+            self.assertEqual(result.returncode, 0,
+                             f"regedit 失败：{result.stderr[:300]}")
+
+            # 轮询：注册表可能还在 wineserver 内存里
+            deadline = time.time() + 20
+            found = False
+            while time.time() < deadline:
+                query = subprocess.run(
+                    [str(wine), "reg", "query", RESTART_STAMP_KEY],
+                    env=env, capture_output=True, text=True, timeout=120)
+                if query.returncode == 0 and _query_has_stamp(
+                        query.stdout or "", token):
+                    found = True
+                    break
+                time.sleep(0.5)
+            self.assertTrue(found,
+                            f"20 秒内没查到本次戳 {token}：{query.stdout[:300]}")
+
+            # 目标策略键也必须真在
+            policy = subprocess.run(
+                [str(wine), "reg", "query", RESTART_POLICY_KEY],
+                env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(policy.returncode, 0)
+            self.assertIn("NoClose", policy.stdout or "")
+
+            # 两层合起来才算成功
+            self.assertTrue(_policy_imported(wine, env, token))
 
 
 # --------------------------------------------------------------------------

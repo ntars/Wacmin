@@ -42,6 +42,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { checkAppendix } from './appendix-guard.mjs'
+import { checkRepo as checkTables } from './table-guard.mjs'
+import { checkRepo as checkSections } from './section-guard.mjs'
 
 /** 附录 C 里被守着的数字个数，用于通过信息里报数（与 FACT_KEYS 同长）。 */
 const FACT_COUNT = 8
@@ -196,6 +198,8 @@ function usage(message) {
       `  node contracts/doc-counts.mjs --check            # 12.1 计数 + 附录 C，CI 与 18.2 用这个\n` +
       `  node contracts/doc-counts.mjs --check-counts     # 只查 12.1（给夹具测试用）\n` +
       `  node contracts/doc-counts.mjs --check-appendix    # 只查附录 C\n` +
+      `  node contracts/doc-counts.mjs --check-tables      # 只查表格结构\n` +
+      `  node contracts/doc-counts.mjs --check-sections     # 只查两版小节编号对称\n` +
       `  node contracts/doc-counts.mjs --min <${MODULES.join('|')}>\n` +
       `  node contracts/doc-counts.mjs --list\n`,
   )
@@ -232,6 +236,12 @@ function report(problems, options) {
     process.stdout.write(
       `✓ 附录 C 自检清单：${FACT_COUNT} 个数字与代码常量、文档结构逐项相符，两版相同\n`,
     )
+  }
+  if (options.tables) {
+    process.stdout.write('✓ 两版 README 表格结构：逐块与表头列数一致\n')
+  }
+  if (options.sections) {
+    process.stdout.write('✓ 两版 README 小节编号：逐项存在，无单侧缺节\n')
   }
 }
 
@@ -276,16 +286,34 @@ async function main(argv) {
    */
   const wantCounts = argv.includes('--check') || argv.includes('--check-counts')
   const wantAppendix = argv.includes('--check') || argv.includes('--check-appendix')
+  const wantTables = argv.includes('--check') || argv.includes('--check-tables')
+  const wantSections = argv.includes('--check') || argv.includes('--check-sections')
 
-  if (wantCounts || wantAppendix) {
+  if (wantCounts || wantAppendix || wantTables || wantSections) {
     const problems = []
     if (wantCounts) problems.push(...checkCounts(root))
     if (wantAppendix) problems.push(...await checkAppendix(root))
-    report(problems, { counts: wantCounts, appendix: wantAppendix, root })
+    /*
+     * 表格结构放进 `--check` 而不是另开命令。
+     *
+     * 2026-11-22 抓到 15.7 表有 3 行少一整列，而这三行在 HEAD 上就存在、
+     * 前三轮 JOURNAL 却都写着「表格异常 0」—— 那些结论来自一个只数「是不是
+     * 表格行」的检查，从不与表头比列数。同一个命令里多跑这一项，才能让它
+     * 跟着 CI 一起跑；需要人记得单独跑的新命令，等于给它被遗忘的机会。
+     *
+     * 小节编号对称同理，但病因更深一层：本轮往中文版加了整节 15.32、英文版
+     * 没加，`--check` 照旧报「两版逐项相同」并退 0 —— 因为它比的是**计数表
+     * 里的数字**与**表格每行列数**，压根不问「两版的章节集合是否一致」。
+     * 「整节缺失」这种最严重的不同步，在它眼里完全合格。
+     */
+    if (wantTables) problems.push(...checkTables(root))
+    if (wantSections) problems.push(...checkSections(root))
+    report(problems, { counts: wantCounts, appendix: wantAppendix,
+                       tables: wantTables, sections: wantSections, root })
     return
   }
 
-  usage('需要 --check / --check-counts / --check-appendix / --min / --list 之一')
+  usage('需要 --check / --check-counts / --check-appendix / --check-sections / --min / --list 之一')
 }
 
 if (process.argv[1] !== undefined && process.argv[1].endsWith('doc-counts.mjs')) {

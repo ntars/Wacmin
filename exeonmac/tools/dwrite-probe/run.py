@@ -78,16 +78,25 @@ def _run_wine(wine: Path, prefix: Path, args: list[str], *,
 def import_registry(wine: Path, prefix: Path, reg: Path) -> None:
     """导入一份 .reg，并等到它真的落盘。
 
-    ## 两个坑都在这里
+    ## 两条历史记录的现状（2026-11-22 复核）
 
-    **坑一：路径要给 Windows 形式。** 传宿主绝对路径时 `regedit` 会报
-    `ShellExecuteEx failed`、退出码非 0；转成 `z:` 盘形式才被接受（`z:` 在
-    prefix 里固定映射到 `/`）。
+    下面两条早期实测结论，在本轮（wine-11.21，各跑 4 次）**均不复现**。
+    保留原文并把复核结果写在旁边 —— 它们是第 13 轮真实踩过的，但继续写成
+    「必然如此」会让后来的人去做无意义的规避。代码逻辑不改：`z:` 与 `-k`
+    都仍然有效，只是**不是必需**。
 
-    **坑二：`wineserver -w` 不算「落盘了」。** 它只等进程退出，而 launcher /
-    regedit 退出后 wineserver 仍以服务身份活着，不触发回写 —— 第 13 轮实测
-    `-w` 之后 `user.reg` 命中 0 次、`-k` 之后 1 次。所以这里 `-k` 之后还要**轮询
-    文件内容**，直到看见键为止（超时则照常继续，由调用方看结果说话）。
+    **坑一（现已不复现）：路径要给 Windows 形式。** 原文说传宿主绝对路径时
+    `regedit` 会报 `ShellExecuteEx failed`、退出码非 0，须转成 `z:` 盘形式
+    （`z:` 在 prefix 里固定映射到 `/`）。
+    复核：宿主绝对路径 **5/5 全部成功**，含带空格的
+    `/tmp/r17/regs/a b/sp.reg`；`z:` 形态同样成功。两者都行。
+    这里仍用 `z:` —— 不是因为它必需，而是它不依赖 wine 的路径推断。
+
+    **坑二（现已不复现）：`wineserver -w` 不算「落盘了」。** 原文说它只等
+    进程退出，而 regedit 退出后 wineserver 仍以服务身份活着、不触发回写，
+    第 13 轮实测 `-w` 之后 `user.reg` 命中 0 次、`-k` 之后 1 次。
+    复核：`-w` 之后**立即读，4/4 命中**（键已在文件里）。
+    这里仍用 `-k` + 轮询 —— 轮询本身是对的，它不假设任何一种等待模式够用。
     """
     result = _run_wine(wine, prefix, ["regedit", "/S", f"z:{reg}"], timeout=90)
     if result.returncode != 0:

@@ -16,6 +16,7 @@ import os
 import signal
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -310,8 +311,104 @@ RESTART_SUPPRESS_REG = """Windows Registry Editor Version 5.00
 "NoClose"=dword:00000000
 """
 
+#: 重启拦截要写入的键，用于导入后回查
+RESTART_POLICY_KEY = ("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\"
+                      "CurrentVersion\\Policies\\Explorer")
 
-def suppress_restart(prefix: Path, log: _Log | None = None) -> Path:
+#: 一次性戳的落点。住在 wine 自有命名空间 `Software\Wine` 下 ——
+#: Windows 软件看不到它，也不会和任何真实策略键撞名。
+RESTART_STAMP_KEY = "HKEY_CURRENT_USER\\Software\\Wine\\ExeOnMac"
+
+#: 戳的值名。与 launcher 的 `FontSubstitutionStamp` 各用各的：
+#: launcher 每次启动都写，安装器每次安装都写，两者互不覆盖。
+RESTART_STAMP_VALUE = "RestartSuppressStamp"
+
+
+def restart_reg_text(token: str) -> str:
+    """生成带一次性戳的 `.reg` 正文。**导入与回查必须用同一个 token。**
+
+    ## 为什么要有这个戳（2026-11-22 实测，第 17 轮）
+
+    早先的回查是「`reg query` 目标键、输出里有 `NoClose` 即成功」。这条判据
+    与 launcher 第 11 轮修掉的那条**同形态**，而当时只修了 launcher 一侧：
+    它测的是「注册表里有没有这个值」，不是「这次写进去了没有」。
+
+    真实 wine-11.21 复现（同一 prefix，先正确导入一次让键存在，再用内部格式
+    再导一次，`regedit` 退出码 0、stderr 空、零写入）：
+
+        reg query → rc=0，输出里 NoClose 仍在 → 旧判据判**成功**，日志写
+        `INFO reboot.suppressed`，而本次一个键都没写。
+
+    base 层自带的 `user.reg` 里 `NoClose` / `NoRun` / `NoDriveTypeAutoRun`
+    各 0 次，所以新建 prefix 上不会误判 —— 但「第二次安装」会，而第二次安装
+    恰恰是最常见的场景。
+
+    戳每次都不同，旧值蒙不中；写失败时旧戳仍在，不会倒退，也不需要先删键
+    （删键是破坏性操作，本次失败会把用户原有拦截清掉）。
+    """
+    return (
+        RESTART_SUPPRESS_REG
+        + f"\n[{RESTART_STAMP_KEY}]\n"
+        + f'"{RESTART_STAMP_VALUE}"="{token}"\n'
+    )
+
+
+def _new_token() -> str:
+    """生成一次性戳的值 —— **每次调用都不同**。
+
+    单独抽成函数是为了让「默认戳确实每次都换」这件事可被测到：早先的测试
+    拿 `restart_reg_text("a")` 与 `restart_reg_text("b")` 比不相等，那是
+    **两个入参不同**，无论实现怎么改都成立 —— 等于没测。真正要守的是
+    「不传 token 时，两次调用产生不同的戳」，那得看默认值从哪来。
+    """
+    return uuid.uuid4().hex
+
+
+def _query_has_stamp(stdout: str, token: str) -> bool:
+    """`reg query` 的输出里有没有**本次**这个 token。
+
+    判据三件齐全：行首值名等于 `RESTART_STAMP_VALUE`、类型是 `REG_SZ`、
+    值逐字等于 token。只查「token 在输出里出现过」不够 —— 键路径里也可能
+    带上同样的字符（第 16 轮在 `run.py` 的落盘判据上踩过这个坑：查「值出现
+    过」把 base 层自带的同名**键名**当成了自己写的值）。
+    """
+    if not token:
+        return False
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == RESTART_STAMP_VALUE \
+                and parts[1] == "REG_SZ" and parts[2] == token:
+            return True
+    return False
+
+
+def _policy_imported(wine: Path, env: dict[str, str], token: str) -> bool:
+    """回查**这一次**的导入是否真的写进去了。
+
+    两层都要成立，缺一判 False：
+      ① 戳查得到且等于本次 token —— 证明整个文件被吃进去了；
+      ② 目标键里有 `NoClose` —— 证明那一行确实落到了策略键下。
+
+    第②层不能省：戳落在另一个键里，单看戳只说明「文件里的某一节生效了」。
+    """
+    checks = (
+        (RESTART_STAMP_KEY, lambda out: _query_has_stamp(out, token)),
+        (RESTART_POLICY_KEY, lambda out: "NoClose" in out),
+    )
+    for key, judge in checks:
+        try:
+            result = subprocess.run([str(wine), "reg", "query", key],
+                                    capture_output=True, **TEXT_MODE,
+                                    timeout=120, env=env)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode != 0 or not judge(result.stdout or ""):
+            return False
+    return True
+
+
+def suppress_restart(prefix: Path, log: _Log | None = None, *,
+                     token: str | None = None) -> Path:
     """写入禁止重启的 .reg 并导入。返回 .reg 文件路径。
 
     铁律 7：不直接改注册表二进制，只写 .reg 文件再让 wine regedit 导入。
@@ -320,13 +417,18 @@ def suppress_restart(prefix: Path, log: _Log | None = None) -> Path:
     ## 为什么导入后要回查一次
 
     `regedit /S` 对格式不对的文件**不报错**（退出码 0、stderr 空，见上），
-    所以「命令跑完没抛异常」不能证明拦截生效。这里导入后 `reg query`
-    目标键，查不到就写一条 WARN —— 至少让日志说实话。
+    所以「命令跑完没抛异常」不能证明拦截生效。这里导入后回查戳与目标键，
+    任一层不对就写 WARN —— 至少让日志说实话。
+
+    @param token 一次性戳的值。默认随机；测试传入定值以便假 wine 能对答。
     """
+    if token is None:
+        token = _new_token()
     reg_path = Path(prefix) / "exeonmac-suppress-restart.reg"
     # `regedit /S` 接受 UTF-16LE + BOM 与纯 ASCII 两种编码（都实测过）。
     # 用 UTF-16LE 与 Windows 上导出的文件形态一致，便于人工比对。
-    reg_path.write_bytes(b"\xff\xfe" + RESTART_SUPPRESS_REG.encode("utf-16-le"))
+    reg_path.write_bytes(
+        b"\xff\xfe" + restart_reg_text(token).encode("utf-16-le"))
 
     wine = wine_binary()
     env = _wine_env(Path(prefix))
@@ -338,28 +440,12 @@ def suppress_restart(prefix: Path, log: _Log | None = None) -> Path:
             log.add("WARN", "reboot.suppress_failed", str(exc)[:200])
         return reg_path
 
-    if log and not _policy_imported(wine, env):
+    if log and not _policy_imported(wine, env, token):
         log.add("WARN", "reboot.suppress_ineffective",
-                "regedit 退出码为 0，但目标键查不到：拦截未生效")
+                "regedit 退出码为 0，但本次写入的戳或目标键查不到：拦截未生效")
     elif log:
         log.add("INFO", "reboot.suppressed", str(reg_path))
     return reg_path
-
-
-#: 重启拦截要写入的键，用于导入后回查
-RESTART_POLICY_KEY = ("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\"
-                      "CurrentVersion\\Policies\\Explorer")
-
-
-def _policy_imported(wine: Path, env: dict[str, str]) -> bool:
-    """回查拦截键是否真的写进去了。查不到返回 False，命令失败也返回 False。"""
-    try:
-        result = subprocess.run([str(wine), "reg", "query", RESTART_POLICY_KEY],
-                                capture_output=True, **TEXT_MODE,
-                                timeout=120, env=env)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and "NoClose" in (result.stdout or "")
 
 
 # --------------------------------------------------------------------------
@@ -1055,6 +1141,8 @@ __all__ = [
     "write_install_log", "suppress_restart", "wine_binary",
     "wineboot_init", "kill_prefix_processes", "run_in_prefix",
     "host_to_wine_path", "RESTART_SUPPRESS_REG", "RESTART_POLICY_KEY",
+    "RESTART_STAMP_KEY", "RESTART_STAMP_VALUE", "restart_reg_text",
+    "_new_token",
 ]
 
 #: 公开别名。**同一个对象**，不是副本 —— 两套判据必然漂移，

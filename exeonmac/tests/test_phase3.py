@@ -32,6 +32,7 @@ from wepack.prefix import REG_ARCH_64, REG_HEADER  # noqa: E402
 from wepack.package import (  # noqa: E402
     build_bundle, bundle_dir_name, ensure_skeleton, repackage,
 )
+from wepack import pe as pe_mod  # noqa: E402
 from wepack.package import icon as icon_mod  # noqa: E402
 from wepack.package import launcher_build  # noqa: E402
 from wepack.package import plist as plist_mod  # noqa: E402
@@ -89,6 +90,66 @@ def make_png(path: Path, size: int = 64, rgb: tuple[int, int, int] = (200, 60, 6
     path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
                      + chunk(b"IDAT", zlib.compress(bytes(rows), 6))
                      + chunk(b"IEND", b""))
+    return path
+
+
+def _min_pe_bytes() -> bytes:
+    """造一个结构合法、能被 `pe.parse` 读通的最小 PE32+（无资源、无 overlay）。
+
+    与 `test_phase1.build_min_pe` 同构，但这里不跨模块导入 —— 两个测试
+    模块各自独立跑是常态，夹具依赖会让单跑一个文件时失败。
+    """
+    e_lfanew = 0x40
+    opt_size = 240
+    header_size = e_lfanew + 24 + opt_size + 40        # 一个 .text 节
+    raw_ptr = (header_size + 0x1FF) & ~0x1FF
+    raw_size = 0x200
+
+    dos = bytearray(e_lfanew)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, e_lfanew)
+
+    coff = bytearray(20)
+    struct.pack_into("<H", coff, 0, 0x8664)            # x86_64
+    struct.pack_into("<H", coff, 2, 1)                 # 1 个节
+    struct.pack_into("<H", coff, 16, opt_size)
+
+    opt = bytearray(opt_size)
+    struct.pack_into("<H", opt, 0, 0x20B)              # PE32+
+    struct.pack_into("<Q", opt, 24, 0x140000000)       # ImageBase
+    struct.pack_into("<H", opt, 68, 2)                 # Subsystem=GUI
+    struct.pack_into("<I", opt, 56, 0x4000)            # SizeOfImage
+
+    sec = bytearray(40)
+    sec[0:6] = b".text\0"
+    struct.pack_into("<I", sec, 8, raw_size)           # VirtualSize
+    struct.pack_into("<I", sec, 12, 0x1000)            # VirtualAddress
+    struct.pack_into("<I", sec, 16, raw_size)          # SizeOfRawData
+    struct.pack_into("<I", sec, 20, raw_ptr)           # PointerToRawData
+
+    body = bytearray(raw_ptr + raw_size)
+    body[0:e_lfanew] = dos
+    body[e_lfanew:e_lfanew + 4] = b"PE\0\0"
+    off = e_lfanew + 4
+    body[off:off + 20] = coff
+    body[off + 20:off + 20 + opt_size] = opt
+    body[off + 20 + opt_size:off + 20 + opt_size + 40] = sec
+    return bytes(body)
+
+
+def make_truncated_pe(path: Path) -> Path:
+    """造一个「节区表声称的长度 > 实际长度」的 PE —— 即被截断的文件。
+
+    砍掉最后一个节尾部 16 字节，`pe.truncated()` 必须为 True，
+    而 `parse()` 仍能读通（头与节区表都在文件前部）。
+    """
+    path.write_bytes(_min_pe_bytes()[:-16])
+    return path
+
+
+def make_noicon_pe(path: Path) -> Path:
+    """造一个完整但没有资源表的 PE —— 正常的「无图标」样本。"""
+    path.write_bytes(_min_pe_bytes())
     return path
 
 
@@ -516,6 +577,122 @@ class TestIcoExtraction(unittest.TestCase):
             bad.write_bytes(b"not an icon at all")
             with self.assertRaises(UsageError):
                 icon_mod.extract_largest_ico_frame(bad, Path(tmp) / "out.png")
+
+
+class TestIcoTruncationIsNotEmptiness(unittest.TestCase):
+    """「文件不全」与「没有这个资源」必须是两条不同的路（第 19 轮新增）。
+
+    ## 这条锁住的是什么（2026-11-22 实测，带真实样本）
+
+    三处同形缺陷，全部是「两种相反原因共用一句话 / 共用一条分支」：
+
+    1. `_dib_to_bmp()` 的 `header_size < 40 or header_size > len(dib)`：
+       12 字节（OS/2 老格式，真不认识）与 4000 字节（文件只有 100 字节，
+       真被截断）报的都是「DIB 头长度异常」。
+    2. `_largest_ico_entry()` 的 payload 用切片取，越界时静默变短：
+       一个声明 payload=1000 字节、实际文件 22 字节的 ICO，报的是
+       「ICO 里所有条目数据都为空」—— 目录项完整、尺寸位深全对，只是
+       数据没下完。用户会去换图标，实际该做的是重下。
+    3. `build_app_icon()` 的 `except UsageError` 把「截断」也当「没图标」，
+       于是真实 `notepad.exe` 截到 50000 字节会得到 `ok=True` + 占位图 +
+       **零告警**。
+
+    `assertRaises(UsageError)` 对这三条全是绿的，因为它只要求「抛了」。
+    所以每条都断言文案，并在第 3 条上断言「不许静默成功」。
+    """
+
+    def test_dib_header_too_small_says_unsupported_format(self) -> None:
+        """`header_size < 40` 是「格式不认识」，不许说成「被截断」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            frame = bytearray(make_bmp_frame(64))
+            struct.pack_into("<I", frame, 0, 12)      # BITMAPCOREHEADER
+            ico = make_ico(tmp_path / "a.ico", [(64, 64, bytes(frame))])
+            with self.assertRaises(UsageError) as ctx:
+                icon_mod.extract_largest_ico_frame(ico, tmp_path / "o.png")
+            message = str(ctx.exception)
+            self.assertIn("不支持", message, f"实际：{message}")
+            self.assertNotIn("截断", message, f"实际：{message}")
+
+    def test_dib_header_longer_than_data_says_truncated(self) -> None:
+        """`header_size > len(dib)` 是「文件不全」，指引必须是重下。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # 声明 4000 字节头，但整个 DIB 只有 100 字节（且 ICO 目录如实
+            # 记录 size=100，绕过「payload 短于声明」那一层，直达 _dib_to_bmp）
+            frame = bytearray(100)
+            struct.pack_into("<I", frame, 0, 4000)
+            struct.pack_into("<iiHH", frame, 4, 64, 128, 1, 32)
+            ico = make_ico(tmp_path / "b.ico", [(64, 64, bytes(frame))])
+            with self.assertRaises(UsageError) as ctx:
+                icon_mod.extract_largest_ico_frame(ico, tmp_path / "o.png")
+            message = str(ctx.exception)
+            self.assertIn("截断", message, f"实际：{message}")
+            self.assertNotIn("不支持", message, f"实际：{message}")
+
+    def test_ico_directory_truncated_names_the_shortfall(self) -> None:
+        """目录声明 N 条却装不下第 N 条时，报「目录被截断」并给出字节数。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.ico"
+            # 声明 3 条，只给 1 条目录项的空间
+            path.write_bytes(struct.pack("<HHH", 0, 1, 3)
+                             + struct.pack("<BBBBHHII", 64, 64, 0, 0, 1, 32, 16, 22))
+            with self.assertRaises(UsageError) as ctx:
+                icon_mod.extract_largest_ico_frame(path, Path(tmp) / "o.png")
+            message = str(ctx.exception)
+            self.assertIn("目录被截断", message, f"实际：{message}")
+            self.assertIn("38", message, f"应给出需要的字节数，实际：{message}")
+
+    def test_ico_payload_shorter_than_declared_is_truncation(self) -> None:
+        """payload 声明 1000 字节但文件只有 22 字节——不许报「数据为空」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "d.ico"
+            path.write_bytes(struct.pack("<HHH", 0, 1, 1)
+                             + struct.pack("<BBBBHHII", 64, 64, 0, 0, 1, 32, 1000, 22))
+            with self.assertRaises(UsageError) as ctx:
+                icon_mod.extract_largest_ico_frame(path, Path(tmp) / "o.png")
+            message = str(ctx.exception)
+            self.assertIn("截断", message, f"实际：{message}")
+            self.assertNotIn("所有条目数据都为空", message, f"实际：{message}")
+
+    def test_truncated_exe_raises_pe_truncated_not_usage(self) -> None:
+        """截断的 exe 走图标路径时，抛的是 `PeTruncatedError`，不是 `UsageError`。
+
+        这一条是整组的关键：`build_app_icon` 用 `except UsageError` 判
+        「降级为占位图」，所以只要截断被包装成 `UsageError`，就一定会
+        静默降级。类型本身即是判据。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = make_truncated_pe(tmp_path / "cut.exe")
+            self.assertTrue(pe_mod.truncated(pe_mod.parse(exe)),
+                            "夹具本身必须是截断的")
+            with self.assertRaises(pe_mod.PeTruncatedError):
+                icon_mod.extract_largest_ico_frame(exe, tmp_path / "o.png")
+
+    def test_build_app_icon_does_not_silently_degrade_on_truncation(self) -> None:
+        """截断的 exe 不许静默产出占位图 —— 必须抛错让上层报 WARN。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = make_truncated_pe(tmp_path / "cut.exe")
+            resources = tmp_path / "Resources"
+            with self.assertRaises(pe_mod.PeTruncatedError):
+                icon_mod.build_app_icon(exe, resources)
+            self.assertFalse((resources / "AppIcon.icns").is_file(),
+                             "截断时不该产出任何 icns")
+
+    def test_build_app_icon_still_degrades_when_really_no_icon(self) -> None:
+        """完整但确实没有图标的 exe 仍要降级为占位图 —— 别把正路堵死。
+
+        这条与上一条是一对：判据必须能分开两种失败，而不是一刀切禁止降级。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = make_noicon_pe(tmp_path / "noicon.exe")
+            resources = tmp_path / "Resources"
+            out = icon_mod.build_app_icon(exe, resources)
+            self.assertTrue(out.is_file(), "无图标资源时应降级为占位图")
+            self.assertEqual(out.name, "AppIcon.icns")
 
 
 class TestPlaceholderIcon(unittest.TestCase):

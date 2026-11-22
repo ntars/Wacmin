@@ -334,6 +334,62 @@ export async function consolePeX86() {
 }
 
 /**
+ * 造一个 GUI 子系统的 32 位 PE，供截断测试取原始字节。
+ *
+ * 与 `consolePeX86()` 只差子系统号（2 = windows-gui）。单独一个函数而不是
+ * 传参：截断测试要的是「一个本该被放行的合格样本」，而 `gui: true` 与
+ * `gui: false` 两条路径都要在同一个字节流上验，参数化会掩盖「两条路
+ * 判得不一样」这件事本身。
+ *
+ * @returns {Promise<Buffer>} 完整的合法 PE 字节
+ */
+export async function guiPeX86Bytes() {
+  const FILE_ALIGN = 0x200
+  const SECTION_ALIGN = 0x1000
+
+  const dos = Buffer.alloc(0x80)
+  dos.write('MZ', 0, 'latin1')
+  dos.writeUInt32LE(0x80, 0x3c)             // e_lfanew
+
+  const coff = Buffer.alloc(20)
+  coff.writeUInt16LE(0x014c, 0)             // Machine: i386
+  coff.writeUInt16LE(1, 2)                  // NumberOfSections
+  coff.writeUInt16LE(224, 16)               // SizeOfOptionalHeader（PE32）
+  coff.writeUInt16LE(0x0102, 18)            // EXECUTABLE_IMAGE | 32BIT_MACHINE
+
+  const opt = Buffer.alloc(224)
+  opt.writeUInt16LE(0x10b, 0)               // PE32
+  opt.writeUInt32LE(0x1000, 16)             // AddressOfEntryPoint
+  opt.writeUInt32LE(0x400000, 28)           // ImageBase
+  opt.writeUInt32LE(SECTION_ALIGN, 32)      // SectionAlignment
+  opt.writeUInt32LE(FILE_ALIGN, 36)         // FileAlignment
+  opt.writeUInt32LE(SECTION_ALIGN * 2, 56)  // SizeOfImage
+  opt.writeUInt32LE(FILE_ALIGN, 60)         // SizeOfHeaders
+  opt.writeUInt16LE(2, 68)                  // Subsystem: windows-gui
+
+  const section = Buffer.alloc(40)
+  section.write('.text', 0, 'latin1')
+  section.writeUInt32LE(FILE_ALIGN, 8)      // VirtualSize
+  section.writeUInt32LE(SECTION_ALIGN, 12)  // VirtualAddress
+  section.writeUInt32LE(FILE_ALIGN, 16)     // SizeOfRawData
+  section.writeUInt32LE(FILE_ALIGN, 20)     // PointerToRawData
+  section.writeUInt32LE(0x60000020, 36)     // CODE | EXECUTE | READ
+
+  const headers = Buffer.concat([
+    dos,
+    Buffer.from('PE\0\0', 'latin1'),
+    coff,
+    opt,
+    section,
+  ])
+  const padded = Buffer.concat([headers, Buffer.alloc(FILE_ALIGN - headers.length)])
+  const body = Buffer.alloc(FILE_ALIGN)
+  body[0] = 0xc3
+
+  return Buffer.concat([padded, body])
+}
+
+/**
  * 造一个**能被 find7zip 认作 7-Zip** 的可执行脚本。
  *
  * ## 为什么不能直接 t.skip

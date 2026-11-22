@@ -87,10 +87,20 @@ AMBIGUOUS_NAMES = frozenset({
 #: 里面有个 msedge.exe，体积与 GUI 特征都很像主程序，必须显式排除。
 #:
 #: 这张表同样受「子串 + break」的遮蔽约束（见 `NEGATIVE_NAMES` 的说明）：
-#: 条目顺序不是随意的。当前 12 条互不为子串，但有测试守着 —— 若日后有人
-#: 加一条 `"edge"`，排在它后面的 `msedge` / `edgecore` 会全部失效，而
-#: 表里还留着它们，看起来仍在生效。豁免项（`chromium` / `electron.exe` /
-#: `dotnet.exe`）必须可达，否则豁免逻辑成了白写。
+#: 条目顺序不是随意的。若日后有人加一条 `"edge"`，排在它后面的 `msedge` /
+#: `edgecore` 会全部失效，而表里还留着它们，看起来仍在生效。豁免项
+#: （`chromium` / `electron.exe` / `dotnet.exe`）必须可达，否则豁免逻辑
+#: 成了白写。
+#:
+#: ## 「互不为子串」是个错的表述（2026-11-22 复核更正）
+#:
+#: 这里早先写「当前 12 条互不为子串」，实测**不成立**：`webview2` 与
+#: `msedge` 都是 `msedgewebview2` 的子串。真正要守的约束比它窄 ——
+#: **不许有「更早的条目是更晚条目的子串」**，那才会让后者永远命中不到。
+#: 当前方向恰好相反（长条目在前），所以无害：`msedgewebview2` 先命中即
+#: `break`，本来就不需要再靠 `msedge` 去兜。守卫判的也是这个方向
+#: （`test_no_runtime_component_is_shadowed`），与注释此前的措辞不一致 ——
+#: 判据对、话说错了。
 RUNTIME_COMPONENTS = (
     "msedgewebview2", "webview2", "edgecore", "msedge", "edgeupdate",
     "edge_webview", "chromium", "cefsharp", "electron.exe",

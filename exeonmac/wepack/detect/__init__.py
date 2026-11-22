@@ -360,6 +360,12 @@ def detect_installer(path: Path) -> Detection:
         if info is not None:
             evidence.append(f"PE {info.arch}，overlay {info.overlay_size} 字节")
             evidence.append("未命中任何已知安装器签名")
+        elif pe_error:
+            # 有 `pe_error` 说明**它就是以 MZ 开头**、只是没解透（截断、
+            # 头部损坏）。此时再说「非 PE」是自相矛盾的：上一行刚说完
+            # 「PE 解析失败」，下一行就说「不是 PE」，读的人会不知道该信
+            # 哪一句。正因如此，这种情况下不再追加归类结论。
+            evidence.append("以 MZ 开头但 PE 结构不完整，可能是下载中断的安装包")
         else:
             evidence.append("非 PE、非 CFB，无法归类")
         detection = Detection(path=path, kind=InstallerKind.UNKNOWN,

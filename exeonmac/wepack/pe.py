@@ -49,6 +49,18 @@ class PeError(Exception):
     """PE 结构损坏或不是 PE。"""
 
 
+class PeTruncatedError(PeError):
+    """PE 文件不完整（比自己的节区表声明的短）。
+
+    单独成类而不是复用 `PeError`：两者对用户的指向相反 —— 「格式不对」
+    意味着换包，「文件不全」意味着重下。`except PeError` 仍能抓到它，
+    所以既有调用方不会因为多出这个子类而漏捕获。
+
+    判据见 `truncated()`：节区表里 `raw_offset + raw_size` 的最大值大于
+    文件真实长度。实测 50 个真实 exe 零误报。
+    """
+
+
 # --------------------------------------------------------------------------
 # 数据模型
 # --------------------------------------------------------------------------
@@ -179,16 +191,51 @@ class _Reader:
 # --------------------------------------------------------------------------
 
 
+#: 读 `e_lfanew` 需要的最小长度（DOS 头里该字段位于 0x3C，占 4 字节）。
+DOS_HEADER_MIN = 0x40
+
+#: COFF 头长度。判「PE 签名之后够不够读一个完整 COFF 头」用它。
+COFF_HEADER_SIZE = 24
+
+
 def parse(path: Path) -> PeInfo:
-    """解析 PE 头与节区表。"""
-    path = Path(path)
-    with _Reader(path) as r:
+    """解析 PE 头与节区表。
+
+    ## 错误文案必须分清「格式不对」与「文件不全」（2026-11-22 实测）
+
+    早先这里把两个条件写在一个 `if` 里、只报一句话：
+
         if r.size < 0x40 or r.read(0, 2) != b"MZ":
             raise PeError("不是 MZ 可执行文件")
 
+    后果实测：把真实的 `notepad.exe`（253952 字节）截断到 2 / 32 / 63 字节，
+    它开头**确实是** `MZ`，报出来的却是「不是 MZ 可执行文件」。同一条
+    文案在 `detect` 路径上 100% 为假 —— 那里的前置守卫是
+    `if head[:2] == b"MZ"`，能走到 `parse()` 就一定以 `MZ` 开头。
+
+    两者对用户的指向完全相反：格式不对意味着「这不是可执行文件，别试了」，
+    文件不全意味着「重新下载或重新拷贝」。下载中断、AirDrop 未完成、
+    `head -c` 截断都会落到后者。所以判据拆开、文案分开写。
+
+    同理 `e_lfanew` 那条：`e_lfanew < 0x40` 是字段真的非法（指向 DOS 头内部），
+    而 `e_lfanew + 24 > size` 只是文件比该字段声明的还短 —— 后者是被截断。
+    """
+    path = Path(path)
+    with _Reader(path) as r:
+        if r.size < DOS_HEADER_MIN:
+            raise PeTruncatedError(
+                f"文件过短：{r.size} 字节，连 DOS 头（{DOS_HEADER_MIN} 字节）"
+                f"都不够 —— 文件可能未下载完或被截断")
+        if r.read(0, 2) != b"MZ":
+            raise PeError(f"不是 MZ 可执行文件：前两字节为 {r.read(0, 2)!r}")
+
         e_lfanew = r.u32(0x3C)
-        if e_lfanew < 0x40 or e_lfanew + 24 > r.size:
-            raise PeError(f"e_lfanew 非法：0x{e_lfanew:x}")
+        if e_lfanew < DOS_HEADER_MIN:
+            raise PeError(f"e_lfanew 非法：0x{e_lfanew:x}（指向 DOS 头内部）")
+        if e_lfanew + COFF_HEADER_SIZE > r.size:
+            raise PeTruncatedError(
+                f"文件被截断：e_lfanew=0x{e_lfanew:x}，读 COFF 头需要 "
+                f"{e_lfanew + COFF_HEADER_SIZE} 字节，实际只有 {r.size} 字节")
         if r.read(e_lfanew, 4) != b"PE\0\0":
             raise PeError("缺少 PE 签名")
 
@@ -314,8 +361,57 @@ def _walk_resource_dir(r: _Reader, info: PeInfo, dir_off: int, dir_rva: int,
             ))
 
 
-def resources(info: PeInfo) -> list[ResourceEntry]:
-    """返回全部资源叶子节点。无资源表时返回空列表。"""
+def truncated(info: PeInfo) -> bool:
+    """文件是否比它自己的节区表声明的还短（= 被截断）。
+
+    ## 为什么需要这个判据（2026-11-22 实测）
+
+    节区表里每个节都写明了 `PointerToRawData + SizeOfRawData`，其最大值
+    就是「这个 PE 声称自己有多长」。文件真实长度小于该值，只可能是被
+    截断（下载中断 / `head -c` / AirDrop 未完成）—— 因为节区表是编译器
+    在生成时按实际布局写下的，不是可选的冗余信息。
+
+    实测 50 个真实 exe（wine base 层 + 本机样本），`need == size` 全部
+    成立、误差为 0；对 notepad.exe 逐级截断，`need > size` 精确命中。
+    **同一条判据在真实样本上零误报**，因此可以放心用它区分「文件不全」
+    与「文件里确实没这个资源」。
+
+    为什么不在 `parse()` 里直接抛：overlay 型安装包（NSIS / Inno）的
+    载荷挂在最后一个节之后，节区表不覆盖它，但那时 `need <= size` 依然
+    成立，不受影响。反过来，`need > size` 的 PE 一定读不全，任何下游
+    解析都不可信 —— 但这属于调用方各自的降级策略，不该在解析头时就
+    一刀切掉（`detect` 仍需要机器类型等信息来报错）。
+    """
+    try:
+        size = info.path.stat().st_size
+    except OSError:
+        return False
+    need = max((s.raw_offset + s.raw_size) for s in info.sections)
+    return need > size
+
+
+def resources(info: PeInfo, *, strict: bool = False) -> list[ResourceEntry]:
+    """返回全部资源叶子节点。
+
+    ## 三种「空」必须分开（2026-11-22 实测）
+
+    同一条 `return []` 早先覆盖了三种完全不同的情况：
+
+    1. **本来就没有资源表** —— `DataDirectory[RESOURCE]` 为 0。控制台程序
+       与精简版安装包确实如此，属于正常。
+    2. **资源表存在但被截断** —— 遍历时越界。
+    3. **资源表结构损坏** —— 条目数超限等。
+
+    实测后果：把真实 `notepad.exe` 截断到 50000 字节，`resources()` 静默
+    返回空表，`icon.py` 据此报「不含图标资源」，`build_bundle` 进一步静默
+    降级成占位图、`ok=True`、零告警 —— 用户拿到一个蓝底 W 的包，完全
+    不知道自己的 exe 只下了一半。
+
+    `strict=False`（默认）保持旧行为：空表就是空表，不追问原因 —— 打分器
+    这类「没有资源就少加一分」的调用方不该被异常打断。`strict=True` 时
+    截断会被点名抛出 `PeTruncatedError`，供「必须知道为什么空」的调用方
+    （图标提取）区分「换包」与「重下」。
+    """
     with _Reader(info.path) as r:
         e_lfanew = r.u32(0x3C)
         opt = e_lfanew + 24
@@ -323,15 +419,24 @@ def resources(info: PeInfo) -> list[ResourceEntry]:
         data_dir = opt + (96 if magic == 0x10B else 112)
         res_rva = r.u32(data_dir + 8 * DIR_RESOURCE)
         if res_rva == 0:
-            return []
+            return []                       # 情况 1：真的没有资源表
         res_off = rva_to_offset(info, res_rva)
         if res_off < 0:
+            if strict and truncated(info):
+                raise PeTruncatedError(
+                    f"资源表无法定位：RVA 0x{res_rva:x} 映射不到任何节区，"
+                    f"而文件比节区表声明的短 —— 可能未下载完或被截断")
             return []
         out: list[ResourceEntry] = []
         try:
             _walk_resource_dir(r, info, res_off, res_off, 0, [], out)
-        except PeError:
-            # 资源目录损坏时降级为"没有资源"，不阻断上层
+        except PeError as exc:
+            # 截断与结构损坏对用户的指向相反（重下 vs 换包），
+            # strict 时把两者分开，否则维持「损坏即没有」的旧降级。
+            if strict and truncated(info):
+                raise PeTruncatedError(
+                    f"资源表读取中断（{exc}），且文件比节区表声明的短 —— "
+                    f"可能未下载完或被截断") from exc
             return out
         return out
 

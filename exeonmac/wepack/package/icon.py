@@ -33,7 +33,6 @@ from pathlib import Path
 from .. import pe
 from ..errors import MissingDependency, UsageError
 from ..tools import TEXT_MODE
-
 #: 角标几何与配色（见仓库根 README.md 第 11.2 节）
 BADGE_SCALE = 0.25          # 主图标 1/4
 BADGE_MARGIN_PX = 4         # 右下角留 4px（1024 基准）
@@ -101,6 +100,16 @@ def _largest_ico_entry(data: bytes) -> tuple[int, int, int, bytes]:
     排序依据是「先尺寸、后位深」：256x256@8bpp 比 32x32@32bpp 更适合当
     应用图标，放大到 1024 时前者只是糊，后者是彻底糊成一团。尺寸相同才
     看位深，因为高位的透明通道更完整。
+
+    ## 「数据为空」与「数据被截断」不是一回事（2026-11-22 实测）
+
+    早先目录项的 payload 用切片 `data[offset:offset+size]` 取，越界时
+    Python 不报错、只是返回短的那一段；短到 0 就 `continue`，最后统一报
+    「ICO 里所有条目数据都为空」。实测一个声明 payload=1000 字节、实际
+    文件只有 22 字节的 ICO，报的正是这句 —— 而它的目录项完整、尺寸位深
+    全对，只是数据没下完。用户看到「为空」会去换图标，实际该做的是重下。
+
+    现在先按目录项声明的 `size` 判越界，报「被截断」并给出需要/实际字节数。
     """
     if len(data) < 6:
         raise UsageError("图标数据过短，不是合法的 ICO")
@@ -112,9 +121,17 @@ def _largest_ico_entry(data: bytes) -> tuple[int, int, int, bytes]:
 
     best: tuple[int, int, int, bytes] | None = None
     best_key = (-1, -1)
+    #: 目录项完整但 payload 越界的条目数 —— 用来把「空」与「截断」分开
+    cut_off = 0
     for index in range(count):
         offset = 6 + index * 16
         if offset + 16 > len(data):
+            # 目录项本身都不完整：声明 count 条却只装得下 index 条
+            if best is None:
+                raise UsageError(
+                    f"ICO 目录被截断：声明 {count} 个条目，读第 {index + 1} 个"
+                    f"就需要 {offset + 16} 字节，实际只有 {len(data)} 字节 —— "
+                    f"文件可能未下载完或被截断")
             break
         width_b, height_b, _colors, _reserved, _planes, bpp, size, data_offset = \
             struct.unpack("<BBBBHHII", data[offset:offset + 16])
@@ -122,6 +139,10 @@ def _largest_ico_entry(data: bytes) -> tuple[int, int, int, bytes]:
         width = width_b or 256
         height = height_b or 256
         payload = data[data_offset:data_offset + size]
+        if len(payload) < size:
+            # 拿到的比声明的短：不是「空」，是「不全」
+            cut_off += 1
+            continue
         if not payload:
             continue
         key = (width * height, bpp)
@@ -129,6 +150,10 @@ def _largest_ico_entry(data: bytes) -> tuple[int, int, int, bytes]:
             best_key = key
             best = (width, height, bpp, payload)
     if best is None:
+        if cut_off:
+            raise UsageError(
+                f"ICO 数据被截断：{cut_off} 个条目的像素数据不完整 —— "
+                f"文件可能未下载完或被截断")
         raise UsageError("ICO 里所有条目数据都为空")
     return best
 
@@ -146,8 +171,18 @@ def _dib_to_bmp(dib: bytes) -> bytes:
     if len(dib) < 40:
         raise UsageError("DIB 头不足 40 字节")
     header_size = struct.unpack("<I", dib[:4])[0]
-    if header_size < 40 or header_size > len(dib):
-        raise UsageError(f"DIB 头长度异常：{header_size}")
+    # 「头太短」与「文件被截断」方向相反：前者是格式不认识，后者是没下完。
+    # 实测同一条 `header_size < 40 or header_size > len(dib)` 把两者焊死：
+    # 12（OS/2 BITMAPCOREHEADER，真不认识）与 4000（文件只有 100 字节，
+    # 真被截断）报的都是「DIB 头长度异常」，用户无从判断该换图还是重下。
+    if header_size < 40:
+        raise UsageError(
+            f"DIB 头长度 {header_size} 字节，小于 40 —— 这是不支持的图标"
+            f"头格式（如 OS/2 BITMAPCOREHEADER）")
+    if header_size > len(dib):
+        raise UsageError(
+            f"DIB 被截断：头声明 {header_size} 字节，实际只有 {len(dib)} 字节"
+            f" —— 文件可能未下载完或被截断")
 
     width, height, _planes, bpp = struct.unpack("<iiHH", dib[4:16])
     if width <= 0 or height == 0:
@@ -189,13 +224,47 @@ def _frames_from_exe(exe_path: Path) -> bytes:
     Windows 把图标拆成两处：RT_GROUP_ICON 存目录（每帧的尺寸/位深/对应
     RT_ICON 的 ID），RT_ICON 存各帧数据。要拼回完整 .ico 才能复用同一套
     解析逻辑，否则要写两份。
+
+    ## 截断必须原样上抛，不许包装成「没有图标」（2026-11-22 实测）
+
+    早先这里把**所有** `pe.PeError` 统一包成 `UsageError("无法解析 PE
+    结构")`，而调用方 `build_app_icon` 只用 `except UsageError` 判「这个
+    源文件没有图标 → 用占位图」。两条一叠加，半个 exe 与一个没有图标的
+    exe 在调用方眼里完全一样。
+
+    实测：真实 `notepad.exe` 截到 50000 字节 → `resources()` 静默返回空表
+    → 这条抛「不含图标资源」→ 占位图 → `ok=True`、零告警。用户拿到蓝底
+    W 的包，不知道 exe 只下了一半。
+
+    所以 `PeTruncatedError` 直接透出：它是「文件不全」，与「文件里没有
+    这个资源」指向相反，必须让上层能分开处理。
+
+    判据放在最前面（读完 PE 头立刻判），而不是等 `resources()` 报错：
+    `DataDirectory[RESOURCE] == 0` 时 `resources()` 会正常返回空表 ——
+    那句「没有资源表」对一份**被截断**的文件是站不住的（截断可能正好
+    砍在资源表之前，让 RVA 字段本身还在、指向的内容没了）。实测 50KB 的
+    `notepad.exe` 正是这条路径：`res_rva` 非零但映射不到节区。
     """
     try:
         info = pe.parse(exe_path)
+    except pe.PeTruncatedError:
+        raise                       # 文件不全：上层必须知道，不能当没图标
     except pe.PeError as exc:
         raise UsageError(f"无法解析 PE 结构：{exc}") from exc
 
-    entries = pe.resources(info)
+    if pe.truncated(info):
+        raise pe.PeTruncatedError(
+            f"{exe_path.name} 不完整：节区表声明 {max(s.raw_offset + s.raw_size for s in info.sections)} "
+            f"字节，实际只有 {exe_path.stat().st_size} 字节 —— "
+            f"可能未下载完或被截断，无法从中取图标")
+
+    try:
+        entries = pe.resources(info, strict=True)
+    except pe.PeTruncatedError:
+        raise
+    except pe.PeError as exc:
+        raise UsageError(f"无法读取资源表：{exc}") from exc
+
     groups = [e for e in entries if e.type_id == pe.RT_GROUP_ICON]
     icons = {e.name_id: e for e in entries if e.type_id == pe.RT_ICON}
     if not groups or not icons:
@@ -203,7 +272,15 @@ def _frames_from_exe(exe_path: Path) -> bytes:
 
     # 有多个图标组时取第一个（资源 ID 最小的通常是主图标）
     group = min(groups, key=lambda e: e.name_id)
-    raw = pe.resource_bytes(info, group)
+    try:
+        raw = pe.resource_bytes(info, group)
+    except pe.PeError as exc:
+        # 目录读到了、数据读不到 —— 只可能是文件在该资源之后被截断
+        if pe.truncated(info):
+            raise pe.PeTruncatedError(
+                f"图标资源读取越界（{exc}），且文件比节区表声明的短 —— "
+                f"可能未下载完或被截断") from exc
+        raise UsageError(f"无法读取图标资源：{exc}") from exc
     if len(raw) < 6:
         raise UsageError("RT_GROUP_ICON 数据过短")
 
@@ -227,7 +304,15 @@ def _frames_from_exe(exe_path: Path) -> bytes:
     blobs = bytearray()
     base_offset = 6 + 16 * len(usable)
     for width, height, bpp, _size, icon_id in usable:
-        blob = pe.resource_bytes(info, icons[icon_id])
+        try:
+            blob = pe.resource_bytes(info, icons[icon_id])
+        except pe.PeError as exc:
+            # 目录与组都读通了，单帧越界 —— 同属「文件在该帧之后被截断」
+            if pe.truncated(info):
+                raise pe.PeTruncatedError(
+                    f"图标帧 #{icon_id} 读取越界（{exc}），且文件比节区表"
+                    f"声明的短 —— 可能未下载完或被截断") from exc
+            raise UsageError(f"无法读取图标帧 #{icon_id}：{exc}") from exc
         directory += struct.pack(
             "<BBBBHHII",
             width if width < 256 else 0,
@@ -413,8 +498,22 @@ def build_app_icon(source: Path, resources_dir: Path, *, style: str = "w",
 
     返回 `AppIcon.icns` 路径。中间文件全部在临时目录，不在产物里留垃圾。
 
-    源文件取不到图标资源时降级为占位图标（蓝底 + W），不抛异常 ——
-    缺图标的包仍可运行，不该阻断装配。
+    ## 两种失败必须分开：没有图标 vs 文件不全（2026-11-22 实测）
+
+    「源文件里没有图标」→ 降级为占位图（蓝底 W），产物仍可分发，这是
+    设计意图：控制台程序与被裁过的精简安装包确实没有 RT_ICON，为图标
+    让整个装配失败不值得。
+
+    「源文件不完整」→ **不许降级**，原样抛 `pe.PeTruncatedError`。这两种
+    情况在用户侧的处理动作完全相反：前者是「这个软件就这样，认了」，
+    后者是「重新下载」。早先两者共用一条 `except UsageError` 分支，
+    实测把真实 `notepad.exe` 截到 50000 字节，得到的是 `ok=True`、
+    `icon=AppIcon.icns`（占位图）、**零告警** —— 一个只下了一半的 exe
+    被安静地包装成了可交付的 `.app`。
+
+    顺带修掉 `placeholder_icon` docstring 里那句「在 `known_issues` 里
+    记一条」：本函数拿不到 `known_issues`（它在 `build_bundle` 里才组装），
+    实际从未写过。降级的可观测性由调用方写 `warnings` 负责。
     """
     source = Path(source)
     resources_dir = Path(resources_dir)
@@ -425,8 +524,10 @@ def build_app_icon(source: Path, resources_dir: Path, *, style: str = "w",
         extracted = True
         try:
             extract_largest_ico_frame(source, frame_png)
+        except pe.PeTruncatedError:
+            raise                       # 文件不全：不降级，让上层报错
         except UsageError:
-            # 源文件没有图标资源，或资源结构损坏
+            # 源文件没有图标资源，或资源结构损坏 —— 这才是「降级为占位图」
             extracted = False
             placeholder_icon(frame_png, color=color)
 

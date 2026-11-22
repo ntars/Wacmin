@@ -252,16 +252,42 @@ def is_cfb(path: Path) -> bool:
         return False
 
 
+#: CFB 头部固定 512 字节（[MS-CFB] 2.2）。短于它就连扇区大小指数都读不到。
+HEADER_SIZE = 512
+
+
 def open_cfb(path: Path) -> CfbFile:
-    """解析 CFB 结构，返回可读对象。"""
+    """解析 CFB 结构，返回可读对象。
+
+    ## 「头不对」与「文件不全」必须分开报（2026-11-22 实测）
+
+    早先两个条件合在一个 `if` 里：
+
+        if len(data) < 512 or data[:8] != MAGIC:
+            raise CfbError("不是 OLE 复合文档")
+
+    实测：写 `MAGIC + b"\\0"*92`（共 100 字节，magic **完全正确**）进去，
+    报的却是「不是 OLE 复合文档」。对 MSI 而言这是最误导人的一句 ——
+    用户会以为「下载到的不是 msi」，从而去换来源重下，而真实原因是这个
+    文件只下了一部分。`detect._detect_msi` 的前置守卫同样是
+    `if head[:8] != cfb.MAGIC: return None`，能走到这里就一定以 magic 开头。
+
+    所以这里拆成两条：先判长度（被截断，抛 `CfbTruncatedError`），
+    再判 magic（真不是 CFB，抛 `CfbError`）。前者调用方按精确类型能分辨，
+    后者不能 —— 混在一个类型里，上层就没法给出「请重下」这种提示。
+    """
     path = Path(path)
     try:
         data = path.read_bytes()
     except OSError as exc:
         raise CfbError(f"无法读取 {path}：{exc}") from exc
 
-    if len(data) < 512 or data[:8] != MAGIC:
-        raise CfbError("不是 OLE 复合文档")
+    if len(data) < HEADER_SIZE:
+        raise CfbTruncatedError(
+            f"文件被截断：{len(data)} 字节，CFB 头固定 {HEADER_SIZE} 字节 —— "
+            f"文件可能未下载完或被截断")
+    if data[:8] != MAGIC:
+        raise CfbError(f"不是 OLE 复合文档：前 8 字节为 {data[:8].hex()}")
 
     sector_shift = struct.unpack_from("<H", data, 30)[0]
     mini_shift = struct.unpack_from("<H", data, 32)[0]

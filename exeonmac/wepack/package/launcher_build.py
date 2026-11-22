@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..errors import MissingDependency, UsageError
@@ -29,6 +30,10 @@ SWIFTC_FLAGS = (
     "-framework", "AppKit",
     "-framework", "Foundation",
 )
+
+#: swiftc 默认的 ~/.cache/clang/ModuleCache 在受管环境里可能不可写。
+#: 显式落到 TMPDIR：失败后只会变慢，不会让 launcher 编译整体失败。
+SWIFTC_MODULE_CACHE = Path(tempfile.gettempdir()) / "wacmin-swift-module-cache"
 
 #: LaunchServices 注册工具的可能位置。macOS 13 之后位置固定，但历史上变过，
 #: 因此按优先级探测而不是写死一条路径。
@@ -91,7 +96,12 @@ def compile_launcher(dest: Path, *, source: Path | None = None,
         return dest
 
     cache.parent.mkdir(parents=True, exist_ok=True)
-    argv = [_swiftc(), *SWIFTC_FLAGS, "-o", str(cache), str(src)]
+    SWIFTC_MODULE_CACHE.mkdir(parents=True, exist_ok=True)
+    argv = [
+        _swiftc(), *SWIFTC_FLAGS,
+        "-module-cache-path", str(SWIFTC_MODULE_CACHE),
+        "-o", str(cache), str(src),
+    ]
     result = subprocess.run(argv, capture_output=True, **TEXT_MODE)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()

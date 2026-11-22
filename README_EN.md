@@ -2163,10 +2163,12 @@ Wacmin/
 │   ├── run-report.schema.json --report / --json output structure
 │   ├── validate.mjs           Contract self-check + report validation
 │   ├── validate.test.mjs      Tests for the checker itself
-│   ├── doc-counts.mjs         Single check entry for the 12.1 table and Appendix C (--check / --min / --list)
+│   ├── doc-counts.mjs         Single check entry for the 12.1 table, Appendix C and table structure (--check / --min / --list)
 │   ├── doc-counts.test.mjs    Guard keeping the table and both READMEs consistent
 │   ├── appendix-guard.mjs     Machine guard for the 8 numbers in Appendix C (read from code constants and document structure)
-│   └── appendix-guard.test.mjs Regression lock tampering with each of the 8 numbers one at a time
+│   ├── appendix-guard.test.mjs Regression lock tampering with each of the 8 numbers one at a time
+│   ├── table-guard.mjs        Table-structure guard for both READMEs (cell count per block against the header, see 15.29⑦)
+│   └── table-guard.test.mjs   Regression lock for missing / extra columns, block boundaries, escaped pipes
 ├── mac2win/                   Direction 1 · Produce Windows installers on macOS
 │   ├── bin/mac2win.mjs        Single command entry
 │   ├── src/                   Core implementation
@@ -2198,7 +2200,7 @@ Wacmin/
 │   ├── tools/dwrite-probe/    DirectWrite probe (slots from dwrite.h, pixel rasterization across three rendering modes, see 15.26–15.28)
 │   ├── runtime/fetch.sh       Wine runtime download script (entry point without installing the Python package)
 │   ├── schema/compat.schema.json
-│   ├── tests/
+│   ├── tests/                 Unit tests (including test_reg_write_paths.py: registry write-site inventory guard, see 15.29)
 │   └── pyproject.toml
 ├── win2mac/                   Direction 3 · Produce macOS app bundles on Windows
 │   ├── bin/win2mac.mjs
@@ -2404,14 +2406,14 @@ Performance in each direction is determined by its foundation; this project only
 
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
-| mac2win | 167 | about 28 seconds | |
-| exeonmac | 511 | about 4m39s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine), 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), and 21 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / pixel rasterization / three rendering modes / pure-function landing checks / four real-wine arms, one of them a Latin-only alias negative control) |
+| mac2win | 179 | about 22 seconds | Includes 12 PE truncation guards (section-table declared length / optional-header field span / section table past the end / the one-byte-short boundary / the `gui:false` path / 4 KiB-window re-read / genuinely illegal e_lfanew kept apart from genuinely truncated, see 15.32) |
+| exeonmac | 552 | about 5m2s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine), 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), 6 restart-suppression one-shot-stamp guards + 1 real-wine landing check, 7 registry-write-site inventory guards (inventory equals reality / no ghost entries / stamp mechanism present / no `reg add` / the scanner itself has teeth / comments are not hits / the placeholder path must not import), and 21 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / pixel rasterization / three rendering modes / pure-function landing checks / four real-wine arms, one of them a Latin-only alias negative control), 9 guards on "truncated is not the wrong format" wording (PE shorter than the DOS header / PE cut before the COFF header / e_lfanew genuinely illegal / CFB shorter than 512 / CFB magic genuinely wrong / detect's evidence chain must not contradict itself / a genuinely non-PE file still says non-PE, see 15.30), and 18 guards on "incomplete file is not a missing resource" (`pe.truncated()` predicate 5 / the three kinds of empty from `resources()` 5 / ICONDIR and payload truncation at the icon layer 8, see 15.31) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
-| contracts | 113 | about 3 seconds | Includes documentation-count, Appendix C guard and table-scope guard self-checks |
-| **Total** | **1403** | — | See "0 skipped repository-wide" below |
+| contracts | 141 | about 4 seconds | Includes documentation-count, Appendix C guard, table-scope guard, 8 table-structure guards (cell count per block against the header, see 15.29⑦) and 20 section-number symmetry guards (including Chinese-numeral top-level chapters, see 15.32⑧) |
+| **Total** | **1484** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -2927,7 +2929,7 @@ The to-do left by the previous section is now closed. Appendix C contains eight 
 
 **Why cross-checking is mandatory**: configuration keys live in two places (37 keys in `DEFAULTS`, 37 rows in the 9.2 table) and external tools in two (`6.2` and `NOTICE` chapter 3). Comparing Appendix C against only one side leaves the other free to drift. Measured: with the cross-check disabled, adding a key to `DEFAULTS` while leaving the 9.2 table untouched reports only "Appendix C says 37, actual 38" — it **never tells you the 9.2 table is stale too**.
 
-**One entry point only**: `contracts/doc-counts.mjs --check` now runs both 12.1 and Appendix C. `ci.yml` and the 18.2 check block already invoke that command, so no workflow change is needed and no new command can be forgotten. Two half-entry points, `--check-counts` and `--check-appendix`, exist purely for test fixtures — the 12.1 fixtures build two READMEs, while the Appendix C fixtures also need `NOTICE` and `config.mjs`; merging them would force both sets to construct unrelated files.
+**One entry point only**: `contracts/doc-counts.mjs --check` now runs both 12.1 and Appendix C. `ci.yml` and the 18.2 check block already invoke that command, so no workflow change is needed and no new command can be forgotten. Three half-entry points, `--check-counts`, `--check-appendix` and `--check-tables` (added 2026-11-22), exist purely for test fixtures — the 12.1 fixtures build two READMEs, while the Appendix C fixtures also need `NOTICE` and `config.mjs`; merging them would force both sets to construct unrelated files.
 
 **Negative verification (9 cases, all effective)**: each of the eight numbers was corrupted once, and each was named with a uniform message — `附录 C 写 32 配置项数，实际 37（config.mjs 的 DEFAULTS 键数）`. A further group changes the **source** while leaving Appendix C untouched: one extra row in 9.3, one extra key in `DEFAULTS`, one extra row in `NOTICE` chapter 3, one deleted highlight heading — all four caught. **Re-injecting the old implementation** (dropping the `checkAppendix` call) turns **9 cases red immediately** in `appendix-guard.test.mjs`; restoring it gives 32/32 green.
 
@@ -3035,6 +3037,7 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 | `cfb` parsing treated `_StringPool` as mojibake | All MSI stream names failed to parse | Stream names are privately encoded | Use the root storage CLSID plus content-feature stream identification |
 | NSIS detection missed real samples | A real sample was judged `unknown` | Tested `DEADBEEF` at `overlay+0` while the signature sits at `+4` | Correct the offset |
 | `File` table row count misjudged | Trailing data treated as row content | Assumed rows = total u16 count ÷ column count | Determine row count from content features (a run of `fil`+32hex) |
+| Restart suppression "took effect" while zero keys were written | `reg query` finds `NoClose` and the log says `INFO reboot.suppressed`, yet this `regedit /S` wrote nothing — the common shape of a second install, where the key is left over from the previous one | The check asked "does the key exist", which cannot tell "did this run write it" — character for character the same shape round 11 removed from the launcher, where only the Swift side was changed | The `.reg` gains one more section holding a one-shot UUID stamp (`HKCU\Software\Wine\ExeOnMac`); the check now requires the stamp to equal this run's token verbatim **and** the policy key to contain `NoClose`; `tests/test_reg_write_paths.py` turns the write-site inventory into guards. See 15.29 |
 | Chinese application names collided on bundle id | 11 names produced only 1 id | `[^a-z0-9-.]` swallowed entire Chinese segments | Append an 8-hex SHA-256 prefix for non-ASCII input |
 | Wrong key names in the preflight error-code map | Building on Linux / Windows reports "project directory does not exist"; the user chases a path typo while the real cause is an unsupported host | `CHECK_ERROR_CODES` listed `host-os` / `native-window` while the source actually uses `host-platform` / `framework-shell`. A mismatched key raises nothing—it silently falls into the `?? PROJECT_NOT_FOUND` default | Use the real ids, plus a source-scanning test: every key must appear in a `new Check()` call, and every check that can fail must be explicitly mapped |
 | `apponwin spike` treats "mistyped path" as "direction disproven" | `spike --app /nope.app` prints "the direction is demoted to a compatibility assessment tool by design" with exit code 1, while the same path handed to `assess` yields exit code 2 | Gate 3's `catch` recorded `BuildError(INPUT_NOT_FOUND)` as `fail`, but `fail` means "executed and failed"—a non-existent path was never executed. Any `fail` turns the overall conclusion into `rejected` | Invalid input maps to `blocked` with an `invalidInput` flag; `runSpike` aggregates them into `inputErrors`, and the CLI branches to exit code 2 / `AOW_1002`. Gate 1 now validates the sample path before probing the environment, otherwise the one message worth seeing first ("your path is wrong") never surfaces when the environment is missing |
@@ -3058,9 +3061,9 @@ The documentation long stated "nine artefact checks" while measurement showed 11
 
 | Font substitution written into a registry root nobody reads | After 15.23 fixed the format, the keys really land, the stamp is queryable and the log reads "fontsub 已导入 2 条替换" — yet with `lfFaceName` set to `Microsoft YaHei`, `WINEDEBUG=+font` shows **no such mapping** in `dump_gdi_font_subst`, `substituting` fires **0 times**, and `select_font` picks `Courier New`. The text stays tofu | The launcher writes `HKCU\...\FontSubstitutes`. Scanning `win32u.so` for UTF-16 strings yields only `\Registry\Machine\...\FontSubstitutes`, with no `\Registry\User\` counterpart — **the HKCU copy is valid registry data that no code reads**. This is a second, independent defect from 15.23: that one made the data land, this one makes it be read | Root key changed to `HKEY_LOCAL_MACHINE` (measured: `substituting` fires, `select_font` picks `PingFang SC Regular`); the stamp moved to HKLM as well (otherwise "stamp found" only proves the write landed, not that it is in the tree GDI reads — the criterion degrades back to testing existence). Three-way comparison settles it (HKCU ineffective / HKLM effective / `Wine\Fonts\Replacements` effective but rejected as alias semantics). Guards 6 → 7; the old one asserted HKCU — **baking the wrong conclusion into the assertion** — and went red the moment the code changed. Details in 15.24 |
 | Both keys written, yet DirectWrite software is still tofu | After 15.24 fixed GDI, setting `lfFaceName` to `Microsoft YaHei` shows `select_font` picking `PingFang SC Regular` and `substituting` firing; but a DirectWrite program on the same prefix with the same fonts still renders Chinese as tofu, with not a single `+font` line | `FontSubstitutes` is GDI-only: scanning every ELF/PE under `lib/wine` for both UTF-16 and ASCII, the literal appears once, in `x86_64-unix/win32u.so`, and not at all in `x86_64-windows/dwrite.dll`; the latter reads only `HKCU\Software\Wine\Fonts\Replacements` (single-byte ANSI), and in the disassembly at `0x18000b8a5` the string is loaded before `RegOpenKeyA` is called with root `0x80000001`, i.e. HKEY_CURRENT_USER | Write both keys into the same .reg (the roots are exact opposites: GDI wants HKLM, DirectWrite wants HKCU); the stamp moves to `HKCU\Software\Wine\ExeOnMac`, sharing `replacePath`'s root. Six PE-probe groups settle it: HKLM only → `familyCount` 292 and `Microsoft YaHei` not found; HKCU only → 293 and found; both → still 293; HKLM with `Wine\Fonts\Replacements` → 292 — the root matters more than the key name. Guards 7 → 10 (2 scan the real binaries in both encodings, 1 asserts both keys land in one file); the end-to-end assertion now runs `wineserver -k` after SIGTERM before reading from disk (`-w` does not write back — measured 0 hits). Details in 15.25 |
-| The alias is right and the name resolves, but the glyphs are still tofu | Pointing `SimSun` at the Latin-only font Helvetica: `FindFamilyName` returns `exists=1`, `faceCount=6`, the Latin `A` renders normally, while `U+4E2D` is missing — checking only the family name or only the glyph index misses this class of broken mapping | The probe gained a pixel layer: `CreateGlyphRunAnalysis` + `CreateAlphaTexture` actually rasterize, judged on three criteria (`ink>0`, fingerprint differs from `.notdef`, and the known-missing `U+10FFFD` must land on notdef). Measured: the alias and the real font produce identical fingerprints (`A`=0xb302ef1a / `U+4E2D`=0x390a433b); the Latin-alias arm reports `notdef` for `U+4E2D`. See 15.27 |
-| Pixel fingerprints match, but only under ALIASED | 15.27 concluded "the pixels match" with `ALIASED`, while real software runs ClearType. If DirectWrite honours the rendering mode at all, the two modes differ in both fingerprint and texture size — testing one mode cannot distinguish "the mode is ignored" from "the modes really differ". The first is good news; the second needs covering | The probe now runs three modes (`ALIASED` / `GDI_CLASSIC` / `NATURAL`) and sizes ClearType textures at 3 bytes per pixel. Measured: ALIASED and ClearType fingerprints differ and `px` is exactly 1 : 3, while `GDI_CLASSIC` and `NATURAL` are identical in wine (they land on one rasteriser path). See 15.28 |
-| The landing check counts base-layer defaults as this round's write | Arm X writes HKCU only, yet `system.reg` reported "written". The criterion only looked for "the value we intend to write appears in the file", and the base layer already ships `"Helvetica"="Arial"` — the value we write happens to be **a value name** there. Such a false positive never errors, it reports success, and every comparison silently becomes void | The criterion now requires section header + value name + value together, and distinguishes root keys (`user.reg`=HKCU / `system.reg`=HKLM); an empty set is explicitly False. After the fix arm X reports `system.reg=False`. See 15.28③ |
+| The alias is right and the name resolves, but the glyphs are still tofu | Pointing `SimSun` at the Latin-only font Helvetica: `FindFamilyName` returns `exists=1`, `faceCount=6`, the Latin `A` renders normally, while `U+4E2D` is missing — checking only the family name or only the glyph index misses this class of broken mapping | `GetGlyphIndices` only answers "is there a slot for this codepoint in the font file"; it neither knows whether the slot points at an empty outline nor whether the renderer will draw a tofu box | The probe gained a pixel layer: `CreateGlyphRunAnalysis` + `CreateAlphaTexture` actually rasterize, judged on three criteria (`ink>0`, fingerprint differs from `.notdef`, and the known-missing `U+10FFFD` must land on notdef). Measured: the alias and the real font produce identical fingerprints (`A`=0xb302ef1a / `U+4E2D`=0x390a433b); the Latin-alias arm reports `notdef` for `U+4E2D`. See 15.27 |
+| Pixel fingerprints match, but only under ALIASED | 15.27 concluded "the pixels match" with `ALIASED`, while real software runs ClearType. If DirectWrite honours the rendering mode at all, the two modes differ in both fingerprint and texture size — testing one mode cannot distinguish "the mode is ignored" from "the modes really differ". The first is good news; the second needs covering | Real software almost never runs `ALIASED`: GDI uses `CLEARTYPE_QUALITY` and DirectWrite defaults to `NATURAL`, both on the subpixel path, while 15.27 covered one mode only | The probe now runs three modes (`ALIASED` / `GDI_CLASSIC` / `NATURAL`) and sizes ClearType textures at 3 bytes per pixel. Measured: ALIASED and ClearType fingerprints differ and `px` is exactly 1 : 3, while `GDI_CLASSIC` and `NATURAL` are identical in wine (they land on one rasteriser path). See 15.28 |
+| The landing check counts base-layer defaults as this round's write | Arm X writes HKCU only, yet `system.reg` reported "written". The criterion only looked for "the value we intend to write appears in the file", and the base layer already ships `"Helvetica"="Arial"` — the value we write happens to be **a value name** there. Such a false positive never errors, it reports success, and every comparison silently becomes void | The criterion read "the value appeared" as "it was written", never checked the section header or value name, and did not separate the root keys | The criterion now requires section header + value name + value together, and distinguishes root keys (`user.reg`=HKCU / `system.reg`=HKLM); an empty set is explicitly False. After the fix arm X reports `system.reg=False`. See 15.28③ |
 
 ### 15.8 Cross-Platform Runnability Audit (2026-11-19)
 
@@ -4004,7 +4007,23 @@ The third guard needed a companion "scan-scope guard": if `glob` returns an empt
 
 Restored afterwards: 3/3 green.
 
-#### ⑦ Still open
+#### ⑦ A pre-existing defect caught on the way: three rows in the 15.7 table were missing a whole column, while recent rounds reported "table anomalies 0"
+
+After the fixes above, the same parser was run over every table in the repository and found that the 15.7 "Other Fixed Defects" table has **three rows with only 3 cells while the header has 4** (the entire "root cause" column was missing):
+
+| Row | Content |
+|---|---|
+| 15.7 "The alias is right and the name resolves, but the glyphs are still tofu" | defect / symptom / fix only |
+| 15.7 "Pixel fingerprints match, but only under ALIASED" | same |
+| 15.7 "The landing check counts base-layer defaults as this round's write" | same |
+
+**These three rows already existed at HEAD; this round did not introduce them.** Yet the journals of rounds 14–16 all record "table anomaly rows: 0 in both editions" and "table column anomalies: 0" — the criterion missed it. The way it missed is obvious: it only checked "the row ends with a pipe and can be split into cells", never "compare each row's cell count against the header within the same block". A criterion that only counts cells is blind to a missing cell.
+
+The "root cause" column was restored from the 15.27 / 15.28 body text of the same chapter (not newly invented), in both editions. After the fix, column-count anomalies across all table blocks in both editions are **0** (compared block by block against the first row).
+
+**The lesson is the same one as round 15**: a criterion must be able to fail, and "table anomalies 0" was green for three rounds straight. What it lacked was not effort but discriminating power.
+
+#### ⑧ Still open
 
 (a) `test_phase2` still does `from tests.test_phase1 import build_min_pe` — side-effect free now, but the cleaner move is to sink those two pure byte builders into `fixtures.py` so test modules no longer import each other; (b) CI only runs `discover` (alphabetical), never a single class, so ordering dependencies stay green on CI — worth adding a "run every test class on its own" job; (c) `fixtures._SAMPLE_CACHE` is process-wide, so constructing first and clearing via `reset_sample_cache()` afterwards in the wrong order will still hand back a stale value.
 
@@ -4596,9 +4615,396 @@ Same lesson as 15.26⑥: **signatures come from the header, never from memory.**
 
 #### ⑥ Still unverified / open
 
-(a) **Glyph quality is still unconfirmed by a human eye** — this round reaches "the ClearType subpixel alpha also matches", still the outermost layer a machine can give. Stroke beauty, ligature correctness and how subpixel rendering looks on a real screen need a person; (b) only `GDI_CLASSIC` / `NATURAL` ClearType and `ALIASED` were tested — **grayscale antialiasing (`DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`) and `OUTLINE` are untested**; (c) `measuringMode` is fixed at `NATURAL`, so the rounding difference on the `GDI_CLASSIC` side is unverified; (d) only one CJK font file (PingFang) was tested; (e) round 11's open item ③ "mechanically scan all `.reg` write paths of the same shape" has now been pending for six consecutive rounds; (f) **`git push` remains the top human-blocked item** — rounds 11–16 all exist only locally.
+(a) **Glyph quality is still unconfirmed by a human eye** — this round reaches "the ClearType subpixel alpha also matches", still the outermost layer a machine can give. Stroke beauty, ligature correctness and how subpixel rendering looks on a real screen need a person; (b) only `GDI_CLASSIC` / `NATURAL` ClearType and `ALIASED` were tested — **grayscale antialiasing (`DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`) and `OUTLINE` are untested**; (c) `measuringMode` is fixed at `NATURAL`, so the rounding difference on the `GDI_CLASSIC` side is unverified; (d) only one CJK font file (PingFang) was tested; (e) round 11's open item ③ "mechanically scan all `.reg` write paths of the same shape" was completed in 15.29; (f) **`git push` remains the top human-blocked item** — rounds 11–17 all exist only locally.
 
 ---
+
+### 15.29 Sweeping every `.reg` write path: the same defect was only half fixed (measured 2026-11-22)
+
+Round 11 recorded an open item: "mechanically scan all `.reg` write paths of the same shape". It stayed open from round 11 through round 16 — six consecutive rounds. This round does it — and the result is **another instance of the same defect, and the most telling one: round 11 fixed it, but only on the launcher side.**
+
+#### ① Extract mechanically first, then run every site through one criterion
+
+No eyeballing: a regex pulls every registry write point out of the repository. Five hits, three of which are real writes:
+
+| Location | What it writes | How it imports | Landing check |
+|---|---|---|---|
+| `launcher/Sources/main.swift` `FontSubstitution.apply` | Font substitution (both keys) + stamp | `regedit /S` | one-shot UUID stamp ✓ |
+| `wepack/install` `suppress_restart` | Restart suppression (3 policy values) | `regedit /S` | checks whether `NoClose` exists ✗ |
+| `wepack/prefix` `_write_placeholder_regs` | Placeholder tables (wine needs them at boot) | never imported; wine reads them | file level: header + arch ✓ |
+
+The other two hits are reads/verification, not writes (`package/verify.py` checks existence, `layers/` checks font registration), so the format never matters there.
+
+**There is exactly one criterion**: any path that writes a `.reg` and imports it must be able to tell "**this** run wrote it" from "**the previous** run's value is still there". Against that criterion, one of the five fails.
+
+#### ② The missed one: a false positive reproduced on real wine
+
+`suppress_restart`'s landing check was "`reg query` the target key; if the output contains `NoClose`, it worked". That is **the same shape character for character** as the check round 11 removed from the launcher — but only the Swift side was changed; the Python side was left alone.
+
+Reproduced on real wine-11.21 (same prefix: import once correctly so the key exists, then import again using wine's internal storage format — `regedit /S` exits 0, empty stderr, zero writes):
+
+```
+run 1: correct format          reg query rc=0  contains NoClose=True
+run 2: bad format (0 writes)   regedit rc=0  stderr=''
+                              reg query rc=0  contains NoClose=True   ← the key is run 1's
+                              _policy_imported() → True → logs INFO reboot.suppressed
+```
+
+**Zero keys were actually written this run, and the log says suppression took effect.**
+
+One premise has to be stated: the base layer's own `user.reg` contains `NoClose` / `NoRun` / `NoDriveTypeAutoRun` **0** times each (measured, `grep -c` returns 0 three times), so a **fresh prefix never misreports**. But the **second install** does — and installing repeatedly into the same prefix is exactly how this tool is normally used.
+
+#### ③ The fix: sink the launcher's one-shot stamp down into the Python side
+
+One more section in the same `.reg`:
+
+```ini
+[HKEY_CURRENT_USER\Software\Wine\ExeOnMac]
+"RestartSuppressStamp"="<a fresh uuid4 each time>"
+```
+
+The check now requires **both layers at once**: ① the stamp is readable and equals this run's token verbatim; ② the policy key contains `NoClose`. Layer ① proves the whole file was consumed; layer ② proves that line actually landed under the policy key — the stamp alone would miss a half-applied file where one section took and another did not.
+
+Three design trade-offs:
+
+- **Never delete the old key first.** Deleting is destructive: if this import fails, the suppression the user previously had is gone — from "old value still works" to "nothing at all". The stamp cannot go backwards: a failed write leaves the old stamp in place, which simply **does not equal this run's token**, so the check fails, which is exactly what we want.
+- **The stamps use different names** (`RestartSuppressStamp` / `FontSubstitutionStamp`). The launcher writes on every launch, the installer on every install; a shared name means the later writer wins and the earlier one's check can never pass again.
+- **The stamp lives under `Software\Wine`, not inside the policy key.** The policy key is a tree real Windows software reads, so a custom value there would be visible; `Software\Wine` is wine's own namespace, invisible to Windows programs.
+
+#### ④ Two existing comments were re-checked, and two no longer reproduce
+
+While sweeping, the two comments in `tools/dwrite-probe/run.py` that claim "you will always hit this" were re-tested (wine-11.21, four runs each):
+
+| What the comment says | Measured |
+|---|---|
+| A host absolute path makes `regedit` report `ShellExecuteEx failed` with a non-zero exit; you must use the `z:` form | **Host paths succeeded 5/5**, including one with a space (`/tmp/r17/regs/a b/sp.reg`); the `z:` form also works → **both work, it is not a trap** |
+| After `wineserver -w`, `user.reg` has 0 hits; `-k` is required | **Reading immediately after `-w` hit 4/4** (the key was already in the file) |
+
+Both comments presented this as a measured conclusion. They **may well have been true at the time** (round 13's red was real), but they do not reproduce in this environment on this wine version, and keeping them as "always true" sends the next reader off to avoid something that needs no avoiding.
+
+Disposition: the code is unchanged (`z:` and `-k` both still work, they are just not **required**); only the wording changed to "does not reproduce here right now, kept as a historical note". **The assertions were not touched** — they judge the outcome, never the route taken.
+
+#### ⑤ Guards 0 → 7, three injections all effective
+
+| Layer | Assertion | Injection (revert to the old implementation) |
+|---|---|---|
+| Behaviour (fake wine) | A stale stamp must produce WARN, never INFO | Drop the stamp layer → **1 red** |
+| Pure function | Value name + type + value together; a value appearing in the key path does not count; an empty token is False | Degrade the check to "appeared somewhere" → see the row below |
+| Pure function | Stamp and policy key in one file, one text only, never `WINE REGISTRY` | Move the stamp into the policy key → **1 red** |
+| Pure function | Stamp key ≠ policy key, not a sub-path of it, and under `Software\Wine` | Same as above |
+| Pure function | The default token differs on every call (`_new_token()` twice must differ, 32 hex chars) | Make `_new_token` return `'f'*32` → **1 red** |
+| Landing | The written file really contains this run's token and `NoClose` | Write only the policy key, no stamp → **1 red** |
+| Runtime (real wine) | import → poll for this token → policy key has `NoClose` → `_policy_imported` true | Same as above |
+
+**The third injection passed the first time, and it was a false pass.** After changing `suppress_restart` to "write only the policy key, no stamp", the first five guards **all still passed** — because the fake wine answers from a script, it never reads the `.reg` on disk, so "the code did not write the stamp" was invisible to it. Adding the guard that reads the real written file turned the same change red immediately.
+
+**This is the second recurrence of "the fixture duplicated the logic under test"** (round 5 was the stress string inserting its own `<wbr>`). A fake can verify the logic of a criterion; it **cannot prove the code under test really wrote those bytes**. You need both — missing either leaves a blind spot.
+
+**Another dead assertion, caught by self-inspection**: the first version of "the default token differs every call" was `assertNotEqual(restart_reg_text("a"), restart_reg_text("b"))` — **the two arguments already differ**, so it holds whether or not the default is a constant; it tested "the literal is pasted into the text". It now looks at where the default actually comes from: `_new_token()` twice must differ, length 32, all hex; making `_new_token` return `'f'*32` turns it red. **A criterion must be able to fail, and its failure mode must have the same shape as the thing it claims to prevent.**
+
+#### ⑥ From a one-off sweep to a guard that goes red on its own
+
+The sweep above was still a one-off: its result went into documentation, and nothing would go red when someone adds a new `regedit /S` call site. `tests/test_reg_write_paths.py` (7 guards) turns the inventory into an assertion:
+
+| Guard | What it prevents |
+|---|---|
+| Every write site must be registered | A new write point with no landing check — the exact shape of the round 11 and round 17 defects. It names the file and lines |
+| No ghost entries in the inventory | An inventory listing a path that no longer writes anything: coverage that looks complete while that spot is unguarded |
+| Each importing site must contain its stamp mechanism | Implementation changed but the inventory left stale — the inventory is for humans to reconcile against, too |
+| No `reg add` / `reg import` | Both bypass the auditable `.reg` file, which voids every other guard's premise (iron rule 7). 0 occurrences today; this keeps it that way |
+| The scanner itself must find ≥ 3 sites | A scanner that finds nothing makes the three guards above pass forever — passing meaninglessly (rounds 9 and 16 both hit empty-glob-green) |
+| Comments must not count as hits | This repository has a dozen explanatory comments containing `regedit /S`. Counting them makes the inventory impossible to reconcile, and the only escape is loosening the criterion — at which point the guard is dead |
+| The placeholder path must not import | `_write_placeholder_regs` writes wine's own storage format and is read by wine itself; if it ever switches to importing, its semantics change and it must be re-registered with a stamp |
+
+Three injections, all effective: add an unregistered write site → **1 red** (names `wepack/_tmp_probe.py: 行 [2]`); rename the stamp constant → **1 red**; add one `reg add` → **1 red**. Restored, 7/7 green.
+
+#### ⑦ Still open
+
+(a) The sweep covers `.reg` files only; `reg add` / `reg import` / direct hive-binary edits are not mechanically swept (none exist today, but the new guard now keeps it that way); (b) `_write_placeholder_regs` is a "write, do not import" path, judged at file level by header + arch, so "this run wrote it" has no meaning there and it needs no stamp; (c) only wine-11.21 was tested; (d) rounds 12–16's open item "confirm glyph quality by eye" is unrelated to this round and still undone; (e) **`git push` remains the top human-blocked item**.
+
+---
+
+### 15.30 "Incomplete file" reported as "wrong format": one `or` merged two opposite conclusions (measured 2026-11-22)
+
+This round started from the lead "claims in comments rot", mechanically extracted every comment in `wepack/` that contains both "measured" and a count — **8 in total** — and re-checked each: **6 hold, 2 are stale**. While checking, something harder turned up: not a wrong comment, but **code reporting two opposite causes with one identical sentence**.
+
+#### ① Re-checking those 8 count claims
+
+| Location | Claim | Measured | Verdict |
+|---|---|---|---|
+| `layers/__init__.py:68` | base layer `system32` holds all 28 VC++ runtimes + 6 ATL, 0 mfc | `ls \| grep -icE '^(msvcp\|msvcr\|vcruntime\|vcomp)'` = **28**, ATL = **6**, mfc = **0** | holds |
+| `layers/__init__.py:77` | one `Windows NT\...\Fonts` section has 882 entries; PingFang 48 / Hiragino 22 / Songti 16 / Kaiti 14 / Heiti 10 | parsed `system.reg`: value lines **882**, the five counts **48 / 22 / 16 / 14 / 10** | holds |
+| `prefix/__init__.py:278` | `system.reg` writes `#arch` within the first 128 bytes | `#arch` first occurs at byte offset **67** | holds |
+| `extract/candidates.py:567` | `d/e.exe` is depth 1, 7 characters | `len("d/e.exe")` = **7** | holds |
+| `install/__init__.py:557` | an NSIS wrapper adding 12 files while the prefix lost 68 | fixture `demo_nsis()` is indeed 12 files (2.1 MB total) | holds (the "lost 68" is a historical observation, not re-measured) |
+| `install/__init__.py:974` | one real-install test round leaves 12 wine icons in the Dock | same origin as above | holds (historical) |
+| `tools.py:44` | "a stdout containing only `\xff\xfe` makes all **19** `text=True` sites crash" | bare `text=True` in `wepack/` is now **0** (everything goes through `TEXT_MODE`) | **stale**: the number describes the pre-fix state but reads as present tense |
+| `candidates.py:90` | "the current **12** entries are mutually non-substring" | of the 12 `RUNTIME_COMPONENTS`, **2 pairs** are nested: `webview2 ⊂ msedgewebview2`, `msedge ⊂ msedgewebview2` | **wrong** (the guard forbids an *earlier* entry swallowing a *later* one; this direction is legal) |
+
+Neither stale one touched an assertion — only the tense, so a historical measurement says so explicitly. Otherwise the next reader treats it as current fact.
+
+#### ② The real problem: one `or` merged "wrong format" with "incomplete file"
+
+`pe.py`'s `parse()` opened with:
+
+```python
+if r.size < 0x40 or r.read(0, 2) != b"MZ":
+    raise PeError("不是 MZ 可执行文件")
+```
+
+Truncate a real `notepad.exe` (253952 bytes) to **2 / 32 / 63** bytes and the message is "not an MZ executable" — while those files **do** start with `MZ`.
+
+**On the `detect` path that sentence is false 100% of the time.** Its precondition is `if head[:2] == b"MZ":`, so anything reaching `parse()` starts with `MZ`. Every truncation-triggered error was stating something impossible.
+
+The two causes point users in opposite directions:
+
+| What it says | What the user does | Reality |
+|---|---|---|
+| "Not an MZ executable" | This is not a Windows program; try something else | It is one — it just did not download fully |
+| "File too short / truncated" | Re-download or re-copy | Correct |
+
+The `e_lfanew` branch merged two cases as well: `e_lfanew < 0x40` means the field genuinely points inside the DOS header, while `e_lfanew + 24 > size` only means the file is shorter than the field claims — truncation. Measured at 64 / 128 bytes the message was "e_lfanew 非法：0x78", yet `0x78` is a perfectly legal value for real installers (`demo-setup.exe` measures `0xd8`, `notepad.exe` `0x78`).
+
+#### ③ The same shape exists in CFB (the MSI container)
+
+```python
+if len(data) < 512 or data[:8] != MAGIC:
+    raise CfbError("不是 OLE 复合文档")
+```
+
+Writing `MAGIC + b"\0"*92` (100 bytes, magic **fully correct**) reports "not an OLE compound document". For an MSI that is the most misleading sentence available: the user concludes they downloaded the wrong format and goes hunting for another source.
+
+This one is especially unfortunate — the same file **already had** `CfbTruncatedError` (added by the earlier truncation fix) and `detect._detect_msi` already degrades on it. The header check simply predates it and was never converted.
+
+#### ④ After splitting, `detect`'s evidence chain exposed a contradiction of its own
+
+With `pe.py` fixed, `detect` printed:
+
+```
+- PE 解析失败：文件过短：32 字节，连 DOS 头（64 字节）都不够 —— 文件可能未下载完或被截断
+- 非 PE、非 CFB，无法归类          ← the line above says PE parsing failed; this says "not a PE"
+```
+
+Root cause is the closing branch:
+
+```python
+if pe_error:
+    evidence.append(f"PE 解析失败：{pe_error}")
+if info is not None:
+    ...
+else:
+    evidence.append("非 PE、非 CFB，无法归类")
+```
+
+`pe_error` non-empty forces `info is None`, so **both** lines always run. Two contradictory claims side by side, and the reader has no way to tell which to trust.
+
+#### ⑤ Fix — no decision logic changed, only the causes separated
+
+| File | Before | After |
+|---|---|---|
+| `wepack/pe.py` | one `if`, one sentence | size < 64 → "file too short: N bytes… may be incomplete or truncated"; not MZ → "not an MZ executable: first two bytes are b'XY'"; `e_lfanew` inside the DOS header → "illegal"; `e_lfanew + 24 > size` → "file truncated: … needs 144 bytes, has 64" |
+| `wepack/detect/cfb.py` | one `if`, one sentence | size < 512 → `CfbTruncatedError` (matching the type already in the file); wrong magic → `CfbError` "not an OLE compound document: first 8 bytes are …" |
+| `wepack/detect/__init__.py` | also appended "not a PE" on parse failure | when `pe_error` is set, says "starts with MZ but the PE structure is incomplete — likely an interrupted download" |
+
+**Every number in the messages is measured, not estimated**: "needs 144 bytes" = `e_lfanew(0x78) + 24`; "has 64" = sample size. That is what lets a user decide between re-downloading and trying another package.
+
+#### ⑥ Guards and negative verification
+
+**7 new tests** (`test_phase1.py`); each pair guards both "the new sentence is right" and "the old misdiagnosis is not washed away":
+
+| Test | Assertion | Negative verification |
+|---|---|---|
+| `test_truncated_mz_says_truncated_not_not_mz` | 0 / 1 / 2 / 32 / 63 bytes must contain "过短" and not "不是 MZ" | restore the old `if ... or ...` → **9 red** |
+| `test_real_mz_prefix_is_not_reported_as_non_mz` | a real PE cut to 2 / 16 / 40 / 63 bytes likewise | same |
+| `test_dos_only_prefix_reports_truncation_not_bad_lfanew` | cut at `e_lfanew+4` says "truncated", never "illegal" | same |
+| `test_bad_lfanew_still_says_illegal` | `e_lfanew = 0x10` must still say "illegal" | red together with the first row |
+| `test_truncated_before_header_reports_truncation` | 0 / 1 / 100 / 511 bytes must be `CfbTruncatedError` containing "truncated" | restore the old `or` → **4 errors** |
+| `test_wrong_magic_still_says_not_ole` | wrong magic must be `CfbError` and **not** `CfbTruncatedError` | same |
+| `test_truncated_pe_evidence_is_not_self_contradictory` + `test_genuinely_non_pe_still_says_non_pe` | never show both "PE parsing failed" and "not a PE"; genuinely non-PE still says "not a PE" | remove the `elif pe_error` branch → **1 red** |
+| `test_shadowing_check_is_direction_sensitive` | the check must catch only the fatal direction (an earlier entry being a substring of a later one); harmless forward redundancy (`msedgewebview2` ⊃ `msedge`) must not be flagged | see below |
+
+**The lesson worth keeping**: `assertRaises` cannot catch this. It only requires "something was raised", and "not MZ" versus "file truncated" look identical to it — which is exactly why the existing `test_reject_truncated` stayed green throughout. **The message text itself must be asserted**; `assertRaises` guards "did it raise", not "did it say the right thing".
+
+#### ⑦ Regression
+
+`exeonmac` **525 → 534** (`Ran 534 tests in 291.6s / OK`, 0 fail / 0 skipped); `contracts` 121, `mac2win` 167 / `win2mac` 130 / `apponwin` 96 / `console` 254 / `ai` 132 all unchanged; `node contracts/validate.mjs` ✓ 13 codes / 9 segments / 4 prefixes; `node contracts/doc-counts.mjs --check` ✓ 1434 both versions item-for-item identical + Appendix C's 8 numbers + table structure block by block.
+
+#### ⑧ Still open
+
+(a) ~~the truncated-exe route through `wepack/icon.py` was not measured~~ → measured and fixed, see 15.31; (b) only PE and CFB header checks were audited; other "read header → raise" merged `or` conditions (three in `msi_tables.py`, one in `layers/__init__.py`, one in `prefix/__init__.py`, two in `tests/fixtures.py`) have not been reviewed one by one; (c) the 8 claims extracted cover only those carrying a count — purely qualitative claims ("always", "must") were not re-checked; (d) **`git push` remains the top human-blocked item**; rounds 11–19 all live locally only.
+
+### 15.31 Half an exe quietly packaged as a shippable bundle: the `except` deserves auditing more than the exception type (measured 2026-11-22)
+
+Round 18 split the two "incomplete file" messages in the **header** of `parse()`, and left a note saying "the truncated-exe route through the icon path was not measured". Measuring it this round showed the real damage is not in the header — the header catches it fine — but **downstream**.
+
+#### ① Measurement: an exe that is only half downloaded produces an `.app` with `ok=true`
+
+Truncating the real `notepad.exe` (253952 bytes) at successive lengths and feeding each to `wepack package` gives a result that is **not monotonic**:
+
+| Truncated to | `ok` | Icon | What the user sees |
+|---|---|---|---|
+| 2 / 63 / 1000 / 4096 / 45056 / 50000 bytes | **true** | placeholder (blue W) | packaged, zero warnings |
+| 80000 / 120000 / 200000 bytes | false | none | failed, "read out of bounds" |
+| 253000 / 253951 bytes | **true** | real icon | packaged (the icon area is complete) |
+
+Cutting half the file away "succeeds", cutting 80% away "fails", cutting almost nothing away "succeeds" again. **One defect, three outcomes, unrelated to severity** — the classic symptom of "no single predicate exists".
+
+#### ② Three layers of cause, each merging two opposite things into one path
+
+| Layer | Code | What it merged | Consequence |
+|---|---|---|---|
+| 1 | `except PeError: return []` in `pe.resources()` | "no resource table at all" / "resource table truncated" / "directory structure corrupt" | truncation becomes "no resources" downstream |
+| 2 | `except pe.PeError → UsageError("无法解析 PE 结构")` in `icon.py` | "not a PE" / "PE incomplete" | truncation becomes "wrong format" |
+| 3 | `except UsageError → placeholder` in `build_app_icon()` | "no icon" / "file incomplete" | truncation is silently swallowed, `ok=true` |
+
+Chained: `resources()` swallows the exception → `icon.py` wraps it as `UsageError` → `build_app_icon` treats `except UsageError` as "degrade" → placeholder → **zero warnings**. Each layer looks reasonable alone; chained, they turn a half-downloaded exe into a shippable bundle.
+
+#### ③ Fix: add the predicate first, then let each layer handle only what it recognises
+
+New `pe.truncated(info)`: **the maximum `raw_offset + raw_size` in the section table exceeds the file's real length**. That is a direct comparison between "how long this PE claims to be" and "how long it is", with no heuristics.
+
+**The predicate itself was measured** (this matters more than the fix, because it sets the safety boundary):
+
+- 50 real exes (wine base layer plus local samples) all satisfy `need == size` — **0 false positives**;
+- overlay installers (NSIS / Inno) carry their payload after the last section, which the section table does not cover, so `need <= size` still holds — unaffected;
+- truncating `notepad.exe` byte by byte, `need > size` hits precisely.
+
+All three layers changed without touching any business decision, only letting each distinguish what it should:
+
+| Layer | Change |
+|---|---|
+| 1 | New `PeTruncatedError(PeError)`; `resources()` gains a `strict` flag (default `False`, keeping the old behaviour for the scorer). With `strict=True`, truncation raises `PeTruncatedError`; only structural corruption degrades to `[]` |
+| 2 | `_frames_from_exe()` checks `truncated()` **immediately** after parsing the PE header — because truncation can cut right before the resource table, leaving `DataDirectory[RESOURCE]` itself present but pointing at nothing (exactly the 50000-byte case: `res_rva` non-zero but unmappable) |
+| 3 | `build_app_icon()` gets an explicit `except pe.PeTruncatedError: raise` **before** `except UsageError` |
+
+#### ④ Two instances of the same shape, fixed in the same round
+
+While auditing `icon.py`, every `A or B` that raises one message was reviewed (round 18's lesson: after fixing one instance, search the whole repo for the shape):
+
+| Location | What it merged | After |
+|---|---|---|
+| `header_size < 40 or header_size > len(dib)` in `_dib_to_bmp()` | "OS/2 legacy format, genuinely unsupported" (12 bytes) / "the file is 100 bytes, genuinely truncated" (4000 bytes) | split: the first says "unsupported header format", the second says "truncated: declared 4000, actual 100" |
+| `payload = data[off:off+size]` in `_largest_ico_entry()` | Python slicing does not raise on overflow, it just returns less; when it returns zero the entry is `continue`d | assert `len(payload) == size` first; a mismatch counts as truncation, reported as "N entries have incomplete pixel data" |
+
+The second is the more insidious: an ICO declaring a 1000-byte payload while the file is 22 bytes reported **"all entries in the ICO have empty data"** — the directory entry was complete, the dimensions and bit depth all correct, only the data was missing. Seeing "empty", the user replaces the icon; what they should do is re-download.
+
+#### ⑤ Guards and negative verification
+
+**18 new guards** (10 in `test_phase1.py`, 8 in `test_phase3.py`). All five negative verifications were effective:
+
+| Old implementation re-injected | Turned red |
+|---|---|
+| `build_app_icon` wrapping everything as `UsageError` | **2** (1 fail + 1 error) |
+| the merged `or` in `_dib_to_bmp` | **2** |
+| the silent slicing in `_largest_ico_entry` | **2** |
+| `except PeError: return out` in `resources()` | **1** |
+| `truncated()` relaxed by a 4 KB tolerance | **5** |
+
+**The fourth negative verification was green on the first attempt** — because the existing `test_truncated_resource_dir_is_named_in_strict_mode` builds its case with an "RVA that maps nowhere", and that path returns **before** entering `_walk_resource_dir`, never reaching the `except` branch. Two cases were added (`_pe_with_broken_walk` builds a sample whose directory resolves but whose traversal overflows, run in both the complete and truncated states) before it turned red. **"Tests pass" is not the same as "the branch is covered"**, and negative verification is the only way to see the difference.
+
+#### ⑥ Regression
+
+`exeonmac` **534 → 552** (`Ran 552 tests in 302.0s`); `mac2win` 167 / `win2mac` 130 / `apponwin` 96 / `console` 254 / `ai` 132 / `contracts` 121 all unchanged, **1452** in total; `node contracts/validate.mjs` ✓ 13 codes / 9 segments / 4 prefixes; `node contracts/doc-counts.mjs --check` ✓ 1452 both versions item-for-item identical + Appendix C's 8 numbers + table structure.
+
+> The full run failed `test_clonefile_saves_space` once (`6152192 not less than 1048576`). Running `test_phase2` alone gives 110/110 green, and that single test alone is green too — it judges by the volume's free-space delta, which concurrent disk writes disturb during a full run. **This is a flaw in the sampling method, not in the product**; not changed this round (the fix would be to shrink 64 MB to under 1 MB before comparing, or compare inode sharing via `stat -f %S`), recorded here for later.
+
+#### ⑦ Still open
+
+(a) merged `or` conditions not yet reviewed: three in `msi_tables.py`, one in `layers/__init__.py`, one in `prefix/__init__.py`, two in `tests/fixtures.py`; (b) the sampling method in `test_clonefile_saves_space`; (c) purely qualitative claims not re-checked; (d) **`git push` remains the top human-blocked item**.
+
+### 15.32 A half-downloaded runtime passes as a shippable artefact: the same disease, untouched on the JS side (measured 2026-11-22)
+
+#### ① The problem
+
+Rounds 18 and 19 cleaned up "an incomplete file reported as the wrong format" in `exeonmac` (the Python side), but **the same shape was never audited in `mac2win` (the JS side)**. This is not one missed line of code; it is one missed *surface*: the two sides each wrote their own PE parser, and nobody asked about the other side after fixing one.
+
+#### ② The defect (reproducible, real sample)
+
+Truncating the real `clock.exe` (40960 bytes, PE32/i386/windows-gui) at successive lengths and judging with `checkWindowsExe(path, { gui: false })` — the arguments the `electron` / `nwjs` / `runtime` / `artifact` paths actually pass:
+
+| Truncated to | `gui:false` verdict | Note |
+|---|---|---|
+| 144 B | `ok:false` | throws `RangeError`, message `The value of "offset" is out of range` — a Node internal error surfaced straight to the user |
+| **200 B** | **`ok:true`, `problems:[]`** | **0.5% of the original file, judged a valid runtime** |
+| 300 / 400 / 600 / 1000 / 5000 B | `ok:true` | same, green all the way |
+| 40959 B (one byte short) | `ok:true` | not even a boundary |
+| 40960 B (complete) | `ok:true` | the only correct one |
+
+Two root causes, both in `mac2win/src/verify/pe.mjs`:
+
+| # | Old implementation | Consequence |
+|---|---|---|
+| 1 | `readHead(path, 4096)` **never asks for the file's real length** | the machine type, characteristic flags and optional-header magic all live within the first 200 bytes, no predicate is left unfulfilled, so "valid" |
+| 2 | `if (peOffset < 64 \|\| peOffset + 24 > head.length)` merges "the field is genuinely illegal" with "the file is shorter than the offset" into one message | a complete 253952-byte `notepad.exe` with `e_lfanew` edited to 5000 reports "the file may be truncated" — the file is intact, only the offset is out of range |
+
+Cause 2 hides a nastier layer: the `head.length` in `peOffset + 24 > head.length` is the **4096-byte read window**, not the file length. So "offset past the window but file intact" also counts as truncation. Measured with `e_lfanew` at 4056/4060/4064/4070/4072 it reports `PE 签名错误（实际 0）` (genuinely reading zero bytes past the window), and at 4080 it reports "out of range, the file may be truncated" — the same intact file, with the message drifting as the offset moves.
+
+#### ③ The predicate: the length the section table declares
+
+Every section states `PointerToRawData + SizeOfRawData`; their maximum is how long this PE claims to be. A real file length below that can only mean truncation (interrupted download / `head -c` / unfinished AirDrop).
+
+**Measured false-positive rate**: all **672** `.exe` files across the 7 wine layers, each one's section table checked — 657 parsable samples have `declaredSize == fileSize` **exactly equal in every case, 0 false positives** (15 skipped for a missing PE signature or an out-of-range table). `needLt` (declared smaller than actual) **0**, `needGt` (declared larger than actual) **0**. Overlay installers (NSIS / Inno) carry their payload after the last section, so `declaredSize < fileSize` holds for them too — unaffected.
+
+#### ④ The fix (split causes only, no business decision touched)
+
+| Location | Change |
+|---|---|
+| Types | new `PeTruncatedError extends PeError` — "this is an executable, but it did not finish downloading, fetch it again" and "this is not an executable, stop trying" call for opposite actions |
+| Length source | `stat(path).size` at the top, and every boundary afterwards uses `size` rather than `head.length` |
+| `e_lfanew` | split into three: `< 64` reports "illegal, points inside the DOS header" / `+24 > size` throws `PeTruncatedError` with required and actual bytes / `+24 > head.length` **re-reads** (the file is long enough, it just exceeds the window) |
+| Optional header | `optionalHeaderSize < 70` reports "not an executable image (e.g. .obj)"; `optional + 70 > size` throws truncation; past the window it re-reads. **`subsystem` no longer becomes `null`** |
+| Section table | check `end of table > size` before reading → truncation; then compute `declaredSize`, `> size` → truncation reporting "declared N bytes, actual M bytes" |
+| Return value | two new fields `fileSize` / `declaredSize` (diagnostic only, verdict unchanged) |
+| `checkWindowsExe` | returns a `truncated: true/false` flag on failure, `truncated: false` on success. The message no longer wraps a "file is truncated, cannot verify:" prefix — the exception already says it, and repeating it says the same thing twice |
+
+#### ⑤ Guards and negative verification
+
+**12 new guards** (`mac2win/test/pe.test.mjs` from 7 to 19), plus a `guiPeX86Bytes()` fixture (a 32-bit PE with a GUI subsystem, assembled byte by byte locally, zero network).
+
+Every one asserts **message content**, not merely `ok === false` — the latter is identical for "not a PE" and "truncated", so the two messages could be swapped and everything would stay green. This is the same class of false guard as `test_reject_truncated` on the Python side, which stayed green for ten rounds.
+
+Negative verification, **5 of 5 effective**:
+
+| Old implementation re-injected | Turned red |
+|---|---|
+| section-table total length predicate removed | **2** |
+| optional-header span predicate removed | **2** |
+| `peOffset + 24 > size` forced false (back to reading only the head) | **1** |
+| `truncated` flag hard-coded to `false` | **1** |
+| section-table total length relaxed by a 16-byte tolerance | **1** |
+
+#### ⑥ Regression
+
+`mac2win` **167 → 179** (`# pass 179 / fail 0 / skipped 0`, about 22 seconds); `exeonmac` 552 / `win2mac` 130 / `apponwin` 96 / `console` 254 / `ai` 132 / `contracts` 121 all unchanged, **1464** in total; `node contracts/validate.mjs` ✓ 13 codes / 9 segments / 4 prefixes; `node contracts/doc-counts.mjs --check` ✓ 1464 both versions item-for-item identical + Appendix C's 8 numbers + table structure.
+
+#### ⑦ Three things this round taught
+
+1. **When fixing one instance of a shape, "search the whole repo for the shape" must cross languages.** Round 18 fixed a merged `or` in `pe.py`, round 19 fixed an over-wide `except` in `icon.py` — both on the Python side. Meanwhile `mac2win` has an independently written PE parser where the same defect sat for at least two rounds unseen. Search for the shape by **responsibility** ("wherever a PE header is parsed"), not by directory or language.
+2. **"Read a part, then conclude" is more insidious than reading wrong.** Reading wrong yields a `RangeError` or garbled fields; reading only the first 4 KiB and then declaring "valid" yields a result that is **syntactically perfect and semantically wrong**. Any header-inspecting function must obtain the real file length first.
+3. **A read-window length is not a file length.** `head.length` is `min(4096, file length)`; putting it into a boundary predicate equates "offset past the window" with "file truncated". Likewise, every `if (x > buffer.length)` should first ask: is this `buffer` the *file* or the *window*?
+
+#### ⑧ Addendum: this very section was written only into the Chinese version (measured 2026-11-22, round 20)
+
+When the previous section was finished, `README.md` had gained the whole 15.32 section and `README_EN.md` had not gained a single word. And `node contracts/doc-counts.mjs --check` still reported "both versions item-for-item identical" and exited 0.
+
+**Why it did not catch it**: that check compares two things — the numbers in the 12.1 count table against code constants, and the cell count of every table row against its header. It **never asks whether the two versions contain the same set of sections**. The most severe form of desync, a whole missing section, looks entirely valid to it. The "both versions `##` 23/23 `###` 134/134 `####` 182/182 symmetrical" line that previous JOURNAL entries carried came from **counting by hand**; nothing reminds you to recount when the docs change, and a miscount reads as flawless.
+
+**New `contracts/section-guard.mjs`** (20 guards, wired into `--check`): it extracts the **number** from every `##`/`###`/`####` heading in both versions (`15.32` / `12.1` / `十六` / `附录 A`) — numbers are language-independent, so they can be reconciled directly; a number present on one side and absent on the other is reported with its line number.
+
+**3 negative verifications, the first one green — and it exposed a flaw in the predicate itself**:
+
+| Injected | Result |
+|---|---|
+| English 15.32's number edited to `15.32x` | **0 problems** — the predicate read `15.32x` as `15.32` |
+| English 15.32 section deleted entirely | 1 problem, pointing precisely at `README.md:4937` |
+| Chinese 15.31 section deleted (reverse direction) | 1 problem, pointing precisely at `README_EN.md:4836` |
+
+The first one deserves a note: regex backtracking quietly falls back to a shorter prefix (`15.32` → `15.3` → `15`), and a lookahead cannot stop it. **"The number itself was corrupted" is exactly the error this section exists to catch, and the predicate was blind to it** — only "take the full digit run first, then inspect what follows" works.
+
+The second improvement came from negative verification too: the first version recognised only Arabic numerals, while the Chinese top-level chapters read `## 十五、已知问题` and the English ones `## 15. Known Issues`. So no Chinese top-level chapter was extracted at all, and **"0 problems" was assembled by comparing nothing on either side** — a predicate whose scope collapses to the empty set is always true (the same shape as round 9's empty `glob` and round 16's "empty `sections` counts as passing", now on its third recurrence). Adding a `chineseNumber()` conversion (one to ninety-nine) started the real reconciliation: 20 problems before the fix, 0 after.
+
+---
+
 
 ## 16. Changelog
 
@@ -4646,13 +5052,15 @@ Ordered by determinism; each item presupposes the one before it.
 # Contract self-check (mandatory)
 node contracts/validate.mjs
 
-# Documentation-number self-check (mandatory). One command guards two things:
-# the 12.1 test counts, and the eight hand-counted numbers in Appendix C
+# Documentation self-check (mandatory). One command guards three things:
+# the 12.1 test counts, the eight hand-counted numbers in Appendix C
 # (37 configuration keys, 13 environment variables, 18 external tools,
 # 6 subcommand families, 25 highlights, 11 sections in chapter 5, 13 NOTICE
-# chapters, 11 artifact checks). The latter had no guard at all before
-# 2026-11-20 — changing "37 configuration keys" to 32 still printed
-# "✓ counts consistent" under the old version.
+# chapters, 11 artifact checks), and the table structure of both READMEs
+# (cell count per block against its header). The last two had no guard: changing
+# "37 configuration keys" to 32 still printed "✓ counts consistent", and the
+# 15.7 table with three rows missing an entire column still reported
+# "table anomalies 0" — because that check only counted "is this a table row".
 node contracts/doc-counts.mjs --check
 
 # Each direction's own tests. Every line is wrapped in a subshell so the working
@@ -4740,6 +5148,28 @@ git log --oneline -- console/
 | Repository | <https://github.com/ntars/Wacmin> |
 | Issue tracker | <https://github.com/ntars/Wacmin/issues> |
 | Email | <ntars@qq.com> · <ntarsx@163.com> |
+
+---
+
+## 18.5 Release Acceptance Checklist
+
+This chapter is the only checklist for "can it be shipped". Run commands from the repository root. Every item needs evidence; "looks fine" is not evidence.
+
+| # | Item | Command / action | Pass criteria |
+|---|---|---|---|
+| 1 | Contract and doc consistency | `node contracts/validate.mjs && node contracts/doc-counts.mjs --check && node console/bin/wacmin-console.mjs contract` | All exit 0; section 12.1 counts and both READMEs agree |
+| 2 | Four entry points healthy | `node console/bin/wacmin-console.mjs doctor` | All four directions report `ok: true` |
+| 3 | ExeOnMac dependencies | `cd exeonmac && python3 tests/check_deps.py` | Exit 0, prints "dependencies complete" |
+| 3b | One-command execution | `node contracts/acceptance.mjs`; add `--artifacts` when real artefacts are present in the repo-root `.acceptance/` | Every item reports `PASS`, final line `16/16 passed` (artefact items auto-skip when absent) |
+| 4 | Full automated tests | The seven test commands in 18.2 | All exit 0; `fail=0` and `skipped=0`; ExeOnMac reports `Ran 552 tests / OK` |
+| 5 | Mac2Win release artefact | `mkdir -p /tmp/e2e/dist && echo '<h1>ok</h1>' > /tmp/e2e/dist/index.html && echo '{"name":"e2e","version":"1.0.0"}' > /tmp/e2e/package.json && node mac2win/bin/mac2win.mjs build /tmp/e2e --out /tmp/e2e/out --report > /tmp/e2e/report.json && node contracts/validate.mjs --report /tmp/e2e/report.json` | Produces `e2e-1.0.0-x86-setup.exe` (~20 MB); report validates |
+| 6 | Mac2Win artefact re-check | `node mac2win/bin/mac2win.mjs verify /tmp/e2e/out/e2e-1.0.0-x86-setup.exe` | All twelve checks pass, including per-file payload hashes |
+| 7 | ExeOnMac release artefact | `cd exeonmac && python3 -m wepack build <installer> --out /tmp/apps` | Exit 0, all ten `[OK]` checks, valid `Info.plist` |
+| 8 | Delivery boundaries understood | Compare with chapter 17 | AppOnWin, the Rust shell resource step, signing and notarisation must keep their original status wording |
+
+**Environment note (verified 2026-11-23 on arm64 / macOS 27.2.1)**: Wine was installed with `wepack runtime install --archive <local Wine tar.xz>` into `~/Library/Application Support/wexe/runtime/wine`; the base layer was built with `wepack layers build base`; `makensis` / `7zz` / `innoextract` came from Homebrew bottles. The Inno Setup 6.0.5 ISCC toolchain is downloaded on first use by the fixture into `~/.cache/wexe-toolchain`. The DirectWrite probe requires `exeonmac/tools/dwrite-probe/build.sh` first (Xcode CLT clang plus an `lld-link`-compatible rust-lld entry point). CI uses `brew install makensis innoextract` and caches, so no manually preinstalled machine-specific paths are required.
+
+**Known delivery boundaries**: AppOnWin needs Windows + WSL2 + Darling for a runtime verdict; macOS/iOS signing and notarisation need a developer account and certificates; ExeOnMac's bundle writes its prefix in place, so stable package signing is not available in the current layout. These are not failures: the checklist requires them to be stated accurately in chapter 17.
 
 ---
 

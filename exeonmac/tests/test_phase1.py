@@ -371,6 +371,92 @@ class TestPeParser(unittest.TestCase):
             with self.assertRaises(pe.PeError):
                 pe.parse(path)
 
+    # ------------------------------------------------------------------
+    # 「格式不对」与「文件不全」必须是两句不同的话
+    # ------------------------------------------------------------------
+
+    def test_truncated_mz_says_truncated_not_not_mz(self) -> None:
+        """以 `MZ` 开头但长度不够时，不许说「不是 MZ 可执行文件」。
+
+        ## 这条锁住的是什么（2026-11-22 第 18 轮实测）
+
+        早先 `parse()` 把两个条件并成一个 `if`：
+
+            if r.size < 0x40 or r.read(0, 2) != b"MZ":
+                raise PeError("不是 MZ 可执行文件")
+
+        把真实 `notepad.exe` 裁到 2 / 32 / 63 字节，报的都是上面那句 ——
+        而那些文件开头**确实是** `MZ`。更糟的是 `detect` 侧的前置守卫是
+        `if head[:2] == b"MZ"`，能进 `parse()` 就一定以 `MZ` 开头，
+        所以那条文案在该路径上**恒假**。
+
+        `assertRaises` 抓不到这个：它只要求「抛了异常」，两句完全不同的话
+        在它眼里一样。必须断言文案内容。
+        """
+        for size in (0, 1, 2, 32, 63):
+            with self.subTest(size=size), \
+                    tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "a.exe"
+                # 前 2 字节恒为 MZ，其余补零到目标长度
+                path.write_bytes((b"MZ" + b"\0" * size)[:size])
+                with self.assertRaises(pe.PeError) as ctx:
+                    pe.parse(path)
+                message = str(ctx.exception)
+                self.assertNotIn(
+                    "不是 MZ", message,
+                    f"{size} 字节的样本以 MZ 开头，不该被判成「不是 MZ」")
+                self.assertIn("过短", message,
+                              f"{size} 字节应当报「文件过短」，实际：{message}")
+
+    def test_real_mz_prefix_is_not_reported_as_non_mz(self) -> None:
+        """用一个真实 PE 的前缀反复裁，长度不足时都不许说「不是 MZ」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            full = Path(tmp) / "full.exe"
+            full.write_bytes(build_min_pe(machine=0x8664, subsystem=2))
+            raw = full.read_bytes()
+            self.assertEqual(raw[:2], b"MZ", "夹具本身必须以 MZ 开头")
+
+            for size in (2, 16, 40, 63):
+                with self.subTest(size=size):
+                    cut = Path(tmp) / f"cut{size}.exe"
+                    cut.write_bytes(raw[:size])
+                    with self.assertRaises(pe.PeError) as ctx:
+                        pe.parse(cut)
+                    self.assertNotIn("不是 MZ", str(ctx.exception))
+
+    def test_dos_only_prefix_reports_truncation_not_bad_lfanew(self) -> None:
+        """DOS 头齐全但文件在 COFF 头之前就断了，报「被截断」而非「非法」。
+
+        `e_lfanew` 指向合法位置（≥ 0x40）而文件比它声明的还短，是**截断**；
+        只有 `e_lfanew` 指回 DOS 头内部才是**字段非法**。两条不能混。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            full = Path(tmp) / "full.exe"
+            full.write_bytes(build_min_pe(machine=0x8664, subsystem=2))
+            raw = full.read_bytes()
+            e_lfanew = struct.unpack_from("<I", raw, 0x3C)[0]
+            self.assertGreaterEqual(e_lfanew, 0x40, "夹具的 e_lfanew 应当合法")
+
+            # 裁到「DOS 头之后、COFF 头之前」
+            cut = Path(tmp) / "cut.exe"
+            cut.write_bytes(raw[:e_lfanew + 4])
+            with self.assertRaises(pe.PeError) as ctx:
+                pe.parse(cut)
+            message = str(ctx.exception)
+            self.assertIn("截断", message, f"实际：{message}")
+            self.assertNotIn("非法", message, f"实际：{message}")
+
+    def test_bad_lfanew_still_says_illegal(self) -> None:
+        """`e_lfanew` 指回 DOS 头内部时，必须仍报「非法」——别把真错诊洗掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.exe"
+            data = bytearray(b"MZ" + b"\0" * 126)
+            struct.pack_into("<I", data, 0x3C, 0x10)   # 指进 DOS 头内部
+            path.write_bytes(bytes(data))
+            with self.assertRaises(pe.PeError) as ctx:
+                pe.parse(path)
+            self.assertIn("e_lfanew 非法", str(ctx.exception))
+
     def test_overlay_detected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "a.exe"
@@ -387,12 +473,275 @@ class TestPeParser(unittest.TestCase):
             self.assertIsNone(pe.section_named(info, ".missing"))
 
 
+class TestTruncatedPredicate(unittest.TestCase):
+    """`pe.truncated()` 这个判据本身的回归锁（2026-11-22 第 19 轮新增）。
+
+    ## 为什么要有这一组
+
+    第 18 轮把「文件不全」与「格式不对」的文案分开了，但只覆盖到
+    `parse()` 的**头部**。真正的破坏面在更下游：一个只下了一半的 exe
+    能顺利通过 `parse()`（DOS/COFF/Optional 头全在文件前几百字节里），
+    然后在读资源时越界。而 `resources()` 早先对一切 `PeError` 都
+    `return []`，于是「文件不全」在下游被抹成了「文件里没有资源」。
+
+    判据 = 节区表声明长度 > 文件真实长度。它是「这个 PE 声称自己多长」
+    与「它实际多长」的直接比较，不依赖任何启发式。
+    """
+
+    def test_complete_fixture_is_not_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.exe"
+            path.write_bytes(build_min_pe(machine=0x8664, subsystem=2))
+            info = pe.parse(path)
+            self.assertFalse(pe.truncated(info),
+                             "完整夹具不该被判成截断")
+
+    def test_every_shortened_length_is_truncated(self) -> None:
+        """逐字节砍都必须是 True —— 少一个字节也是不全。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            full = Path(tmp) / "full.exe"
+            full.write_bytes(build_min_pe(machine=0x8664, subsystem=2,
+                                          overlay=b"X" * 64))
+            raw = full.read_bytes()
+            info = pe.parse(full)
+            declared = max(s.raw_offset + s.raw_size for s in info.sections)
+
+            # 只砍在节区声明的范围内才算截断；overlay 部分砍掉不影响
+            for size in (declared - 1, declared - 16, declared // 2):
+                with self.subTest(size=size):
+                    cut = Path(tmp) / f"cut{size}.exe"
+                    cut.write_bytes(raw[:size])
+                    self.assertTrue(pe.truncated(pe.parse(cut)),
+                                    f"裁到 {size} 字节（声明 {declared}）应当判截断")
+
+    def test_overlay_removed_is_not_truncation(self) -> None:
+        """砍掉 overlay 不算截断：节区表不覆盖 overlay，二者无关。
+
+        NSIS / Inno 的载荷挂在最后一个节之后，节区表本来就不含它。
+        若把「overlay 不见了」也判成截断，会把正常的精简包误诊。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.exe"
+            path.write_bytes(build_min_pe(machine=0x8664, subsystem=2))
+            info = pe.parse(path)
+            self.assertFalse(pe.truncated(info))
+
+    def test_truncated_is_pe_error_subclass(self) -> None:
+        """必须是 `PeError` 的子类，否则既有 `except PeError` 会漏捕获。"""
+        self.assertTrue(issubclass(pe.PeTruncatedError, pe.PeError))
+
+    def test_parse_truncation_raises_the_subclass(self) -> None:
+        """`parse()` 的两条「文件不全」分支要抛子类，不是裸 `PeError`。
+
+        这样调用方才能在不写字符串匹配的前提下区分「重下」与「换包」。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            too_short = Path(tmp) / "short.exe"
+            too_short.write_bytes(b"MZ" + b"\0" * 8)
+            with self.assertRaises(pe.PeTruncatedError):
+                pe.parse(too_short)
+
+            full = Path(tmp) / "full.exe"
+            full.write_bytes(build_min_pe(machine=0x8664, subsystem=2))
+            raw = full.read_bytes()
+            e_lfanew = struct.unpack_from("<I", raw, 0x3C)[0]
+            cut = Path(tmp) / "cut.exe"
+            cut.write_bytes(raw[:e_lfanew + 4])
+            with self.assertRaises(pe.PeTruncatedError):
+                pe.parse(cut)
+
+    def test_non_mz_stays_plain_pe_error(self) -> None:
+        """「不是 PE」不许升格成截断 —— 那会把「换包」误导成「重下」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.bin"
+            path.write_bytes(b"MZ" * 64 + b"garbage" * 8)
+            data = bytearray(path.read_bytes())
+            data[0:2] = b"XX"                     # 长度够，但头不对
+            path.write_bytes(bytes(data))
+            with self.assertRaises(pe.PeError) as ctx:
+                pe.parse(path)
+            self.assertNotIsInstance(ctx.exception, pe.PeTruncatedError)
+
+
+class TestResourcesDistinguishesEmpty(unittest.TestCase):
+    """`pe.resources()` 必须能分开「没有资源表」与「资源表被截断」。
+
+    ## 这条锁住的是什么（2026-11-22 第 19 轮实测）
+
+    同一条 `return []` 兼了三种情况，其中两种对用户的指向相反。实测真实
+    `notepad.exe` 截到 50000 字节：`resources()` 静默返回空表 →
+    `icon.py` 报「不含图标资源」→ `build_bundle` 降级成占位图、`ok=True`、
+    零告警。用户拿到蓝底 W 的包，不知道 exe 只下了一半。
+
+    `strict=False`（默认）保留旧的宽松行为，供打分器这类「少一分就算了」
+    的调用方使用；`strict=True` 供必须知道原因的调用方使用。
+    """
+
+    def _pe_with_resource_dir(self, tmp: Path, *, res_rva: int) -> Path:
+        """造一个 DataDirectory[RESOURCE] 非零的最小 PE。"""
+        tmp = Path(tmp)
+        path = tmp / "a.exe"
+        data = bytearray(build_min_pe(machine=0x8664, subsystem=2))
+        e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+        opt = e_lfanew + 24
+        self.assertEqual(struct.unpack_from("<H", data, opt)[0], 0x20B)
+        data_dir = opt + 112
+        struct.pack_into("<I", data, data_dir + 8 * 2, res_rva)
+        path.write_bytes(bytes(data))
+        return path
+
+    def test_no_resource_directory_returns_empty_both_modes(self) -> None:
+        """`DataDirectory[RESOURCE] == 0` 是正常态，两种模式都返回空表。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.exe"
+            path.write_bytes(build_min_pe(machine=0x8664, subsystem=2))
+            info = pe.parse(path)
+            self.assertEqual(pe.resources(info), [])
+            self.assertEqual(pe.resources(info, strict=True), [])
+
+    def test_truncated_resource_dir_is_named_in_strict_mode(self) -> None:
+        """资源 RVA 指向文件之外 + 文件被截断 → strict 模式必须点名。
+
+        宽松模式维持旧行为（空表），保证打分器不被异常打断。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            # RVA 指到远超文件长度的位置
+            path = self._pe_with_resource_dir(tmp, res_rva=0x00F00000)
+            info = pe.parse(path)
+            self.assertEqual(pe.resources(info), [],
+                             "宽松模式应维持旧行为，返回空表")
+
+            declared = max(s.raw_offset + s.raw_size for s in info.sections)
+            full_len = path.stat().st_size
+            self.assertEqual(declared, full_len, "夹具本身应当是完整的")
+            # 再砍一刀，让它成为「截断 + 资源表定位不到」
+            cut = Path(tmp) / "cut.exe"
+            cut.write_bytes(path.read_bytes()[:full_len - 16])
+            with self.assertRaises(pe.PeTruncatedError) as ctx:
+                pe.resources(pe.parse(cut), strict=True)
+            self.assertIn("截断", str(ctx.exception))
+
+    def test_resource_rva_outside_sections_but_complete_stays_empty(self) -> None:
+        """文件完整、只是资源 RVA 落空 → strict 模式也不该报截断。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._pe_with_resource_dir(tmp, res_rva=0x00F00000)
+            info = pe.parse(path)
+            self.assertFalse(pe.truncated(info))
+            self.assertEqual(pe.resources(info, strict=True), [],
+                             "完整文件里的坏 RVA 是结构问题，不是截断")
+
+    def _pe_with_broken_walk(self, tmp: Path) -> Path:
+        """造一个「资源目录能定位、但遍历时越界」的 PE。
+
+        `DataDirectory[RESOURCE]` 指向 `.rsrc` 节（VA 0x2000），节内放一个
+        合法目录头 + 一个指向超远 offset 的条目。遍历第 1 条就要 `r.read`
+        到文件之外 —— 这正是「截断」驱动 `_walk_resource_dir` 抛错的路径，
+        也是上面那条「RVA 落空」用例覆盖不到的：那里在进遍历之前就返回了。
+
+        没有这条，`except PeError: return out` 注回去也不会变红（实测如此）。
+        """
+        tmp = Path(tmp)
+        path = tmp / "broken.exe"
+        path.write_bytes(build_min_pe(machine=0x8664, subsystem=2,
+                                      sections=(".text", ".rsrc")))
+        data = bytearray(path.read_bytes())
+        e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+        opt = e_lfanew + 24
+        data_dir = opt + 112
+        struct.pack_into("<I", data, data_dir + 8 * 2, 0x2000)   # res_rva → .rsrc
+
+        info = pe.parse(path)
+        rsrc = pe.section_named(info, ".rsrc")
+        self.assertIsNotNone(rsrc)
+        rsrc_off = rsrc.raw_offset
+
+        # 目录头：16 字节；named=0，ids=1
+        struct.pack_into("<IIHHHH", data, rsrc_off, 0, 0, 4, 0, 0, 1)
+        # 第 1 条：name_field=3（RT_ICON），offset 指向文件之外的数据项
+        struct.pack_into("<II", data, rsrc_off + 16, 3, 0x7FFFFFF0)
+        path.write_bytes(bytes(data))
+        return path
+
+    def test_walk_overflow_on_complete_file_returns_empty(self) -> None:
+        """文件完整、遍历越界（坏条目）→ 按结构损坏静默返回空表。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._pe_with_broken_walk(tmp)
+            info = pe.parse(path)
+            self.assertFalse(pe.truncated(info), "夹具应当是完整的")
+            self.assertEqual(pe.resources(info), [])
+            self.assertEqual(pe.resources(info, strict=True), [],
+                             "完整文件的结构问题不该被说成截断")
+
+    def test_walk_overflow_on_truncated_file_is_named(self) -> None:
+        """同一份坏目录 + 文件被截断 → strict 模式必须报 `PeTruncatedError`。
+
+        这条是 `except PeError` 分支的唯一驱动源：注回
+        `except PeError: return out` 会让它变红。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            full = self._pe_with_broken_walk(tmp)
+            raw = full.read_bytes()
+            cut = Path(tmp) / "cut.exe"
+            cut.write_bytes(raw[:-16])
+            info = pe.parse(cut)
+            self.assertTrue(pe.truncated(info), "夹具必须变成截断")
+
+            self.assertEqual(pe.resources(info), [],
+                             "宽松模式仍然静默（旧行为不变）")
+            with self.assertRaises(pe.PeTruncatedError) as ctx:
+                pe.resources(info, strict=True)
+            self.assertIn("截断", str(ctx.exception))
+
+
 # --------------------------------------------------------------------------
 # 安装器识别
 # --------------------------------------------------------------------------
 
 
 class TestDetectSynthetic(unittest.TestCase):
+    def test_truncated_pe_evidence_is_not_self_contradictory(self) -> None:
+        """证据链里不许同时出现「PE 解析失败」与「非 PE」。
+
+        ## 这条锁住的是什么（2026-11-22 第 18 轮实测）
+
+        `detect_installer` 的收尾分支写的是：
+
+            if pe_error:
+                evidence.append(f"PE 解析失败：{pe_error}")
+            if info is not None:
+                ...「未命中任何已知安装器签名」
+            else:
+                evidence.append("非 PE、非 CFB，无法归类")
+
+        `pe_error` 非空时 `info` 必然为 `None`（解析失败了哪来的 info），
+        于是**两句同时出现**：「PE 解析失败」后面紧跟「非 PE」。读的人
+        不知道该信哪一句，而真相是「它就是以 MZ 开头、只是没解透」。
+
+        这种情况只在截断或头部损坏时发生，恰好是最需要说清楚的时候。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cut.exe"
+            # 以 MZ 开头、长度不足以读 DOS 头 —— 必然触发 pe_error
+            path.write_bytes(b"MZ" + b"\0" * 20)
+            detection = detect_installer(path)
+            joined = " ".join(detection.evidence)
+            self.assertIn("PE 解析失败", joined, "样本应当触发 PE 解析错误")
+            self.assertNotIn(
+                "非 PE", joined,
+                "已经说了「PE 解析失败」，就不能再补一句「非 PE」："
+                f"证据链自相矛盾 → {detection.evidence}")
+
+    def test_genuinely_non_pe_still_says_non_pe(self) -> None:
+        """真的不是 PE 的文件，仍要给出「非 PE、非 CFB」——别把有用的话删掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "junk.bin"
+            path.write_bytes(b"X" * 400)
+            detection = detect_installer(path)
+            joined = " ".join(detection.evidence)
+            self.assertIn("非 PE", joined)
+            self.assertNotIn("PE 解析失败", joined,
+                             "没以 MZ 开头就不该尝试解析 PE")
+
     def test_detect_nsis_by_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "setup.exe"
@@ -571,6 +920,43 @@ class TestCfbTruncation(unittest.TestCase):
         # 证据里要能看出是截断，而不是笼统的「解析失败」
         joined = " ".join(detection.evidence)
         self.assertIn("截断", joined)
+
+    def test_truncated_before_header_reports_truncation(self) -> None:
+        """连 512 字节的 CFB 头都没读满时，不许说「不是 OLE 复合文档」。
+
+        ## 与上面那条的区别，以及为什么两条都要有
+
+        上面那条测的是「头读全了、扇区不够」（走 FAT 链时才发现）。
+        这条测的是**更早**的一层：字节数连固定头都不够。早先这两处都
+        并在一个 `if ... or ...` 里，报同一句「不是 OLE 复合文档」。
+
+        实测：写 `MAGIC + b"\\0"*92`（100 字节，magic 完全正确）→ 旧代码
+        报「不是 OLE 复合文档」。对 MSI 来说这句话直接把人带偏 —— 他会
+        以为下错了格式，而真正的原因是这个文件只下了一小段。
+        """
+        for size in (0, 1, 100, 511):
+            with self.subTest(size=size), \
+                    tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "x.msi"
+                # 前 8 字节恒为 CFB magic，其余补零到目标长度
+                path.write_bytes((cfb.MAGIC + b"\0" * size)[:size])
+                with self.assertRaises(cfb.CfbTruncatedError) as ctx:
+                    cfb.open_cfb(path)
+                message = str(ctx.exception)
+                self.assertIn("截断", message)
+                self.assertNotIn("不是 OLE 复合文档", message,
+                                 f"{size} 字节的样本 magic 正确，不该报这句")
+
+    def test_wrong_magic_still_says_not_ole(self) -> None:
+        """magic 真不对时，必须仍报「不是 OLE」——别把真错诊洗掉。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "x.msi"
+            path.write_bytes(b"X" * 600)
+            with self.assertRaises(cfb.CfbError) as ctx:
+                cfb.open_cfb(path)
+            self.assertNotIsInstance(ctx.exception, cfb.CfbTruncatedError,
+                                     "magic 不对不是「截断」，别混类型")
+            self.assertIn("不是 OLE 复合文档", str(ctx.exception))
 
     def test_complete_msi_is_not_flagged_as_truncated(self) -> None:
         """完整样本不能因为新加的判断被误报。
@@ -1049,6 +1435,14 @@ class TestRuntimeComponentExemption(unittest.TestCase):
         同样是子串 + break。若有人加一条 `"edge"` 排在前面，
         后面的 `msedge` / `edgecore` / `edgeupdate` 会全部失效 ——
         而表里还留着它们，读代码的人会以为它们仍在生效。
+
+        ## 方向必须是「更早的被更晚的包含」，不能反过来
+
+        2026-11-22 复核发现注释原写「12 条互不为子串」，实测不成立：
+        `webview2` 与 `msedge` 都是 `msedgewebview2` 的子串。但那个方向
+        **无害** —— 长条目排在前面，先命中即 `break`，后面的短条目本来
+        就只是冗余覆盖。真正致命的是反方向（早的是晚的子串），这才是
+        本条要守的。下面那条「反向也要过」的断言把这个区别钉住。
         """
         from wepack.extract.candidates import RUNTIME_COMPONENTS
 
@@ -1062,6 +1456,37 @@ class TestRuntimeComponentExemption(unittest.TestCase):
         self.assertEqual(
             shadowed, [],
             f"这些运行时组件永远不会被命中：{shadowed}")
+
+    def test_shadowing_check_is_direction_sensitive(self) -> None:
+        """反向包含（早的是晚的子串）必须被判红，正向包含不许误报。
+
+        ## 为什么这条单独存在
+
+        上面那条守卫如果写错方向（例如判「任意两条互为子串」），它会把
+        当前合法的 `msedgewebview2` / `msedge` 组合也判红 —— 于是有人
+        为了让测试变绿去重排表或删条目，把一个无害的冗余变成真缺陷。
+        **判据写错比缺陷更隐蔽**：它红得很有道理。
+
+        这里用两张合成表直接调判据，不依赖真实常量，从而把「方向」本身
+        锁住。
+        """
+        def shadowed(table: tuple[str, ...]) -> list[tuple[str, str]]:
+            found: list[tuple[str, str]] = []
+            for index, longer in enumerate(table):
+                for shorter in table[:index]:
+                    if shorter in longer:
+                        found.append((longer, shorter))
+                        break
+            return found
+
+        # 正向（长在前）：无害，不许报
+        self.assertEqual(shadowed(("msedgewebview2", "webview2", "msedge")), [])
+        # 反向（短在前）：致命，必须报
+        found = shadowed(("edge", "msedge", "edgecore"))
+        self.assertEqual(len(found), 2,
+                         "短条目排在前面时，后面的两个都成了死条目")
+        self.assertIn(("msedge", "edge"), found)
+        self.assertIn(("edgecore", "edge"), found)
 
     def test_exemptable_components_are_reachable(self) -> None:
         """豁免表里的每项都必须真的能走到豁免分支。

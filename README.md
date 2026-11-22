@@ -2163,10 +2163,12 @@ Wacmin/
 │   ├── run-report.schema.json --report / --json 输出结构
 │   ├── validate.mjs           契约自检 + 报告校验
 │   ├── validate.test.mjs      校验器自身的测试
-│   ├── doc-counts.mjs         12.1 测试计数表 + 附录 C 的唯一检查入口（--check / --min / --list）
+│   ├── doc-counts.mjs         12.1 测试计数表 + 附录 C + 表格结构的唯一检查入口（--check / --min / --list）
 │   ├── doc-counts.test.mjs    计数表与两版 README 的一致性守卫
 │   ├── appendix-guard.mjs     附录 C 那 8 个数字的机器守卫（从代码常量与文档结构现读）
-│   └── appendix-guard.test.mjs 8 个数字逐个篡改的回归锁
+│   ├── appendix-guard.test.mjs 8 个数字逐个篡改的回归锁
+│   ├── table-guard.mjs        两版 README 的表格结构守卫（逐块与表头比列数，见 15.29⑦）
+│   └── table-guard.test.mjs   少列 / 多列 / 块边界 / 转义竖线 的回归锁
 ├── mac2win/                   方向一 · 在 macOS 上产出 Windows 安装包
 │   ├── bin/mac2win.mjs        单命令入口
 │   ├── src/                   核心实现
@@ -2198,7 +2200,7 @@ Wacmin/
 │   ├── tools/dwrite-probe/    DirectWrite 探针（槽位由 dwrite.h 生成，含三档渲染模式的像素栅格化，见 15.26–15.28）
 │   ├── runtime/fetch.sh       Wine 运行时下载脚本（免装 Python 包的入口）
 │   ├── schema/compat.schema.json
-│   ├── tests/
+│   ├── tests/                 单元测试（含 test_reg_write_paths.py：注册表写入点清单守卫，见 15.29）
 │   └── pyproject.toml
 ├── win2mac/                   方向三 · 在 Windows 上产出 macOS 应用包
 │   ├── bin/win2mac.mjs
@@ -2403,14 +2405,14 @@ $INSTDIR/
 
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
-| mac2win | 167 项 | 约 28 秒 | |
-| exeonmac | 511 项 | 约 4 分 39 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、21 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 像素栅格化 / 三档渲染模式 / 落盘判据纯函数 / 四组真实 wine 对照，含 1 组拉丁别名负向对照） |
+| mac2win | 179 项 | 约 22 秒 | 含 12 项 PE 截断判据守卫（节区表声明长度 / 可选头字段跨度 / 节区表越界 / 仅差 1 字节边界 / `gui:false` 路径 / 4 KiB 窗口扩读 / e_lfanew 真非法与真截断分开，见 15.32） |
+| exeonmac | 552 项 | 约 5 分 2 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、6 项重启拦截一次性戳守卫 + 1 项真实 wine 落盘验证、7 项注册表写入点清单独守（清单=实际 / 幽灵条目 / 戳机制在场 / 禁 reg add / 扫描器有判别力 / 注释不算命中 / 占位表不导入）、21 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 像素栅格化 / 三档渲染模式 / 落盘判据纯函数 / 四组真实 wine 对照，含 1 组拉丁别名负向对照）、9 项「截断 ≠ 格式不对」文案守卫（PE 短于 DOS 头 / PE 裁在 COFF 头前 / e_lfanew 真非法 / CFB 短于 512 / CFB magic 真错 / detect 证据链不自相矛盾 / 真非 PE 仍报非 PE，见 15.30）、18 项「文件不全 ≠ 没有这个资源」守卫（`pe.truncated()` 判据 5 项 / `resources()` 空表三分类 5 项 / 图标层 ICO 目录与 payload 截断 8 项，见 15.31） |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
-| contracts | 113 项 | 约 3 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 |
-| **合计** | **1403 项** | — | 见下文「全仓 0 跳过」|
+| contracts | 141 项 | 约 4 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 + 8 项表格结构守卫（逐块与表头比列数，见 15.29⑦）+ 20 项两版小节编号对称守卫（含中文数字顶章转换，见 15.32⑧） |
+| **合计** | **1484 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -2945,7 +2947,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 **为什么必须交叉验证**：配置项在代码（`DEFAULTS` 37 键）与文档（9.2 表 37 行）各存一份，外部工具在 6.2 与 `NOTICE` 第三章各存一份。只对附录 C 与其中一侧，另一侧漂了照样绿。实测注掉交叉验证后，把 `DEFAULTS` 加一个键、9.2 表不动，守卫只报「附录 C 写 37、实际 38」，**不会告诉你 9.2 表也过期了**。
 
-**接入点只有一个**：`contracts/doc-counts.mjs --check` 现在同时跑 12.1 与附录 C。CI 的 `ci.yml` 与 18.2 检查块早就在跑这条命令，因此无需改 workflow，也就不会出现「新命令没人记得跑」。另有两个只跑一半的入口 `--check-counts` / `--check-appendix`，专供测试夹具用 —— 12.1 的夹具只造两份 README，附录 C 的夹具还要 `NOTICE` 与 `config.mjs`，混在一个入口会让两边都被迫造一堆无关文件。
+**接入点只有一个**：`contracts/doc-counts.mjs --check` 现在同时跑 12.1 与附录 C。CI 的 `ci.yml` 与 18.2 检查块早就在跑这条命令，因此无需改 workflow，也就不会出现「新命令没人记得跑」。另有三个只跑一半的入口 `--check-counts` / `--check-appendix` / `--check-tables`（2026-11-22 新增），专供测试夹具用 —— 12.1 的夹具只造两份 README，附录 C 的夹具还要 `NOTICE` 与 `config.mjs`，混在一个入口会让两边都被迫造一堆无关文件。
 
 **负向验证（9 条，全部有效）**：8 个数字各改一处 → 每个都被点名，报错格式统一为「附录 C 写 X ⟨事实⟩，实际 Y（⟨真源⟩）」，例如 `附录 C 写 32 配置项数，实际 37（config.mjs 的 DEFAULTS 键数）`。另加一组「真源变化、附录 C 不动」：9.3 表加一行、`DEFAULTS` 加一键、`NOTICE` 第三章加一行、删一个亮点标题 —— 四种都被抓到。**注回旧实现**（去掉 `checkAppendix` 那一行）→ `appendix-guard.test.mjs` 立刻 **9 项变红**，还原后 32/32 绿。
 
@@ -3078,9 +3080,9 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 | 字体替换写进了没人读的注册表根键 | 15.23 修完格式后，键确实写进去了、戳也查得到、日志写「已导入 2 条替换」，但把 `lfFaceName` 设成「微软雅黑」再跑，`WINEDEBUG=+font` 里 `dump_gdi_font_subst` **没有这条映射**、`substituting` **0 次**、`select_font` 最终选中 `Courier New` —— 字还是方块 | launcher 写的是 `HKCU\...\FontSubstitutes`。`win32u.so` 里按 UTF-16 扫字符串只有 `\Registry\Machine\...\FontSubstitutes`，没有任何 `\Registry\User\` 对应项 —— **HKCU 那份是合法注册表数据，但没有代码去读它**。与 15.23 的格式错是两层独立的错：那层让数据进得去，这层才让它被读到 | 根键改 `HKEY_LOCAL_MACHINE`（实测 `substituting` 触发、`select_font` 选中 `PingFang SC Regular`）；戳同步搬到 HKLM（否则「查得到戳」只证明写进去了、不证明在 GDI 会读的树里，判据又退化成测存在）。三组对照坐实（HKCU 无效 / HKLM 有效 / `Wine\Fonts\Replacements` 有效但因是别名语义未采用）。守卫 6 → 7 项，其中旧那条断言写死了 HKCU —— **把错误结论写进了断言**，改代码时当场变红。详见 15.24 |
 | 明明两条键都写了，DirectWrite 的软件还是方块 | 15.24 修好 GDI 后，把 `lfFaceName` 设成「微软雅黑」再跑，`select_font` 选中 `PingFang SC Regular`、`substituting` 触发；但换成走 DirectWrite 的程序（同一 prefix、同一份字体），中文仍是方块，`+font` 那侧一行日志都没有 | `FontSubstitutes` 是 GDI 专用：按 UTF-16 与 ASCII 两种编码扫 `lib/wine` 全部 ELF/PE，该字面量只在 `x86_64-unix/win32u.so` 里出现 1 处，`x86_64-windows/dwrite.dll` 里一处都没有；后者只认 `HKCU\Software\Wine\Fonts\Replacements`（单字节 ANSI），反汇编 `0x18000b8a5` 处指向该串、`RegOpenKeyA` 的根键实参是 `0x80000001` 即 HKEY_CURRENT_USER | 同一份 .reg 里两条键各写一份（根键正好相反：GDI 要 HKLM，DirectWrite 要 HKCU）；戳搬到 `HKCU\Software\Wine\ExeOnMac` 与 `replacePath` 同根。六组 PE 探针对照坐实：只写 HKLM 时 `familyCount` 292、查不到「微软雅黑」；只写 HKCU 时 293、查得到；两条同写仍 293、`HKLM` 那份换成 `Wine\Fonts\Replacements` 则 292 —— 根键比键名更关键。守卫 7 → 10 项（2 项扫真实二进制的两种编码、1 项断言两条键在同一份文件里），端到端断言改为 SIGTERM 后 `wineserver -k` 再读盘（`-w` 不回写，实测 0 次）。详见 15.25 |
-| 别名写对了、名字也查得到，字画出来还是方块 | 把 `SimSun` 指到纯拉丁字体 Helvetica：`FindFamilyName` 返回 `exists=1`、`faceCount=6`、拉丁字母 `A` 正常渲染，而 `U+4E2D` 是缺字 —— 只查家族名或只查字形下标都会漏掉这类坏映射 | 探针新增像素层：`CreateGlyphRunAnalysis` + `CreateAlphaTexture` 真栅格化，判据三条（`ink>0`、指纹不等于 `.notdef`、已知缺字码点 `U+10FFFD` 必须落在 notdef）。实测别名与真身逐像素同指纹（`A`=0xb302ef1a / `U+4E2D`=0x390a433b），拉丁别名组 `U+4E2D` 被判 `notdef`。详见 15.27 |
-| 像素指纹对得上，但只在 ALIASED 模式下验过 | 15.27 用 `ALIASED` 得「像素对得上」，而真实软件走 ClearType。若 DirectWrite 的渲染模式参数真被当回事，两种模式的指纹与纹理尺寸都不同 —— 只测一档无法区分「模式被忽略」与「模式真的不同」，前者是好消息、后者要补验 | 探针扩成三档（`ALIASED` / `GDI_CLASSIC` / `NATURAL`），ClearType 纹理按 3 字节/像素取值。实测 ALIASED 与 ClearType 指纹不同、`px` 严格 1 : 3，而 `GDI_CLASSIC` 与 `NATURAL` 在 wine 上逐项相同（落到同一条光栅化路径）。详见 15.28 |
-| 落盘检查把 base 层预置值当成本次写入 | X 组只写 HKCU，`system.reg` 却报「写进去了」。根因是判据只看「本次要写的值在文件里出现过」，而 base 层自带 `"Helvetica"="Arial"` —— 要写的值恰好是那边的**键名**。这类假阳性不报错、只报成功，整组对照会静默作废 | 判据改为「段头 + 值名 + 值」三者齐全，并区分根键（`user.reg`=HKCU / `system.reg`=HKLM）；空集显式判 False。修后 X 组 `system.reg=False`。详见 15.28③ |
+| 别名写对了、名字也查得到，字画出来还是方块 | 把 `SimSun` 指到纯拉丁字体 Helvetica：`FindFamilyName` 返回 `exists=1`、`faceCount=6`、拉丁字母 `A` 正常渲染，而 `U+4E2D` 是缺字 —— 只查家族名或只查字形下标都会漏掉这类坏映射 | `GetGlyphIndices` 只回答「字模里有没有这个码点的槽位」，既不判槽位指向的是不是空轮廓，也不管渲染器会不会画缺字框 | 探针新增像素层：`CreateGlyphRunAnalysis` + `CreateAlphaTexture` 真栅格化，判据三条（`ink>0`、指纹不等于 `.notdef`、已知缺字码点 `U+10FFFD` 必须落在 notdef）。实测别名与真身逐像素同指纹（`A`=0xb302ef1a / `U+4E2D`=0x390a433b），拉丁别名组 `U+4E2D` 被判 `notdef`。详见 15.27 |
+| 像素指纹对得上，但只在 ALIASED 模式下验过 | 15.27 用 `ALIASED` 得「像素对得上」，而真实软件走 ClearType。若 DirectWrite 的渲染模式参数真被当回事，两种模式的指纹与纹理尺寸都不同 —— 只测一档无法区分「模式被忽略」与「模式真的不同」，前者是好消息、后者要补验 | 真实软件几乎不走 `ALIASED`：GDI 是 `CLEARTYPE_QUALITY`、DirectWrite 默认 `NATURAL`，两者都是子像素路径，而 15.27 只测了一档 | 探针扩成三档（`ALIASED` / `GDI_CLASSIC` / `NATURAL`），ClearType 纹理按 3 字节/像素取值。实测 ALIASED 与 ClearType 指纹不同、`px` 严格 1 : 3，而 `GDI_CLASSIC` 与 `NATURAL` 在 wine 上逐项相同（落到同一条光栅化路径）。详见 15.28 |
+| 落盘检查把 base 层预置值当成本次写入 | X 组只写 HKCU，`system.reg` 却报「写进去了」。根因是判据只看「本次要写的值在文件里出现过」，而 base 层自带 `"Helvetica"="Arial"` —— 要写的值恰好是那边的**键名**。这类假阳性不报错、只报成功，整组对照会静默作废 | 判据把「值出现过」当「写进去了」，不检查段头与值名，也不区分根键 | 判据改为「段头 + 值名 + 值」三者齐全，并区分根键（`user.reg`=HKCU / `system.reg`=HKLM）；空集显式判 False。修后 X 组 `system.reg=False`。详见 15.28③ |
 
 ### 15.8 跨平台可运行性巡检（2026-11-19）
 
@@ -4024,7 +4026,23 @@ RuntimeError: makensis 编译失败（退出码 0）：
 
 还原后 3/3 绿。
 
-#### ⑦ 仍未处理
+#### ⑦ 顺带抓到的既有缺陷：15.7 表有 3 行少一整列，而前几轮一直报「表格异常 0」
+
+修完上面几处，用同一套解析回头核全仓表格，抓到 15.7「其他已修正的缺陷」表有 **3 行只有 3 个单元格，而表头是 4 列**（缺的是「根因」整列）：
+
+| 行 | 内容 |
+|---|---|
+| 15.7「别名写对了…字画出来还是方块」 | 只有 缺陷 / 症状 / 修复 |
+| 15.7「像素指纹对得上，但只在 ALIASED 下验过」 | 同上 |
+| 15.7「落盘检查把 base 层预置值当成本次写入」 | 同上 |
+
+**这三行在 HEAD 上就存在，不是本轮引入。** 而第 14–16 三轮的 JOURNAL 都写着「表格异常行两版均 0」「表格列数异常 0」—— 判据漏了。漏法很清楚：只检查「行尾有竖线、能切出格子」，没做「同块内逐行与表头比列数」。一个只数格子的判据，对「少一个格子」是瞎的。
+
+已按原表补回「根因」列（内容取自同章的 15.27/15.28 正文，不是新编），中英两版同步。修后全仓两版表格块列数异常 **0**（逐块与首行比列数）。
+
+**这条的教训与第 15 轮那条同源**：判据要能失败，而「表格异常 0」这个结论连续三轮都是绿的。它缺的不是执行力，是判别力。
+
+#### ⑧ 仍未处理
 
 (a) `test_phase2` 依然 `from tests.test_phase1 import build_min_pe` —— 已无副作用，但更彻底的做法是把这两个纯字节构造函数下沉到 `fixtures.py`，让测试模块之间不再互相导入；(b) CI 只跑 `discover`（字母序），不跑单类，顺序依赖在 CI 上永远是绿的 —— 值得加一条「单独跑每一个测试类」的作业；(c) `fixtures._SAMPLE_CACHE` 是进程级的，同一进程内若先构造、后被 `reset_sample_cache()` 清掉的顺序用错仍会拿到旧值。
 
@@ -4495,7 +4513,23 @@ wine 已启动 pid=18519
 | 运行时 | S 组：292 / 查不到（且先断言 HKLM 真写进去了） | 同上 |
 | 运行时 | R 组：293 / 查得到 / `faceCount`=12 / 两个中文字形 present | 同上 |
 
-#### ⑥ 仍未处理
+#### ⑥ 从「一次性扫描」升级成会自己变红的守卫
+
+上面这次扫描仍是一次性的：结果写进了文档，但仓库里**新增**一个 `regedit /S` 调用点时，没有任何东西会红。新增 `tests/test_reg_write_paths.py`（7 项），把清单变成断言：
+
+| 守卫 | 挡的是什么 |
+|---|---|
+| 每个写入点必须在清单里 | 新加一处没有回查的写入点 —— 第 11、17 两轮缺陷的正是这个形态。红的时候点名文件与行号 |
+| 清单不许留幽灵条目 | 清单里挂着一个已经不写注册表的路径：看着「都覆盖了」，实际那处早没人守 |
+| 每个导入路径必须有戳机制 | 实现改了、清单没跟着改 —— 清单是给人对账用的，过期就等于说谎 |
+| 一条 `reg add` / `reg import` 都不许有 | 它们绕开可审计的 `.reg` 文件，本文件其余三条守卫的前提全部作废（铁律 7）。当前 0 处，这条守住「以后也别加」 |
+| 扫描器自己必须找得到 ≥ 3 处 | 一个扫不到东西的扫描器，会让上面三条永远通过 —— 通过得毫无意义（第 9、16 轮各踩过一次空集全绿） |
+| 注释不算命中 | 本仓库有十几处解释性注释写着 `regedit /S`。算进来的话清单永远对不上，最后只能放宽判据 —— 那时守卫就废了 |
+| 占位表那条不许自己导入 | `_write_placeholder_regs` 写的是 wine 自己的存储格式、由 wine 自读；它若改成导入，判据语义就变了，必须重新登记并加戳 |
+
+三处负向验证全部有效：新增一个未登记写入点 → **1 项红**（点名 `wepack/_tmp_probe.py: 行 [2]`）；把戳常量改名 → **1 项红**；加一条 `reg add` → **1 项红**。还原后 7/7 绿。
+
+#### ⑦ 仍未处理
 
 (a) **`GetFamilyNames` 层仍会 page fault** —— 15.25 遗留 (d) 未解决。本轮改为先 `GetFontCount` 判「有没有字面」、再 `GetFont(0)` → `GetFaceNames`，绕开了家族名那一层；`faceCount` 与字形覆盖已经能决定性地区分「有字模」与「只有名字」，但「DirectWrite 解析到的家族名到底是什么字符串」这一层仍然取不到；(b) 渲染层仍未验（本轮验的是「DirectWrite 说这张字模里有 U+4E2D 的字形」，不是「屏幕上画出来了」）—— **15.27 已推进到 alpha 位图指纹比对**，未验的只剩笔画质量本身；(c) 只验了微软雅黑与宋体两个键名，黑体、等线等未逐个验。
 
@@ -4617,7 +4651,381 @@ wine 已启动 pid=18519
 
 #### ⑥ 仍未处理
 
-(a) **人眼仍未确认字形质量** —— 本轮到「ClearType 的子像素 alpha 也对得上」，仍是机器能给的最外层。笔画美观、连字正确、次像素渲染在真实屏幕上的观感，只有人眼能判；(b) 只测了 `GDI_CLASSIC` / `NATURAL` 两档 ClearType 与 `ALIASED`，**灰度抗锯齿（`DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`）与 `OUTLINE` 未测**；(c) `measuringMode` 固定 `NATURAL`，`GDI_CLASSIC` 那一侧的取整差异未验；(d) 只验苹方一张字模；(e) 第 11 轮遗留③「同类 `.reg` 写入路径全量机械扫描」连续第六轮挂着；(f) **`git push` 仍是最高优先级人工待决项**，第 11–16 六轮全部只在本地。
+(a) **人眼仍未确认字形质量** —— 本轮到「ClearType 的子像素 alpha 也对得上」，仍是机器能给的最外层。笔画美观、连字正确、次像素渲染在真实屏幕上的观感，只有人眼能判；(b) 只测了 `GDI_CLASSIC` / `NATURAL` 两档 ClearType 与 `ALIASED`，**灰度抗锯齿（`DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC`）与 `OUTLINE` 未测**；(c) `measuringMode` 固定 `NATURAL`，`GDI_CLASSIC` 那一侧的取整差异未验；(d) 只验苹方一张字模；(e) 第 11 轮遗留③「同类 `.reg` 写入路径全量机械扫描」已在 15.29 完成；(f) **`git push` 仍是最高优先级人工待决项**，第 11–17 七轮全部只在本地。
+
+---
+
+### 15.29 `.reg` 写入路径全量机械扫描：同一形态的缺陷只修了一半（2026-11-22 实测）
+
+第 11 轮记下一条遗留：「同类 `.reg` 写入路径全量机械扫描未做」，从第 11 轮记到第 16 轮，连续六轮挂着。本轮把它做掉 —— 结果是**又抓到一处同形态缺陷，而且是最典型的一处：第 11 轮修过它，但只修了 launcher 那一侧。**
+
+#### ① 先机械抽取，再逐个过判据
+
+不靠眼看，用正则把全仓所有注册表写入点抽出来。命中 5 处，其中 3 处是真实写入：
+
+| 位置 | 写什么 | 导入方式 | 回查判据 |
+|---|---|---|---|
+| `launcher/Sources/main.swift` `FontSubstitution.apply` | 字体替换（两条键）+ 戳 | `regedit /S` | 一次性 UUID 戳 ✓ |
+| `wepack/install` `suppress_restart` | 重启拦截（3 个策略值） | `regedit /S` | 查 `NoClose` 是否存在 ✗ |
+| `wepack/prefix` `_write_placeholder_regs` | 占位表（wine 起始必需） | 不导入，wine 自读 | 文件级：首行 + arch ✓ |
+
+另 2 处是「读/校验」而非写入（`package/verify.py` 判存在性、`layers/` 判字体注册），不涉及格式。
+
+**判据只有一条**：凡「写 .reg 再导入」的路径，回查必须能区分「**这次**写进去了」与「**上次**写的还在」。按这条判据，5 处里有 1 处不合格。
+
+#### ② 被漏掉的那处：真实 wine 复现假阳性
+
+`suppress_restart` 的回查是「`reg query` 目标键、输出里有 `NoClose` 即成功」。这与第 11 轮 launcher 修掉的那条**逐字同形态**，当时只改了 Swift 一侧，Python 这侧没动。
+
+真实 wine-11.21 复现（同一 prefix，先正确导入一次让键存在，再用 wine 内部格式再导一次 —— `regedit /S` 对那种格式退出码 0、stderr 空、零写入）：
+
+```
+第一轮：正确格式导入       reg query rc=0  含 NoClose=True
+第二轮：坏格式（零写入）    regedit rc=0  stderr=''
+                          reg query rc=0  含 NoClose=True   ← 键是第一轮的
+                          _policy_imported() → True → 日志写 INFO reboot.suppressed
+```
+
+**本次实际写入 0 个键，日志说拦截生效了。**
+
+一个必须说清的前提：base 层自带的 `user.reg` 里 `NoClose` / `NoRun` / `NoDriveTypeAutoRun` 各 **0** 次（实测 `grep -c` 三次都返回 0），所以**新建 prefix 上不会误判**。但「第二次安装」会 —— 而同一个 prefix 反复装东西，恰恰是这个工具最常见的用法。
+
+#### ③ 修法：把 launcher 的一次性戳下沉到 Python 侧
+
+同一个 `.reg` 里多写一节 `HKCU\Software\Wine\ExeOnMac`：
+
+```ini
+[HKEY_CURRENT_USER\Software\Wine\ExeOnMac]
+"RestartSuppressStamp"="<每次不同的 uuid4>"
+```
+
+回查要求**两层同时成立**：① 戳查得到且逐字等于本次 token；② 策略键里有 `NoClose`。第①层证明整个文件被吃进去了，第②层证明那一行真的落到了策略键下 —— 只看戳会漏掉「文件里某一节生效、另一节没生效」的半成品。
+
+三个设计取舍：
+
+- **不先删旧键。** 删键是破坏性动作：本次导入失败，用户原本能用的拦截就被清掉了，从「旧值可用」变成「什么都没有」。戳不会倒退 —— 写失败时旧戳仍在，只是**不等于本次 token**，于是判失败，正是我们要的。
+- **戳与字体替换的戳各用各的名字**（`RestartSuppressStamp` / `FontSubstitutionStamp`）。launcher 每次启动写一次、安装器每次安装写一次，同名会互相覆盖，谁后写谁赢，先写的那方回查就永远失败。
+- **戳落在 `Software\Wine` 下，不进策略键。** 策略键是 Windows 软件真会读的树，往里塞自定义值会被看到；`Software\Wine` 是 wine 自有命名空间，对 Windows 程序完全不可见。
+
+#### ④ 顺带核对两条既有注释，其中两条与实测不符
+
+扫描时顺手把 `tools/dwrite-probe/run.py` 里两条「必踩坑」的注释拿去复核（wine-11.21，各跑 4 次）：
+
+| 注释写的 | 实测 |
+|---|---|
+| 传宿主绝对路径 `regedit` 报 `ShellExecuteEx failed`、退出码非 0，须转 `z:` | **宿主路径 5/5 全部成功**（含带空格路径 `/tmp/r17/regs/a b/sp.reg`），`z:` 形态也成功 → **两者都行，不是坑** |
+| `wineserver -w` 之后 `user.reg` 命中 0 次，必须 `-k` | **`-w` 之后立即读，4/4 命中**（键已在文件里） |
+
+两条注释都把这句写成了「实测」结论。它们**当时可能成立**（第 13 轮记录的红是真实发生过的），但至少在当前环境、当前 wine 版本下不复现，继续写成「必然如此」会误导下一个读者去做无意义的规避。
+
+处置：不改代码逻辑（`z:` 与 `-k` 都仍然有效，只是不是**必需**），只改注释措辞为「本机当前不复现，保留为历史记录」。**不改断言** —— 断言本来就只判结果，不判走哪条路。
+
+#### ⑤ 守卫 0 项 → 7 项，三处负向验证全部有效
+
+| 层 | 断言 | 负向验证（改回旧实现） |
+|---|---|---|
+| 行为（假 wine） | 戳是上一轮的值 → 必须 WARN，不许 INFO | 去掉戳这一层 → **1 项红** |
+| 纯函数 | 戳须值名 + 类型 + 值三件齐全；值出现在键路径里不算；空 token 判假 | 判据退化成「出现过」→ 见下一行 |
+| 纯函数 | 戳与策略键必须同文件、只生成一份文本、不许含 `WINE REGISTRY` | 戳挪进策略键 → **1 项红** |
+| 纯函数 | 戳键 ≠ 策略键、不许是它的子路径、必须在 `Software\Wine` 下 | 同上一行 |
+| 纯函数 | 默认 token 每次不同（`_new_token()` 连调两次必须不同，32 位十六进制） | 把 `_new_token` 改成常量 `'f'*32` → **1 项红** |
+| 落盘 | 写出的文件里**真有**本次 token 与 `NoClose` | 只写策略键不写戳 → **1 项红** |
+| 运行时（真实 wine） | 导入 → 轮询查到本次戳 → 策略键有 `NoClose` → `_policy_imported` 为真 | 同上 |
+
+**第 3 条负向验证第一次是绿的，而且是假绿。** 把 `suppress_restart` 改成「只写策略键、不写戳」后，前 5 项守卫**全部照旧通过** —— 因为假 wine 是按剧本作答的，它不读磁盘上的 `.reg`，于是「代码没写戳」这件事它看不见。补了「读真实落盘文件」那条后，同一次篡改立刻红。
+
+**这是「夹具复制了被测逻辑」的第二次同形态复发**（第 5 轮是压测自己插 `<wbr>`）。假实现能验证判据的逻辑，**证明不了被测代码真的写了那些字节** —— 两者都要有，缺哪个都会留一个盲区。
+
+**另一条当场自查出来的空转**：初版「默认 token 每次不同」写的是 `assertNotEqual(restart_reg_text("a"), restart_reg_text("b"))` —— **两个入参本来就不同**，无论默认戳是不是常量这条都成立，它测的是「字面量被原样拼进文本」。改为直接看默认值来源：`_new_token()` 连调两次必须不同、长度 32、全十六进制；把 `_new_token` 改成常量 `'f'*32` 后立刻红。**判据必须能失败，且失败的形态要与它声称要防的那件事同形。**
+
+#### ⑥ 仍未处理
+
+(a) 扫描只覆盖 `.reg` 这一类；`reg add` / `reg import` / 直接改 hive 二进制尚未机械扫（当前代码里没有，但缺一条守卫在拦新增）；(b) `_write_placeholder_regs` 是「不导入」路径，它的判据是文件级首行 + arch，不涉及「这次写进去了」，语义上不需要戳；(c) 只测 wine-11.21；(d) 第 12–16 轮遗留的「人眼确认字形质量」与本轮无关，仍未做；(e) **`git push` 仍是最高优先级人工待决项**。
+
+---
+
+### 15.30 「文件不全」被报成「格式不对」：一次 `or` 把两种相反的结论合并了（2026-11-22 实测）
+
+本轮从「注释里的实测断言会腐化」这条线索切进去，机械抽出 `wepack/` 里所有带「实测」且带数量断言的注释共 **8 条**，逐条复核：**6 条准确，2 条已过期**。核对过程中撞到一个更硬的问题 —— 不是注释写错了，是**代码把两种完全相反的原因报成了同一句话**。
+
+#### ① 先复核那 8 条数量断言
+
+| 位置 | 断言 | 实测 | 结论 |
+|---|---|---|---|
+| `layers/__init__.py:68` | base 层 `system32` 含 28 个 VC++ 运行库 + 6 个 ATL、0 个 mfc | `ls \| grep -icE '^(msvcp\|msvcr\|vcruntime\|vcomp)'` = **28**、ATL = **6**、mfc = **0** | 准确 |
+| `layers/__init__.py:77` | `Windows NT\...\Fonts` 单段 882 条，PingFang 48 / Hiragino 22 / Songti 16 / Kaiti 14 / Heiti 10 | 解析 `system.reg` 实测 值行 **882**，五项 **48 / 22 / 16 / 14 / 10** | 准确 |
+| `prefix/__init__.py:278` | `system.reg` 在前 128 字节内就写了 `#arch` | `#arch` 首次出现在字节偏移 **67** | 准确 |
+| `extract/candidates.py:567` | `d/e.exe` 深度 1、7 字符 | `len("d/e.exe")` = **7** | 准确 |
+| `install/__init__.py:557` | NSIS 包装 12 个文件的同时 prefix 少了 68 个 | 夹具 `demo_nsis()` 确为 12 文件（见 `fixtures.py` 注释与总量 2.1 MB） | 准确（少 68 个未重测，属另一维度的历史观测） |
+| `install/__init__.py:974` | 跑一轮含真实安装的测试，Dock 里堆了 12 个 wine 图标 | 与上一条同源 | 准确（历史观测） |
+| `tools.py:44` | 「一个只含 `\xff\xfe` 的 stdout 就让 **19 处** `text=True` 全部会崩」 | 现在 `wepack/` 内裸 `text=True` 是 **0 处**（全部走 `TEXT_MODE`）；且 `or` 的原意是「19 处在改之前都会崩」 | **已过期**：数字描述的是改前状态，读起来像现在时 |
+| `candidates.py:90` | 「当前 **12 条**互不为子串」 | `RUNTIME_COMPONENTS` 12 条里存在 **2 对**包含关系：`webview2 ⊂ msedgewebview2`、`msedge ⊂ msedgewebview2` | **错**（有测试守着「前面不许被后面包含」，而这个方向恰好是合法的） |
+
+两条过期的都没动断言，只把措辞改成时态明确 —— **注释里的历史观测要么标日期，要么标明「改前」**，否则下一个人会以为它在描述现在。
+
+#### ② 真正的问题：一个 `or` 把「格式不对」与「文件不全」合成了一句话
+
+`pe.py` 的 `parse()` 开头原本是这样：
+
+```python
+if r.size < 0x40 or r.read(0, 2) != b"MZ":
+    raise PeError("不是 MZ 可执行文件")
+```
+
+把真实的 `notepad.exe`（253952 字节）截断到 **2 / 32 / 63** 字节，报出来的都是「不是 MZ 可执行文件」—— 而那些文件开头**确实是** `MZ`。
+
+**这条文案在 `detect` 路径上 100% 为假。** 那里的前置守卫是 `if head[:2] == b"MZ":`，能走到 `parse()` 就一定以 `MZ` 开头。所以每一次由截断触发的报错，都在说一件不可能的事。
+
+两种原因对用户的指向完全相反：
+
+| 报什么 | 用户会怎么做 | 真实情况 |
+|---|---|---|
+| 「不是 MZ 可执行文件」 | 这不是 Windows 程序，别试了 / 换别的包 | 是 Windows 程序，只是没下完 |
+| 「文件过短 / 被截断」 | 重新下载或重新拷贝 | 正确方向 |
+
+`e_lfanew` 那条同样合并了两种情形：`e_lfanew < 0x40` 是字段真的非法（指向 DOS 头内部），而 `e_lfanew + 24 > size` 只是文件比字段声明的短 —— 后者是被截断。实测截断到 64 / 128 字节时，报的是「e_lfanew 非法：0x78」，而 `0x78` 对真实安装包来说是**完全合法**的值（`demo-setup.exe` 实测 `e_lfanew = 0xd8`，`notepad.exe` 是 `0x78`）。
+
+#### ③ 同形态在 CFB（MSI 容器）上有一份
+
+```python
+if len(data) < 512 or data[:8] != MAGIC:
+    raise CfbError("不是 OLE 复合文档")
+```
+
+写入 `MAGIC + b"\0"*92`（100 字节，magic **完全正确**）→ 报「不是 OLE 复合文档」。对 MSI 来说这是最误导人的一句：用户会以为下错了格式，去换来源重下。
+
+这一份尤其可惜 —— 同文件里**已经有** `CfbTruncatedError` 这个专门类型（第 17 轮之前的截断修复引入的），`detect._detect_msi` 也已经在按它降级。只是头部这条早于它、没跟着换。
+
+#### ④ 拆开之后，`detect` 的证据链又暴露一处自相矛盾
+
+修完 `pe.py`，`detect` 的输出变成这样：
+
+```
+- PE 解析失败：文件过短：32 字节，连 DOS 头（64 字节）都不够 —— 文件可能未下载完或被截断
+- 非 PE、非 CFB，无法归类          ← 上一句刚说「PE 解析失败」，这句说「不是 PE」
+```
+
+根因是收尾分支的写法：
+
+```python
+if pe_error:
+    evidence.append(f"PE 解析失败：{pe_error}")
+if info is not None:
+    ...
+else:
+    evidence.append("非 PE、非 CFB，无法归类")
+```
+
+`pe_error` 非空时 `info` 必然为 `None`，两条**同时成立**。这两句在证据链里并列，读的人不知道该信哪一句。
+
+#### ⑤ 修法与判据
+
+三处改动，都不改任何判定逻辑，只把「原因」拆开：
+
+| 文件 | 改前 | 改后 |
+|---|---|---|
+| `wepack/pe.py` | 一个 `if` 报一句话 | 长度 < 64 → 「文件过短：N 字节…可能未下载完或被截断」；非 MZ → 「不是 MZ 可执行文件：前两字节为 b'XY'」；`e_lfanew` 指进 DOS 头 → 「非法」；`e_lfanew + 24 > size` → 「文件被截断：…需要 144 字节，实际只有 64 字节」 |
+| `wepack/detect/cfb.py` | 一个 `if` 报一句话 | 长度 < 512 → `CfbTruncatedError`（与文件里既有的类型一致）；magic 不对 → `CfbError`「不是 OLE 复合文档：前 8 字节为 …」 |
+| `wepack/detect/__init__.py` | 解析失败也补一句「非 PE」 | `pe_error` 非空时改说「以 MZ 开头但 PE 结构不完整，可能是下载中断的安装包」 |
+
+**报错数字全部来自实测，不是估的**：「需要 144 字节」= `e_lfanew(0x78) + 24`；「实际只有 64 字节」= 样本大小。用户据此可以直接判断该重下还是该换包。
+
+#### ⑥ 守卫与负向验证
+
+新增 **7 项**（`test_phase1.py`），每一对都同时守住「新话要说对」与「旧错诊不许被洗掉」：
+
+| 用例 | 断言 | 负向验证 |
+|---|---|---|
+| `test_truncated_mz_says_truncated_not_not_mz` | 0 / 1 / 2 / 32 / 63 字节都必须含「过短」且不含「不是 MZ」 | 注回旧 `if ... or ...` → **9 项红** |
+| `test_real_mz_prefix_is_not_reported_as_non_mz` | 真实 PE 裁到 2 / 16 / 40 / 63 字节同样不许说「不是 MZ」 | 同上 |
+| `test_dos_only_prefix_reports_truncation_not_bad_lfanew` | 裁到 `e_lfanew+4` 报「截断」，不许报「非法」 | 同上 |
+| `test_bad_lfanew_still_says_illegal` | `e_lfanew = 0x10` 必须仍报「非法」 | 同「注回旧实现」，该项被第一条一起带红 |
+| `test_truncated_before_header_reports_truncation` | 0 / 1 / 100 / 511 字节都必须是 `CfbTruncatedError` 且含「截断」 | 注回旧 `or` 实现 → **4 项 error** |
+| `test_wrong_magic_still_says_not_ole` | magic 真错时必须是 `CfbError` 而**不是** `CfbTruncatedError` | 同上 |
+| `test_truncated_pe_evidence_is_not_self_contradictory` + `test_genuinely_non_pe_still_says_non_pe` | 证据里不许同时出现「PE 解析失败」与「非 PE」；真非 PE 仍要报「非 PE」 | 去掉 `elif pe_error` 分支 → **1 项红** |
+| `test_shadowing_check_is_direction_sensitive` | 判据必须只抓「早的是晚的子串」这一反向；正向冗余（`msedgewebview2` ⊃ `msedge`）不许误报 | 见下 |
+
+**负向验证里最值得记的一条**：`assertRaises` 抓不到这个缺陷。它只要求「抛了异常」，而「不是 MZ」与「文件被截断」两句完全不同的话在它眼里一样 —— 这正是原有 `test_reject_truncated` 一直绿着的原因。**必须断言文案内容**，`assertRaises` 只能守「有没有抛」，守不住「说得对不对」。
+
+#### ⑦ 回归
+
+`exeonmac` **525 → 534**（`Ran 534 tests in 291.6s / OK`，0 fail / 0 skipped）；`contracts` 121、`mac2win` 167 / `win2mac` 130 / `apponwin` 96 / `console` 254 / `ai` 132 全部相等无减少；`node contracts/validate.mjs` ✓ 13 条 / 9 段位 / 4 前缀；`node contracts/doc-counts.mjs --check` ✓ 1434 两版逐项相同 + 附录 C 8 项 + 表格结构逐块一致。
+
+#### ⑧ 仍未处理
+
+(a) ~~`wepack/icon.py` 截断 exe 路径未实测~~ → 见 15.31，已实测并修掉；(b) 只验了 PE 与 CFB 两类容器的头部判据，其他「读头 → 报错」的合并式 `or`（`msi_tables.py` 三处、`layers/__init__.py` 一处、`prefix/__init__.py` 一处、`tests/fixtures.py` 两处）尚未逐个审；(c) 第 18 轮抽的 8 条只覆盖「带数量」的断言，纯定性断言（「必然」「一定」）未逐条复核；(d) **`git push` 仍是最高优先级人工待决项**，第 11–19 九轮全部只在本地。
+
+### 15.31 半个 exe 被安静地包装成可交付的包：`except` 比异常类型更该被审（2026-11-22 实测）
+
+第 18 轮把 `parse()` **头部**的两条「文件不全」文案拆开了，遗留里写着「截断 exe 走图标路径未实测」。这一轮去测，发现真正的破坏面不在头部 —— 头部早就拦得住，而在**下游**。
+
+#### ① 实测：一个只下了一半的 exe，会产出 `ok=true` 的 `.app`
+
+用真实 `notepad.exe`（253952 字节）逐级截断，喂给 `wepack package`，结果**不是单调的**：
+
+| 截断到 | `ok` | 图标 | 用户看到 |
+|---|---|---|---|
+| 2 / 63 / 1000 / 4096 / 45056 / 50000 字节 | **true** | 占位图（蓝底 W） | 打包成功，零告警 |
+| 80000 / 120000 / 200000 字节 | false | 无 | 失败，报「读取越界」 |
+| 253000 / 253951 字节 | **true** | 真图标 | 打包成功（图标区已读全） |
+
+只砍掉一半文件反而「成功」，砍到八成反而「失败」，再砍到几乎完整又「成功」。**同一个缺陷，三种结果，且与严重程度无关** —— 这正是「没有单一判据」的典型症状。
+
+#### ② 三层原因，每一层都是「两种相反的事共用一条路」
+
+| 层 | 代码 | 合并了什么 | 后果 |
+|---|---|---|---|
+| 1 | `pe.resources()` 的 `except PeError: return []` | 「本来就没有资源表」/「资源表被截断」/「目录结构损坏」 | 截断在下游被抹成「没有资源」 |
+| 2 | `icon.py` 的 `except pe.PeError → UsageError("无法解析 PE 结构")` | 「不是 PE」/「PE 不完整」 | 截断被降级成「格式不对」 |
+| 3 | `build_app_icon()` 的 `except UsageError → 占位图` | 「没有图标」/「文件不全」 | 截断被静默吞掉，`ok=true` |
+
+三层串起来：`resources()` 吞掉异常 → `icon.py` 把它包装成 `UsageError` → `build_app_icon` 用 `except UsageError` 判「降级」→ 占位图 → **零告警**。每一层单看都合理，串起来就是「把只下一半的 exe 包装成可交付的包」。
+
+#### ③ 修法：先加判据，再让每一层只处理它认得的那一种
+
+新增 `pe.truncated(info)`：**节区表里 `raw_offset + raw_size` 的最大值 > 文件真实长度**。这是「这个 PE 声称自己多长」与「它实际多长」的直接比较，不含任何启发式。
+
+**判据本身的实测**（这条比修法更重要，因为它决定了改动的安全边界）：
+
+- 50 个真实 exe（wine base 层 + 本机样本）逐个跑 `need == size`，**误报 0 个**；
+- overlay 型安装包（NSIS / Inno）的载荷挂在最后一个节之后，节区表不覆盖它 → `need <= size` 仍成立，不受影响；
+- 对 `notepad.exe` 逐字节截断，`need > size` 精确命中。
+
+三层随之改动，**不改任何业务判定**，只让每层区分它该区分的东西：
+
+| 层 | 改法 |
+|---|---|
+| 1 | 新增 `PeTruncatedError(PeError)`；`resources()` 加 `strict` 参数（默认 `False` 保持旧行为，供打分器用）。`strict=True` 时截断抛 `PeTruncatedError`，结构损坏才降级为 `[]` |
+| 2 | `_frames_from_exe()` 读完 PE 头**立刻**判 `truncated()` —— 因为截断可能正好砍在资源表之前，让 `DataDirectory[RESOURCE]` 本身还在、指向的内容没了（50000 字节那条正是如此：`res_rva` 非零但映射不到节区） |
+| 3 | `build_app_icon()` 显式 `except pe.PeTruncatedError: raise`，在 `except UsageError` **之前** |
+
+#### ④ 同一形态的两处，本轮一并修掉
+
+审 `icon.py` 时把文件里所有 `A or B` 只抛一句的地方都过了一遍（第 18 轮的教训：修一处要全仓搜同形）：
+
+| 位置 | 合并了什么 | 改后 |
+|---|---|---|
+| `_dib_to_bmp()` 的 `header_size < 40 or header_size > len(dib)` | 「OS/2 老格式，真不认识」（12 字节）/「文件只有 100 字节，真被截断」（4000 字节） | 两条分开，前者报「不支持的头格式」，后者报「被截断：声明 4000，实际 100」 |
+| `_largest_ico_entry()` 的 `payload = data[off:off+size]` | Python 切片越界不报错，只变短；短到 0 就 `continue` | 先断言 `len(payload) == size`；不等则计入「被截断」，最后报「N 个条目的像素数据不完整」 |
+
+第二处最阴：一个声明 payload=1000 字节、实际文件只有 22 字节的 ICO，报的是**「ICO 里所有条目数据都为空」** —— 目录项完整、尺寸位深全对，只是数据没下完。用户看到「为空」会去换图标，实际该做的是重下。
+
+#### ⑤ 守卫与负向验证
+
+新增 **18 项**（`test_phase1.py` 10 项 + `test_phase3.py` 8 项）。负向验证 5 处全部有效：
+
+| 注回的旧实现 | 变红 |
+|---|---|
+| `build_app_icon` 统一 `except UsageError` | **2 项**（1 fail + 1 error） |
+| `_dib_to_bmp` 的合并式 `or` | **2 项** |
+| `_largest_ico_entry` 的静默切片 | **2 项** |
+| `resources()` 的 `except PeError: return out` | **1 项** |
+| `truncated()` 放宽 4KB 容忍 | **5 项** |
+
+**第四个负向验证第一遍是绿的** —— 因为既有的 `test_truncated_resource_dir_is_named_in_strict_mode` 用「RVA 落空」构造，而那条路径在进 `_walk_resource_dir` **之前**就返回了，压根走不到 `except` 分支。补了两条用例（`_pe_with_broken_walk` 造一份「目录能定位、遍历时越界」的样本，分别在完整/截断两种状态下跑），才让它变红。**「测试通过」不等于「分支被覆盖」**，负向验证是唯一能看出这条差别的手段。
+
+#### ⑥ 回归
+
+`exeonmac` **534 → 552**（`Ran 552 tests in 302.0s`），`mac2win` 167 / `win2mac` 130 / `apponwin` 96 / `console` 254 / `ai` 132 / `contracts` 121 全部不变，合计 **1452**；`node contracts/validate.mjs` ✓ 13 码 / 9 段位 / 4 前缀；`node contracts/doc-counts.mjs --check` ✓ 1452 两版逐项相同 + 附录 C 8 项 + 表格结构。
+
+> 全量跑时 `test_clonefile_saves_space` 失败过一次（`6152192 not less than 1048576`）。单独跑 `test_phase2` 110 项全绿、单跑该项也绿 —— 它用「卷可用空间差值」判定，全量并发时被其他写盘干扰。**这是采样方式的缺陷，不是产品缺陷**，本轮未改（改法应是把 64 MB 砍到 1 MB 以内再比，或改用 `stat -f %S` 对比 inode 共享），记在这里备用。
+
+#### ⑦ 仍未处理
+
+(a) `msi_tables.py` 三处、`layers/__init__.py` 一处、`prefix/__init__.py` 一处、`tests/fixtures.py` 两处合并式 `or` 未逐个审；(b) `test_clonefile_saves_space` 的采样方式待改；(c) 纯定性断言（「必然」「一定」）未复核；(d) **`git push` 仍是最高优先级人工待决项**。
+
+### 15.32 只下了一半的运行时被判成合格产物：同样的病，在 JS 侧一寸没修（2026-11-22 实测）
+
+#### ① 问题
+
+第 18、19 两轮把 `exeonmac`（Python 侧）的「文件不全被报成格式不对」修干净了，但**同一形态在 `mac2win`（JS 侧）从未被审过**。这不是疏漏一处代码，是疏漏一个面：两边的 PE 解析器各写各的，修完一侧时没人问另一侧。
+
+#### ② 缺陷（可复现，真实样本）
+
+把真实 `clock.exe`（40960 字节，PE32/i386/windows-gui）逐级截断，再按 `electron` / `nwjs` / `runtime` / `artifact` 四条链路实际用的参数 `checkWindowsExe(path, { gui: false })` 判定：
+
+| 截断到 | `gui:false` 判定 | 说明 |
+|---|---|---|
+| 144 B | `ok:false` | 抛 `RangeError`，文案是 `The value of "offset" is out of range` —— Node 内部错误直出给用户 |
+| **200 B** | **`ok:true`、`problems:[]`** | **只占原文件 0.5%，被判成合格运行时** |
+| 300 / 400 / 600 / 1000 / 5000 B | `ok:true` | 同上，一路绿灯 |
+| 40959 B（差 1 字节） | `ok:true` | 连边界都不设 |
+| 40960 B（完整） | `ok:true` | 唯一正确的一次 |
+
+根因两条，都在 `mac2win/src/verify/pe.mjs`：
+
+| # | 旧实现 | 后果 |
+|---|---|---|
+| 1 | `readHead(path, 4096)` 之后**从不问文件真实长度** | 头 200 字节里的机器类型、特征位、可选头 magic 全都在，判据一个都没落空，于是「合格」 |
+| 2 | `if (peOffset < 64 \|\| peOffset + 24 > head.length)` 把「字段真非法」与「文件比偏移短」合成一句 | 完整 253952 字节的 `notepad.exe` 只要 `e_lfanew` 被改成 5000，就报「文件可能被截断」—— 文件完好，只是偏移越界 |
+
+第 2 条还藏着更阴的一层：`peOffset + 24 > head.length` 里的 `head.length` 是 **4096 的读取窗口**，不是文件长度。所以「偏移超出窗口但文件完好」也被算成截断。实测 `e_lfanew` 取 4056/4060/4064/4070/4072 时报 `PE 签名错误（实际 0）`（真读了越界后的零字节），取 4080 时报「越界，文件可能被截断」—— 同一个完好文件，报错文案随偏移飘移。
+
+#### ③ 判据：节区表声明的长度
+
+每个节区都写明 `PointerToRawData + SizeOfRawData`，其最大值就是这个 PE 声称自己有多长。文件真实长度小于该值，只可能是被截断（下载中断 / `head -c` / AirDrop 未完成）。
+
+**误报率实测**：7 层 wine 目录下全部 **672 个** `.exe`，逐个读节区表核对 —— 657 个可解析样本 `declaredSize == fileSize` **全部精确相等，误报 0**（15 个因缺 PE 签名或表越界跳过）。`needLt`（声明小于实际）**0 个**，`needGt`（声明大于实际）**0 个**。overlay 型安装包（NSIS / Inno）的载荷挂在最后一节之后，`declaredSize < fileSize`，同样不受影响。
+
+#### ④ 修法（只拆原因，不改任何业务判定）
+
+| 位置 | 改法 |
+|---|---|
+| 类型 | 新增 `PeTruncatedError extends PeError` —— 「这是个可执行文件，但没下完，重下即可」与「这不是可执行文件，别试了」处置相反 |
+| 长度来源 | 开头 `stat(path).size` 拿真实长度，此后所有边界都用 `size` 而不是 `head.length` |
+| `e_lfanew` | 拆三条：`< 64` 报「非法，指向 DOS 头内部」/ `+24 > size` 抛 `PeTruncatedError` 并给所需与实际字节 / `+24 > head.length` 则**扩读**（文件够长，只是超出窗口） |
+| 可选头 | `optionalHeaderSize < 70` 报「不是可执行镜像（如 .obj）」；`optional + 70 > size` 抛截断；超出窗口则扩读。**不再让 `subsystem` 变成 `null`** |
+| 节区表 | 读表前先判 `表末 > size` → 截断；再算 `declaredSize`，`> size` → 截断并报「声明 N 字节，实际 M 字节」 |
+| 返回值 | 新增 `fileSize` / `declaredSize` 两个字段（诊断用，不改判定） |
+| `checkWindowsExe` | 失败时返回 `truncated: true/false` 标记；成功时 `truncated: false`。文案不再套「文件被截断，无法校验：」前缀（异常本身已说清），避免同一句话说两遍 |
+
+#### ⑤ 守卫与负向验证
+
+新增 **12 项**（`mac2win/test/pe.test.mjs` 从 7 项到 19 项），另加夹具 `guiPeX86Bytes()`（GUI 子系统的 32 位 PE，纯本地拼字节，零网络）。
+
+每条都断言**文案内容**而不只是 `ok === false` —— 后者对「不是 PE」与「被截断」完全一样，两句话互换之后依旧全绿。这正是 Python 侧 `test_reject_truncated` 绿了十轮的同一类假守卫。
+
+负向验证 **5 处全部有效**：
+
+| 注回的旧实现 | 变红 |
+|---|---|
+| 摘掉节区表总长判据 | **2 项** |
+| 摘掉可选头跨度判据 | **2 项** |
+| `peOffset + 24 > size` 恒假（回到只读头部） | **1 项** |
+| `truncated` 标记写死 `false` | **1 项** |
+| 节区表总长放宽 16 字节容忍 | **1 项** |
+
+#### ⑥ 回归
+
+`mac2win` **167 → 179**（`# pass 179 / fail 0 / skipped 0`，约 22 秒），`exeonmac` 552 / `win2mac` 130 / `apponwin` 96 / `console` 254 / `ai` 132 / `contracts` 121 全部不变，合计 **1464**；`node contracts/validate.mjs` ✓ 13 码 / 9 段位 / 4 前缀；`node contracts/doc-counts.mjs --check` ✓ 1464 两版逐项相同 + 附录 C 8 项 + 表格结构。
+
+#### ⑦ 本轮得到的三条
+
+1. **修一处同形态缺陷时，「全仓搜同形」要跨语言。** 第 18 轮在 `pe.py` 里修「合并式 `or`」，第 19 轮在 `icon.py` 里修「`except` 太宽」，两轮都在 Python 侧。而 `mac2win` 有一个独立写的 PE 解析器，同一个缺陷在那里躺了至少两轮没人看。搜同形要按**职责**搜（「凡解析 PE 头的地方」），不是按目录或语言搜。
+2. **「读了一部分就下结论」比读错更隐蔽。** 读错会有 `RangeError` 或字段乱值；只读前 4 KiB 再判「合格」，得到的是一个**语法完全正确、语义完全错误**的结果。凡「读头判定」的函数，第一件事必须是拿到真实长度。
+3. **读取窗口长度不能当文件长度用。** `head.length` 是 `min(4096, 文件长度)`，把它写进边界判据，等于给「偏移超出窗口」和「文件被截断」画了等号。同理，任何 `if (x > buffer.length)` 都要先问：这个 `buffer` 是「文件」还是「窗口」。
+
+#### ⑧ 补记：这一节本身只写进了中文版（2026-11-22 第 20 轮实测）
+
+上一节写完时，`README.md` 多了整节 15.32，`README_EN.md` 一个字没加。而 `node contracts/doc-counts.mjs --check` 依然报「两版逐项相同」、退 0。
+
+**为什么没拦住**：那个检查比的是两样东西 —— 12.1 计数表里的数字与代码常量、每张表格逐行的列数。它**压根不问「两版的章节集合是否一致」**。整节缺失这种最严重的不同步，在它眼里完全合格。此前每轮 JOURNAL 写的「两版 `##` 23/23 `###` 134/134 `####` 182/182 对称」，靠的是**人手工数一遍**；改文档时没人提醒要重数，数错了也读不出破绽。
+
+**新增 `contracts/section-guard.mjs`**（20 项守卫，接进 `--check`）：抽两版所有 `##`/`###`/`####` 标题里的**编号**（`15.32` / `12.1` / `十六` / `附录 A`），编号是语言无关的，直接对账；任一侧有而另一侧没有即报错并给行号。
+
+**负向验证 3 处，第一处是绿的且暴露了判据本身的错**：
+
+| 注入 | 结果 |
+|---|---|
+| 英文版 15.32 编号改成 `15.32x` | **0 个问题** —— 判据把 `15.32x` 认成了 `15.32` |
+| 删掉英文版 15.32 整节 | 1 个问题，精确报 `README.md:4937` |
+| 删掉中文版 15.31 整节（反方向） | 1 个问题，精确报 `README_EN.md:4836` |
+
+第一处值得单说：正则的回溯会悄悄退回更短的前缀（`15.32` → `15.3` → `15`），lookahead 收不住。**「编号本身改坏」正是这一节要抓的错，判据却看不见** —— 改成「先取完整数字串、再看后面跟的是什么」才有效。
+
+第二处改进同样来自负向验证：初版只认阿拉伯数字，而中文版顶章是 `## 十五、已知问题`、英文版是 `## 15. Known Issues`。于是中文顶章一个都没抽到，**「0 个问题」是通过两边都没比凑出来的** —— 一个把范围缩到空集的判据，永远为真（与第 9 轮 `glob` 返回空集、第 16 轮 `sections` 空集算通过，是同一个形态的第三次复发）。补 `chineseNumber()` 转换（一到九十九）后才真正开始对账：修正前报 20 条，修正后 0 条。
+
+
 
 ---
 
@@ -4668,11 +5076,12 @@ README 描述项目当前状态，发行版记录每次改了什么，两者不�
 # 契约自检（必跑）
 node contracts/validate.mjs
 
-# 文档数字自检（必跑）。一条命令守两件事：12.1 的测试计数，
-# 以及附录 C 里那 8 个人手数出来的数字（配置项 37、环境变量 13、
-# 外部工具 18、子命令族 6、亮点 25、第 5 章 11 节、NOTICE 13 章、
-# 产物校验 11 项）。后者 2026-11-20 之前没有任何守卫 —— 实测把
-# 「37 个配置项」改成 32，旧版照样报「✓ 计数一致」。
+# 文档自检（必跑）。一条命令守三件事：12.1 的测试计数、附录 C 里那
+# 8 个人手数出来的数字（配置项 37、环境变量 13、外部工具 18、子命令族
+# 6、亮点 25、第 5 章 11 节、NOTICE 13 章、产物校验 11 项）、以及两版
+# README 的表格结构（逐块与表头比列数）。后两者此前都没有守卫：把
+# 「37 个配置项」改成 32，旧版照样报「✓ 计数一致」；15.7 表有 3 行少
+# 一整列，旧检查也报「表格异常 0」—— 因为它只数「是不是表格行」。
 node contracts/doc-counts.mjs --check
 
 # 各方向自己的测试。每行都用子 shell 括起来，跑完回到仓库根目录 ——
@@ -4758,6 +5167,28 @@ git log --oneline -- console/
 | 仓库 | <https://github.com/ntars/Wacmin> |
 | 问题反馈 | <https://github.com/ntars/Wacmin/issues> |
 | 邮箱 | <ntars@qq.com> · <ntarsx@163.com> |
+
+---
+
+## 十八点五、发布验收清单
+
+本章是「能不能交付」的唯一清单。命令均从仓库根目录执行；每项都必须给出证据，不接受「看起来没问题」。
+
+| # | 验收项 | 命令 / 动作 | 通过标准 |
+|---|---|---|---|
+| 1 | 契约与文档自洽 | `node contracts/validate.mjs && node contracts/doc-counts.mjs --check && node console/bin/wacmin-console.mjs contract` | 三条命令退出码 0；12.1 计数与两版 README 一致 |
+| 2 | 四方向入口健康 | `node console/bin/wacmin-console.mjs doctor` | 四方向均 `ok: true` |
+| 3 | ExeOnMac 依赖齐全 | `cd exeonmac && python3 tests/check_deps.py` | 退出码 0，输出「依赖齐全」 |
+| 3b | 一键执行本章 | `node contracts/acceptance.mjs`；实测产物留在仓库根的 `.acceptance/` 时加 `--artifacts` | 所有项 `PASS`，末行 `16/16 passed`（无产物时相应项自动跳过） |
+| 4 | 全量自动化测试 | 第 18.2 节的七条测试命令 | 全部退出码 0；`fail=0` 且 `skipped=0`；ExeOnMac 为 `Ran 552 tests / OK` |
+| 5 | Mac2Win 发布产物 | `mkdir -p /tmp/e2e/dist && echo '<h1>ok</h1>' > /tmp/e2e/dist/index.html && echo '{"name":"e2e","version":"1.0.0"}' > /tmp/e2e/package.json && node mac2win/bin/mac2win.mjs build /tmp/e2e --out /tmp/e2e/out --report > /tmp/e2e/report.json && node contracts/validate.mjs --report /tmp/e2e/report.json` | 产出 `e2e-1.0.0-x86-setup.exe`（约 20 MB），报告合规 |
+| 6 | Mac2Win 产物复核 | `node mac2win/bin/mac2win.mjs verify /tmp/e2e/out/e2e-1.0.0-x86-setup.exe` | 十二项校验全绿，含载荷哈希逐文件比对 |
+| 7 | ExeOnMac 发布产物 | `cd exeonmac && python3 -m wepack build <安装包> --out /tmp/apps` | 退出码 0，输出「校验」十项全 `[OK]`，`Info.plist` 合法 |
+| 8 | 交付边界知情 | 对照第 17 章 | AppOnWin、Rust 壳的资源编译、签名与公证的状态必须按原文表述，不得写成「已完成」 |
+
+**环境说明（2026-11-23，本机 arm64 / macOS 27.2.1 实测）**：Wine 用 `wepack runtime install --archive <本地 Wine tar.xz>` 安装到 `~/Library/Application Support/wexe/runtime/wine`，base 层用 `wepack layers build base` 构建；`makensis` / `7zz` / `innoextract` 通过 Homebrew bottle 安装。Inno Setup 6.0.5 的 ISCC 工具链由测试夹具首次运行时自动下载到 `~/.cache/wexe-toolchain`。DirectWrite 探针需先跑 `exeonmac/tools/dwrite-probe/build.sh`（依赖 Xcode CLT 的 clang 与 rust-lld 的 `lld-link` 兼容入口）。CI 使用 `brew install makensis innoextract` 与缓存，不要求人工预置这些本机路径。
+
+**已知交付边界**：AppOnWin 在 Windows + WSL2 + Darling 环境才有运行结论；macOS/iOS 签名与公证需开发者账号与证书；ExeOnMac 产物因 prefix 在 bundle 内被原地写，当前布局下不能做稳定的包签名。以上不是失败项 —— 清单要求它们在第 17 章中被如实标注，不得隐瞒。
 
 ---
 

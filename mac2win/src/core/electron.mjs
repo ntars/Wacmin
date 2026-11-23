@@ -19,6 +19,11 @@
  * Electron **从 v44 起不再发布 win32-ia32**。这不是推测：官方 release
  * 资产列表里 `electron-v44.0.0-win32-ia32.zip` 返回 404，而 v43.0.0
  * 返回 206。所以打 x86 必须用 ≤43.x。
+ *
+ * ## x64/ARM64 不受版本限制
+ *
+ * Electron 的 x64 和 ARM64 构建一直保持更新，不受 win32-ia32 移除的影响。
+ * 使用 x64 或 arm64 目标可以使用最新的 Electron 版本（包括 v43+）。
  */
 
 import { createWriteStream } from 'node:fs'
@@ -60,12 +65,13 @@ export function electronCacheDir(version, target) {
 export async function ensureElectron(input) {
   const { version, target, archive, onProgress } = input
 
+  // Electron v44 起移除 win32-ia32，但 x64 和 arm64 不受影响
   if (target === 'x86') {
     const major = Number.parseInt(String(version).split('.')[0], 10)
     if (Number.isFinite(major) && major >= 44) {
       throw new BuildError(ErrorCode.RUNTIME_WRONG_ARCH, `Electron ${version} 没有 win32-ia32 构建`, {
         details: ['Electron 从 v44 起移除了 32 位 Windows 支持'],
-        hint: '把 electronVersion 改成 43.x，或把 target 改成 x64',
+        hint: `Electron ${version} 不支持 x86 目标，请改用 x64 或降低 Electron 版本到 43.x`,
       })
     }
   }

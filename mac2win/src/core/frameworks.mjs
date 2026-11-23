@@ -104,6 +104,24 @@ export const FRAMEWORKS = {
     description: '纯 Node 项目：打包 Windows x86 的 node.exe 与依赖',
     defaultEntry: null,
   },
+  neutralino: {
+    id: 'neutralino',
+    label: 'Neutralino.js',
+    architectures: ['x86', 'x64'],
+    nativeShell: true,
+    runtime: null,
+    description: 'Neutralino.js 项目：使用 Neutralino 的原生窗口壳',
+    defaultEntry: null,
+  },
+  reactNativeDesktop: {
+    id: 'reactNativeDesktop',
+    label: 'React Native Desktop',
+    architectures: ['x86', 'x64'],
+    nativeShell: true,
+    runtime: null,
+    description: 'React Native Desktop 项目：使用 React Native 的原生窗口壳',
+    defaultEntry: null,
+  },
   static: {
     id: 'static',
     label: '静态站点',
@@ -161,10 +179,40 @@ export async function detectFramework(projectRoot, hints = {}) {
   // --- Tauri：目录特征最硬 ---
   if (await isDirectory(join(projectRoot, 'src-tauri'))) {
     evidence.push('存在 src-tauri/ 目录')
+    
+    // 尝试从 Cargo.toml 读取 Tauri 版本
+    try {
+      const { readFile } = await import('node:fs/promises')
+      const cargoPath = join(projectRoot, 'src-tauri', 'Cargo.toml')
+      if (await isFile(cargoPath)) {
+        const cargo = await readFile(cargoPath, 'utf8')
+        // 解析 [package] 和 [dependencies] 部分
+        const depMatch = cargo.match(/\[dependencies\]\s*([\s\S]*?)\n\[/)
+        if (depMatch) {
+          const depsSection = depMatch[1]
+          const tauriMatch = depsSection.match(/tauri\s*=\s*["']([^"']+)["']/)
+          if (tauriMatch) {
+            evidence.push(`Cargo.toml 中 Tauri 依赖版本: ${tauriMatch[1]}`)
+          }
+        }
+      }
+    } catch {
+      // 容错：如果读取或解析失败，不影响框架识别
+    }
+    
     return { id: 'tauri', confidence: 'high', evidence }
   }
   if (deps['@tauri-apps/cli'] !== undefined || deps['@tauri-apps/api'] !== undefined) {
     evidence.push('依赖里有 @tauri-apps/*')
+    
+    // 从 package.json 推断 Tauri 版本
+    if (deps['@tauri-apps/cli']) {
+      evidence.push(`CLI 版本: ${deps['@tauri-apps/cli']}`)
+    }
+    if (deps['@tauri-apps/api']) {
+      evidence.push(`API 版本: ${deps['@tauri-apps/api']}`)
+    }
+    
     return { id: 'tauri', confidence: 'medium', evidence }
   }
 
@@ -189,6 +237,22 @@ export async function detectFramework(projectRoot, hints = {}) {
   if (hasEntry && pkg?.main !== undefined) {
     evidence.push(`存在入口文件与 package.json main 字段`)
     return { id: 'node', confidence: 'medium', evidence }
+  }
+
+  // --- Neutralino.js：neutralino.js 依赖或 neutralino.config.json ---
+  if (deps['@neutralinojs/nc'] !== undefined || deps['neutralino.js'] !== undefined) {
+    evidence.push(`依赖里有 ${deps['@neutralinojs/nc'] ? '@neutralinojs/nc' : 'neutralino.js'}`)
+    return { id: 'neutralino', confidence: 'high', evidence }
+  }
+  if (await isFile(join(projectRoot, 'neutralino.config.json'))) {
+    evidence.push('存在 neutralino.config.json')
+    return { id: 'neutralino', confidence: 'high', evidence }
+  }
+
+  // --- React Native Desktop：react-native-desktop 依赖 ---
+  if (deps['react-native-desktop'] !== undefined || deps['@react-native-desktop/cli'] !== undefined) {
+    evidence.push(`依赖里有 ${deps['react-native-desktop'] ? 'react-native-desktop' : '@react-native-desktop/cli'}`)
+    return { id: 'reactNativeDesktop', confidence: 'high', evidence }
   }
 
   // --- 静态站点 ---
@@ -277,6 +341,23 @@ export async function inferForFramework(frameworkId, projectRoot, pkg) {
     else if (await isFile(join(projectRoot, 'src', 'index.js'))) inferred.entry = 'src/index.js'
   }
 
+  if (frameworkId === 'neutralino') {
+    // Neutralino.js 的默认入口
+    for (const candidate of ['dist', 'build']) {
+      if (await isDirectory(join(projectRoot, candidate))) {
+        inferred.frontendDist = candidate
+        break
+      }
+    }
+  }
+
+  if (frameworkId === 'reactNativeDesktop') {
+    // React Native Desktop 的入口通常是 index.js 或 App.js
+    if (typeof pkg?.main === 'string') inferred.entry = pkg.main
+    else if (await isFile(join(projectRoot, 'index.js'))) inferred.entry = 'index.js'
+    else if (await isFile(join(projectRoot, 'App.js'))) inferred.entry = 'App.js'
+  }
+
   return inferred
 }
 
@@ -299,6 +380,15 @@ export function checkFrameworkTarget(frameworkId, target, electronVersion) {
       ok: false,
       reason: `${framework.label} 不支持目标架构 ${target}`,
       hint: `可选：${framework.architectures.join(' / ')}`,
+    }
+  }
+
+  // Neutralino.js 和 React Native Desktop 目前只支持 x86/x64，不支持 arm64
+  if ((frameworkId === 'neutralino' || frameworkId === 'reactNativeDesktop') && target === 'arm64') {
+    return {
+      ok: false,
+      reason: `${framework.label} 暂不支持 arm64 目标`,
+      hint: '请使用 x86 或 x64 目标',
     }
   }
 

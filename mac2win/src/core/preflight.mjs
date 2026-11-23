@@ -19,9 +19,10 @@
 import { execFile } from 'node:child_process'
 import { access, constants } from 'node:fs/promises'
 import { arch, platform, release } from 'node:os'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { BuildError, ErrorCode } from './errors.mjs'
-import { isDirectory, isFile, walkFiles, windowsPathProblem } from '../util/fsx.mjs'
+import { isDirectory, isFile, readJson, walkFiles, windowsPathProblem } from '../util/fsx.mjs'
 import { FRAMEWORKS, checkFrameworkTarget } from './frameworks.mjs'
 import { checkRustEnv } from './rust-shell.mjs'
 import { readdir } from 'node:fs/promises'
@@ -315,6 +316,62 @@ async function checkProject(report, config) {
       } else {
         report.add(new Check('flutter-release', 'Flutter Windows 产物', 'pass', `${releaseDir}（${exe}）`))
       }
+    }
+  }
+
+  /*
+   * Tauri 的 Windows 资源节必须有图标。
+   *
+   * `tauri-build` 在编译最后一步才读取 `icons/icon.ico`（或
+   * `bundle.icon` 里声明的 .ico），缺了就直接失败。等到那时，
+   * cargo-xwin 往往已经编完几百个 crate —— 用户花了十几分钟，
+   * 却只得到一句 “icon.ico not found”。
+   *
+   * 这里在预检阶段检查，且只查 `buildRustShell: true`：
+   * 不开 Rust 壳时 Tauri 的 Node/前端层路线不需要这个文件，
+   * 此时报失败反而挡住本来可行的打包。
+   */
+  if (config.framework === 'tauri' && config.buildRustShell === true) {
+    const tauriRoot = config.tauriDir ?? join(config.projectRoot, 'src-tauri')
+    const tauriConfigPath = join(tauriRoot, 'tauri.conf.json')
+    let configuredIcons = []
+    try {
+      const tauriConfig = await readJson(tauriConfigPath)
+      const icons = tauriConfig?.bundle?.icon
+      if (Array.isArray(icons)) configuredIcons = icons.filter((item) => typeof item === 'string')
+    } catch {
+      // 配置缺失或语法错误由 Tauri 自己报；这里只负责定位图标。
+      configuredIcons = []
+    }
+
+    /*
+     * `bundle.icon` 的路径相对 tauri.conf.json 所在目录，不是项目根。
+     * 最后再查 Tauri 的默认位置 `icons/icon.ico`。
+     */
+    const candidates = configuredIcons
+      .filter((icon) => icon.toLowerCase().endsWith('.ico'))
+      .map((icon) => join(tauriRoot, icon))
+    candidates.push(join(tauriRoot, 'icons', 'icon.ico'))
+
+    let iconPath = null
+    for (const candidate of candidates) {
+      if (await isFile(candidate)) {
+        iconPath = candidate
+        break
+      }
+    }
+
+    if (iconPath === null) {
+      report.add(new Check(
+        'tauri-icon',
+        'Tauri Windows 图标',
+        'fail',
+        `${tauriRoot} 下找不到 .ico（查过 bundle.icon 与 icons/icon.ico）`,
+        '在 src-tauri/icons/icon.ico 放一个合法 ICO；或让 bundle.icon 指向已有的 .ico。'
+          + '缺它时 tauri-build 会在所有 crate 编完之后才失败',
+      ))
+    } else {
+      report.add(new Check('tauri-icon', 'Tauri Windows 图标', 'pass', iconPath))
     }
   }
 
@@ -612,6 +669,7 @@ const CHECK_ERROR_CODES = {
   'project-frontend': ErrorCode.PROJECT_NOT_FOUND,
   'project-resource': ErrorCode.PROJECT_NOT_FOUND,
   'flutter-release': ErrorCode.PROJECT_ARTIFACT_MISSING,
+  'tauri-icon': ErrorCode.PROJECT_ARTIFACT_MISSING,
   'output-dir': ErrorCode.PROJECT_NOT_FOUND,
   // 目标与架构落在硬边界内：路径没错，是这件事做不了
   'target-arch': ErrorCode.UNSUPPORTED,

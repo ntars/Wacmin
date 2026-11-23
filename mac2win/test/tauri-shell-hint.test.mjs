@@ -122,6 +122,37 @@ describe('Tauri 原生窗口提示', () => {
     }
   })
 
+  test('开了 buildRustShell：缺 icon.ico 要在编译前失败', async () => {
+    const root = await makeTauriProject({ buildRustShell: true })
+    try {
+      const config = await resolveConfig({ projectRoot: root })
+      const report = await runPreflight(config)
+      const icon = report.checks.find((check) => check.id === 'tauri-icon')
+      assert.ok(icon !== undefined, '缺少 tauri-icon 检查：图标缺失会等几百个 crate 编完才失败')
+      assert.equal(icon.status, 'fail')
+      assert.match(icon.detail, /\.ico/)
+      assert.match(icon.hint, /icons[\\/]icon\.ico/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test('开了 buildRustShell：默认位置有 icon.ico 时预检通过', async () => {
+    const root = await makeTauriProject({ buildRustShell: true })
+    try {
+      await mkdir(join(root, 'src-tauri', 'icons'), { recursive: true })
+      await writeFile(join(root, 'src-tauri', 'icons', 'icon.ico'), 'probe')
+      const config = await resolveConfig({ projectRoot: root })
+      const report = await runPreflight(config)
+      const icon = report.checks.find((check) => check.id === 'tauri-icon')
+      assert.ok(icon !== undefined)
+      assert.equal(icon.status, 'pass')
+      assert.match(icon.detail, /icons[\\/]icon\.ico$/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test('非 Tauri 项目不该出现 buildRustShell 相关提示', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mac2win-node-'))
     try {

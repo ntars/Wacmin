@@ -61,7 +61,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { BuildError, ErrorCode } from './errors.mjs'
 import { isDirectory, isFile } from '../util/fsx.mjs'
@@ -131,6 +131,55 @@ function cargoXwinShimDirs() {
     join(home, 'Library', 'Caches', 'cargo-xwin'),
     join(home, '.cache', 'cargo-xwin'),
   ]
+}
+
+/**
+ * Homebrew 已安装但未链接到 PATH 的工具目录。
+ *
+ * ## 为什么要查 Cellar
+ *
+ * `brew install llvm` 默认是 keg-only：可执行文件在
+ * `/opt/homebrew/Cellar/llvm/<version>/bin/`，**不会**出现在
+ * `/opt/homebrew/bin`。`brew install llvm@19` 同理。
+ *
+ * 只查 PATH 与固定前缀会得出「llvm-rc 未安装」，但同一台机器上它其实
+ * 就在 Cellar 里 —— 用户照着提示再装一遍毫无作用。这种情况比「真的没装」
+ * 更糟，因为它把「探测路径不全」伪装成了「环境缺失」。
+ *
+ * 扫描只到 Cellar 下名称以 `llvm` 开头的公式目录的 `bin`：
+ * - 不递归整个 Homebrew：那会有几万项；
+ * - 不把任意同名二进制当 llvm-rc：调用方仍会检查文件是否存在。
+ *
+ * @returns {Promise<string[]>}
+ */
+async function homebrewLlmBinDirs() {
+  const { readdir } = await import('node:fs/promises')
+  const roots = ['/opt/homebrew/Cellar', '/usr/local/Cellar']
+  const dirs = []
+  for (const root of roots) {
+    let formulae
+    try {
+      formulae = await readdir(root, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const formula of formulae) {
+      if (!formula.isDirectory()) continue
+      if (!formula.name.startsWith('llvm')) continue
+      const formulaRoot = join(root, formula.name)
+      let versions
+      try {
+        versions = await readdir(formulaRoot, { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const version of versions) {
+        if (!version.isDirectory()) continue
+        dirs.push(join(formulaRoot, version.name, 'bin'))
+      }
+    }
+  }
+  return dirs
 }
 
 /**
@@ -232,6 +281,32 @@ async function which(command, extraDirs = []) {
 }
 
 /**
+ * 构造子进程 PATH。
+ *
+ * 交叉编译链里有两类工具必须由我们自己暴露：
+ * - `llvm-rc` 往往来自 keg-only 的 Homebrew 安装，不在 PATH；
+ * - `cargo-xwin` 会在内部按名字启动 `cargo`，但它不会替我们补 PATH。
+ *
+ * 去重是必要的：`llvmRcDir` 与 cargo 目录有时会重合，重复项本身无害，
+ * 但会让出错时的环境排查变长。
+ *
+ * @param {string[]} dirs 要前置的目录。
+ * @param {string} [basePath] 原 PATH。
+ * @returns {string}
+ */
+function prependPathDirs(dirs, basePath = process.env.PATH ?? '') {
+  const seen = new Set()
+  const parts = []
+  for (const dir of dirs) {
+    if (typeof dir !== 'string' || dir === '' || seen.has(dir)) continue
+    seen.add(dir)
+    parts.push(dir)
+  }
+  if (basePath !== '') parts.push(basePath)
+  return parts.join(delimiter)
+}
+
+/**
  * 检查 Rust 交叉编译环境。
  *
  * @returns {Promise<RustEnvStatus>}
@@ -282,7 +357,7 @@ export async function checkRustEnv() {
    * 这两个要连 cargo-xwin 的 shim 目录一起找。只查 PATH 会误判成缺失，
    * 见 `cargoXwinShimDirs()` 的说明。
    */
-  const shimDirs = cargoXwinShimDirs()
+  const shimDirs = [...cargoXwinShimDirs(), ...(await homebrewLlmBinDirs())]
   for (const [command, title] of [
     ['clang-cl', 'clang-cl 编译器'],
     ['lld-link', 'lld-link 链接器'],
@@ -331,6 +406,16 @@ export async function checkRustEnv() {
     hint: llvmRc === null
       ? 'brew install llvm 会一并提供 llvm-rc；或用 RC 环境变量指向可用的 rc 编译器'
       : undefined,
+  })
+
+  // --- cargo ---
+  const cargo = await which('cargo')
+  status.add({
+    id: 'cargo',
+    title: 'Cargo',
+    ok: cargo !== null,
+    detail: cargo ?? '找不到',
+    hint: cargo === null ? '重新安装 Rust 工具链，或把 ~/.cargo/bin 加进 PATH' : undefined,
   })
 
   // --- cargo-xwin ---
@@ -391,6 +476,23 @@ export async function buildRustShell(input) {
   }
 
   const cargoXwin = await which('cargo-xwin')
+  const cargo = await which('cargo')
+  const llvmRc = await which('llvm-rc', [
+    ...cargoXwinShimDirs(),
+    ...(await homebrewLlmBinDirs()),
+  ])
+  if (llvmRc === null) {
+    throw new BuildError(ErrorCode.TOOL_MISSING, '找不到 llvm-rc', {
+      hint: 'brew install llvm，或把 RC 指向可用的资源编译器',
+    })
+  }
+  if (cargo === null) {
+    throw new BuildError(ErrorCode.TOOL_MISSING, '找不到 cargo', {
+      hint: 'cargo-xwin 会启动 cargo；重新安装 Rust 工具链，或把 ~/.cargo/bin 加进 PATH',
+    })
+  }
+  const llvmRcDir = dirname(llvmRc)
+  const cargoXwinDir = dirname(cargoXwin)
   const startedAt = Date.now()
 
   onProgress?.('开始编译 Rust 壳（首次构建需 10–30 分钟，要编译整个 tauri crate 树）')
@@ -404,9 +506,24 @@ export async function buildRustShell(input) {
         maxBuffer: 64 * 1024 * 1024,
         env: {
           ...process.env,
+          /*
+           * 两条路都要显式补：
+           * - keg-only 的 llvm-rc 不在 PATH，embed-resource 会找不到；
+           * - cargo-xwin 内部按名字启动 cargo，而 ~/.cargo/bin 在图形界面
+           *   或非登录 shell 里经常不在 PATH。只传 cargo-xwin 的绝对路径不够，
+           *   父进程能找到它，不代表它找得到 cargo。
+           */
+          PATH: prependPathDirs([llvmRcDir, cargoXwinDir, dirname(cargo)]),
           // cargo-xwin 会读这两个变量决定用哪个 LLVM。
           CC_i686_pc_windows_msvc: 'clang-cl',
           AR_i686_pc_windows_msvc: 'llvm-lib',
+          /*
+           * 冗余但必要：不同 embed-resource 版本对 PATH 与 RC 的优先级不同，
+           * 显式给 RC 能避免「PATH 改了、探测仍失败」的版本差异。
+           */
+          RC: llvmRc,
+          // 有些工具按 CARGO 找 cargo；与 PATH 一起给，覆盖两种实现。
+          CARGO: cargo,
           /*
            * 让 cargo-xwin 下载 32 位（x86）的 CRT 与 SDK。
            *

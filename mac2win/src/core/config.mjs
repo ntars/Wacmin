@@ -36,6 +36,8 @@ export const FRAMEWORK_BUILD_COMMANDS = {
   electron: 'npm run build',
   nwjs: 'npm run build',
   tauri: 'npm run tauri build',
+  neutralino: 'neutralinojs build',
+  reactNativeDesktop: 'react-native-desktop build',
   flutter: null, // Windows 产物必须在 Windows 上构建，mac 端不代跑
   node: 'npm run build',
   // 静态站点的 `dist/` 通常就是最终产物。一律跑 npm build 会把纯 HTML
@@ -102,6 +104,10 @@ export const DEFAULTS = {
   electronVersion: '43.0.0',
   /** 离线环境用：本地 Electron win32-ia32 zip。 */
   electronArchive: null,
+  /** 是否启用 Electron 开发者工具（仅 NW.js SDK 模式有效）。 */
+  electronDevTools: false,
+  /** 是否在构建前自动执行项目构建命令。 */
+  electronAutoBuild: true,
 
   /** NW.js 版本。 */
   nwjsVersion: '0.90.0',
@@ -109,6 +115,15 @@ export const DEFAULTS = {
   nwjsFlavor: 'normal',
   /** 离线环境用：本地 NW.js win-ia32 zip。 */
   nwjsArchive: null,
+  /** NW.js 是否启用开发者工具（sdk 模式自动开启）。 */
+  nwjsDevTools: false,
+  /** 是否在构建前自动执行项目构建命令。 */
+  nwjsAutoBuild: true,
+
+  /** Tauri 版本：具体版本号或 'auto'（自动从 Cargo.toml 推断）。 */
+  tauriVersion: 'auto',
+  /** 是否在构建前自动执行项目构建命令。 */
+  tauriAutoBuild: true,
 
   /**
    * 是否用 cargo-xwin 编译 Tauri 的 Rust 壳。
@@ -130,6 +145,23 @@ export const DEFAULTS = {
   flutterReleaseDir: null,
   /** Flutter 主程序在发布目录内的相对路径。默认取找到的第一个 .exe。 */
   flutterLauncherRelative: null,
+
+  /** 构建模式：release（默认）或 debug。 */
+  mode: 'release',
+
+  /** Neutralino.js 相关配置。 */
+  neutralino: {
+    /** 是否启用 Neutralino.js 特定优化。 */
+    enabled: false,
+    /** 应用名（默认从 package.json 推断）。 */
+    appName: null,
+  },
+
+  /** React Native Desktop 相关配置。 */
+  reactNativeDesktop: {
+    /** 是否启用 React Native Desktop 特定优化。 */
+    enabled: false,
+  },
 
   /** 安装包图标（.ico，相对项目根或绝对路径）。 */
   iconFile: null,

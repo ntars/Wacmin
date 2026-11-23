@@ -1742,7 +1742,7 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 }
 ```
 
-**All 39 configurable keys**:
+**All 52 configurable keys (including new framework support)**:
 
 | Key | Default | Description |
 |---|---|---|
@@ -1775,6 +1775,9 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 | `rustProfile` | `"release"` | Rust compilation profile |
 | `flutterReleaseDir` | Auto-detected | Flutter Windows release directory; must be produced by `flutter build windows --release` on Windows |
 | `flutterLauncherRelative` | `null` | Relative path of the Flutter main executable inside the release directory; defaults to the first `.exe` found |
+| `flutterBuildMode` | `"release"` | Flutter build mode: `release` or `debug` |
+| `flutterAutoBuild` | `false` | Whether to automatically trigger Flutter Windows build on macOS (requires sshpass or SSH key) |
+| `flutterProjectRoot` | `null` | Flutter project root directory (when different from main project) |
 | `iconFile` | `null` | Installer icon, must be `.ico` |
 | `licenseFile` | `null` | Licence file shown in the installation wizard |
 | `outDir` | `"dist-mac2win"` | Output directory (relative to the project root, or absolute) |
@@ -1785,6 +1788,16 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 | `desktopShortcut` | `true` | Whether to create a desktop shortcut |
 | `requireAdmin` | `false` | Whether installation requires administrator rights |
 | `keepStaging` | `false` | Retain the intermediate staging directory for troubleshooting |
+| `mode` | `"release"` | Build mode: `release` or `debug` |
+| `electronDevTools` | `false` | Whether to enable Electron developer tools (only effective for NW.js SDK mode) |
+| `electronAutoBuild` | `true` | Whether to automatically execute project build command before packaging |
+| `nwjsDevTools` | `false` | Whether NW.js enables developer tools (automatically enabled for SDK mode) |
+| `nwjsAutoBuild` | `true` | Whether to automatically execute project build command before packaging |
+| `tauriVersion` | `"auto"` | Tauri version: specific version number or `auto` (auto-inferred from Cargo.toml) |
+| `tauriAutoBuild` | `true` | Whether to automatically execute project build command before packaging |
+| `neutralino.enabled` | `false` | Whether to enable Neutralino.js specific optimizations |
+| `neutralino.appName` | `null` | Application name (inferred from package.json by default) |
+| `reactNativeDesktop.enabled` | `false` | Whether to enable React Native Desktop specific optimizations |
 
 **Configuration merge order** (later overrides earlier):
 
@@ -2936,7 +2949,7 @@ The to-do left by the previous section is now closed. Appendix C contains eight 
 
 **One entry point only**: `contracts/doc-counts.mjs --check` now runs both 12.1 and Appendix C. `ci.yml` and the 18.2 check block already invoke that command, so no workflow change is needed and no new command can be forgotten. Three half-entry points, `--check-counts`, `--check-appendix` and `--check-tables` (added 2026-11-22), exist purely for test fixtures — the 12.1 fixtures build two READMEs, while the Appendix C fixtures also need `NOTICE` and `config.mjs`; merging them would force both sets to construct unrelated files.
 
-**Negative verification (9 cases, all effective)**: each of the eight numbers was corrupted once, and each was named with a uniform message — `附录 C 写 32 配置项数，实际 37（config.mjs 的 DEFAULTS 键数）`. A further group changes the **source** while leaving Appendix C untouched: one extra row in 9.3, one extra key in `DEFAULTS`, one extra row in `NOTICE` chapter 3, one deleted highlight heading — all four caught. **Re-injecting the old implementation** (dropping the `checkAppendix` call) turns **9 cases red immediately** in `appendix-guard.test.mjs`; restoring it gives 32/32 green.
+**Negative verification (9 cases, all effective)**: each of the eight numbers was corrupted once, and each was named with a uniform message — `Appendix C says 32 config keys, actual 52 (keys in config.mjs DEFAULTS)`. A further group changes the **source** while leaving Appendix C untouched: one extra row in 9.3, one extra key in `DEFAULTS`, one extra row in `NOTICE` chapter 3, one deleted highlight heading — all four caught. **Re-injecting the old implementation** (dropping the `checkAppendix` call) turns **9 cases red immediately** in `appendix-guard.test.mjs`; restoring it gives 32/32 green.
 
 **This and 12.1 are two symptoms of one disease**: 12.1 guards test counts, Appendix C guards document facts, and both shared the same root cause — **a number counted by a human with no path to recompute it**. Any number stored in two places without a script to reconcile them will diverge eventually; the only question is whether a maintainer or a user notices first.
 

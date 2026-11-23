@@ -105,6 +105,68 @@ describe('Rust 环境探测', () => {
     assert.match(source, /'Library',\s*'Caches',\s*'cargo-xwin'/, 'mac 的 shim 目录不见了')
     assert.match(source, /'\.cache',\s*'cargo-xwin'/, 'linux 的 shim 目录不见了')
   })
+
+  /*
+   * keg-only 的 Homebrew 包不会进 PATH。本机 `llvm@19` 就是这种情况：
+   * llvm-rc 在 Cellar 里，但 `which llvm-rc` 找不到。只查 PATH 会把
+   * 「已安装」误报成「未安装」，用户再装一遍也不会改变任何东西。
+   */
+  test('llvm-rc 探测必须覆盖 Homebrew Cellar 里的 keg-only 安装', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const source = await readFile(
+      fileURLToPath(new URL('../src/core/rust-shell.mjs', import.meta.url)),
+      'utf8',
+    )
+    assert.match(source, /\/opt\/homebrew\/Cellar|\/usr\/local\/Cellar/, '没有查 Homebrew Cellar：keg-only 的 llvm-rc 会被误报缺失')
+    assert.match(source, /startsWith\('llvm'\)/, 'Cellar 扫描没限定 llvm*，会无谓遍历所有公式版本')
+  })
+
+  test('编译时必须把找到的 llvm-rc 显式暴露给 embed-resource', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const source = await readFile(
+      fileURLToPath(new URL('../src/core/rust-shell.mjs', import.meta.url)),
+      'utf8',
+    )
+    /*
+     * 预检找到 Cellar 只是第一步；`embed-resource` 自己按 PATH 找
+     * `llvm-rc`，所以 buildRustShell 必须把该目录放进子进程环境。
+     * 否则预检全绿、编译仍在 `NotAttempted("llvm-rc")` 处失败。
+     */
+    assert.match(source, /PATH:\s*prependPathDirs\(\[llvmRcDir,/, '编译子进程 PATH 没带上 llvm-rc 目录')
+    assert.match(source, /RC:\s*llvmRc/, '没有显式设置 RC：不同 embed-resource 版本可能仍找不到')
+  })
+
+  /*
+   * `cargo-xwin` 内部会按名字启动 `cargo`。只把 cargo-xwin 的绝对路径
+   * 交给 execFile 是不够的：它自己找 cargo 时仍会看 PATH。
+   * 2026-11-23 实测，PATH 缺 `~/.cargo/bin` 时编完依赖后报
+   * `Failed to run cargo build: No such file or directory`。
+   */
+  test('编译子进程 PATH 必须包含 cargo-xwin 与 cargo 所在目录', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const { fileURLToPath } = await import('node:url')
+    const source = await readFile(
+      fileURLToPath(new URL('../src/core/rust-shell.mjs', import.meta.url)),
+      'utf8',
+    )
+    assert.match(source, /cargoXwinDir\s*=\s*dirname\(cargoXwin\)/, '没有推导 cargo-xwin 所在目录')
+    assert.match(
+      source,
+      /prependPathDirs\(\[llvmRcDir,\s*cargoXwinDir,\s*dirname\(cargo\)\]\)/,
+      '子进程 PATH 缺 cargo 目录：cargo-xwin 会报 Failed to run cargo build',
+    )
+    assert.match(source, /CARGO:\s*cargo/, '没有显式设置 CARGO，部分 cargo-xwin 版本仍可能找不到 cargo')
+  })
+
+  test('Cargo 本身必须是独立预检项', async () => {
+    const status = await checkRustEnv()
+    const item = pick(status, 'cargo')
+    assert.ok(item !== undefined, '缺少 cargo 检查项：cargo-xwin 装好了也可能因找不到 cargo 失败')
+    assert.equal(typeof item.ok, 'boolean')
+    if (!item.ok) assert.match(item.hint, /\.cargo\/bin|Rust 工具链/)
+  })
 })
 
 describe('RustEnvStatus 聚合', () => {

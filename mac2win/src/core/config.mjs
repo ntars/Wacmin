@@ -24,6 +24,25 @@ import { BuildError, ErrorCode } from './errors.mjs'
 import { isDirectory, isFile, readJson } from '../util/fsx.mjs'
 import { checkFrameworkTarget, detectFramework, inferForFramework } from './frameworks.mjs'
 
+/**
+ * 各框架的默认构建命令。
+ *
+ * 用户项目里的 `package.json` 不一定写 `build` 脚本：Electron Forge 常写
+ * `package`、Tauri 项目常写 `tauri build`。此前这些项目不配置 buildCommand
+ * 时会跳过项目构建，直接打旧产物 —— 表面成功，实际交付的是过期 exe。
+ * 这里把常见框架的默认动作补齐，仍允许用户显式配置覆盖。
+ */
+export const FRAMEWORK_BUILD_COMMANDS = {
+  electron: 'npm run build',
+  nwjs: 'npm run build',
+  tauri: 'npm run tauri build',
+  flutter: null, // Windows 产物必须在 Windows 上构建，mac 端不代跑
+  node: 'npm run build',
+  // 静态站点的 `dist/` 通常就是最终产物。一律跑 npm build 会把纯 HTML
+  // 项目（没有 npm、也没有 scripts.build）判成失败。
+  static: null,
+}
+
 /** 目标架构。目前只支持 x86，字段留着以便未来扩到 x64 / arm64。 */
 export const TARGET_ARCHES = ['x86', 'x64', 'arm64']
 
@@ -36,7 +55,7 @@ export const OUTPUT_FORMATS = ['nsis', 'zip']
 export const DEFAULTS = {
   /**
    * 项目框架。`auto` 表示自动识别（读 src-tauri/、package.json 依赖等）。
-   * 可选：auto / electron / nwjs / tauri / node / static
+   * 可选：auto / electron / nwjs / tauri / flutter / node / static
    */
   framework: 'auto',
   /** 目标架构。x86 是 32 位，能在所有 Windows 上跑。 */
@@ -102,6 +121,15 @@ export const DEFAULTS = {
   tauriDir: null,
   /** Rust 构建 profile：release（默认）或 debug。 */
   rustProfile: 'release',
+
+  /**
+   * Flutter Windows 发布目录（相对项目根）。默认自动探测：
+   * build/windows/x64/runner/Release 或 build/windows/runner/Release。
+   * 内容应是用户在 Windows 上 `flutter build windows --release` 的产物。
+   */
+  flutterReleaseDir: null,
+  /** Flutter 主程序在发布目录内的相对路径。默认取找到的第一个 .exe。 */
+  flutterLauncherRelative: null,
 
   /** 安装包图标（.ico，相对项目根或绝对路径）。 */
   iconFile: null,
@@ -253,6 +281,14 @@ export async function resolveConfig(input) {
 
   const merged = { ...DEFAULTS, ...fromPackage, ...fromFramework, ...fromFile, ...overrides }
 
+  /*
+   * 构建命令的默认来源：框架默认 < package.json 脚本 < 配置文件/CLI。
+   * 不在这里写死原因见 FRAMEWORK_BUILD_COMMANDS 的注释。
+   */
+  if (merged.buildCommand === null || merged.buildCommand === undefined) {
+    merged.buildCommand = FRAMEWORK_BUILD_COMMANDS[detected.id] ?? null
+  }
+
   merged.__framework = detected
   merged.framework = detected.id
 
@@ -288,7 +324,7 @@ export async function resolveConfig(input) {
   )
 
   // 图标与许可协议是可选的单文件，同样要归一化成绝对路径。
-  for (const key of ['iconFile', 'licenseFile', 'runtimeArchive', 'tauriDir']) {
+  for (const key of ['iconFile', 'licenseFile', 'runtimeArchive', 'tauriDir', 'flutterReleaseDir']) {
     if (merged[key] === null || merged[key] === undefined || merged[key] === '') {
       merged[key] = null
       continue
@@ -402,6 +438,13 @@ function validate(config) {
     problems.push({
       message: '既没有 entry 也没有 frontendDist，没有可打包的内容',
       hint: '在配置里指定 entry（宿主入口脚本）或 frontendDist（前端产物目录）',
+    })
+  }
+  if (config.framework === 'flutter' && config.flutterReleaseDir === null) {
+    problems.push({
+      message: 'Flutter 项目缺少 Windows 发布产物目录',
+      hint: '在 Windows 上运行 flutter build windows --release，'
+        + '或在配置里用 flutterReleaseDir 指向已有产物目录',
     })
   }
   if (config.launcherExe !== 'node.exe' && !/\.exe$/i.test(String(config.launcherExe))) {

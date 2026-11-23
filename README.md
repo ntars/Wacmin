@@ -132,7 +132,7 @@ macOS 与 Windows 之间的应用互通，长期靠三类方案：虚拟机（Pa
 
 | 能力 | 说明 | 状态 |
 |---|---|---|
-| 框架识别 | 自动识别 Electron / NW.js / Tauri / 纯 Node / 静态站点 | 完成 |
+| 框架识别 | 自动识别 Electron / NW.js / Tauri / Flutter / 纯 Node / 静态站点 | 完成 |
 | 运行时获取 | 下载对应框架的 Windows x86 预编译运行时 | 完成 |
 | 依赖收集 | 从入口走 require 图，拦截原生模块 | 完成 |
 | 暂存与垫片 | 按框架摆目录，注入桌面壳兼容垫片 | 完成 |
@@ -148,6 +148,8 @@ macOS 与 Windows 之间的应用互通，长期靠三类方案：虚拟机（Pa
 | B · Node 运行时 + 自建启动器 | 用 Node 官方 `win-x86` 承载逻辑，自写零依赖启动器拉起宿主、托管静态文件、开浏览器 | 浏览器界面 | 已端到端实测：空谷 Ondra（Tauri 项目） |
 | C · cargo-xwin 编译 Rust 壳 | `cargo xwin build --target i686-pc-windows-msvc` 在 mac 上编出真 Tauri 壳 | 原生窗口 | 依赖树已验证可链接成 PE32/i386；完整项目卡在 `llvm-rc`（本机未装），见 15.10 |
 | D · 未走的路 | Wine 跑 makensis、Zig 交叉编译、Docker Windows 容器、自研 PE 链接器、换系统 WebView2 | — | 逐条记录了不走的理由 |
+
+Flutter 的 Windows 产物必须在 Windows 上执行 `flutter build windows --release` 生成；mac2win 不伪造交叉编译，只将已有发布目录重打包为 NSIS 安装包或 zip，并校验主 exe 架构与逐文件哈希。
 
 **八阶段编排**：`preflight` → `project-build` → `runtime` → `collect` → `stage` → `manifest` → `package` → `verify`，任一阶段失败即停，后续阶段标 `skipped`。
 
@@ -1470,6 +1472,7 @@ node bin/mac2win.mjs ui /path/to/your-app
 | Electron | `node bin/mac2win.mjs build ./my-electron-app` | 真正的原生窗口，主程序改名为你的产品名 |
 | NW.js | `node bin/mac2win.mjs build ./my-nwjs-app` | 原生窗口 |
 | Tauri | `node bin/mac2win.mjs build ./my-tauri-app` | 默认浏览器界面；要原生窗口需 `buildRustShell: true` |
+| Flutter | 先在 Windows 上 `flutter build windows --release`，再在 mac 上 `node bin/mac2win.mjs build ./my-flutter-app` | 重打包已有原生产物，自动探测 `build/windows/x64/runner/Release`；快捷方式指向主 exe |
 | 纯 Node 服务 / 静态站点 | `node bin/mac2win.mjs build ./my-server` | 内置静态服务 + 启动器，界面走浏览器 |
 
 Tauri 要原生窗口需额外准备（约 1.5 GB）：
@@ -1739,11 +1742,11 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 }
 ```
 
-**全部 32 个可配置项**：
+**全部 39 个可配置项**：
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `framework` | `"auto"` | `auto` / `electron` / `nwjs` / `tauri` / `node` / `static`。`auto` 按 `package.json` 依赖与目录结构判定 |
+| `framework` | `"auto"` | `auto` / `electron` / `nwjs` / `tauri` / `flutter` / `node` / `static`。`auto` 按 `package.json` 依赖与目录结构判定 |
 | `target` | `"x86"` | `x86` / `x64`。`x86` 是项目的主要目标，`x64` 亦支持 |
 | `format` | `"nsis"` | `nsis` / `zip` |
 | `productName` | 从 `package.json` 推断 | 安装包显示名与产物文件名 |
@@ -1753,7 +1756,7 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 | `frontendDist` | 自动探测 `dist` / `build` / `out` / `.output/public` | 前端产物目录（相对项目根）。须含 `index.html` 才被采纳 |
 | `entry` | 从 `package.json` 的 `bin` / `main` 推断 | 宿主入口脚本（相对项目根） |
 | `resources` | `[]` | 额外随产物分发的文件或目录 |
-| `buildCommand` | 有 `scripts.build` 时推断为 `npm run build` | 打包前执行的项目构建命令 |
+| `buildCommand` | 有 `scripts.build` 时推断为 `npm run build`；Tauri 默认 `npm run tauri build`；Flutter / 静态站点默认不执行 | 打包前执行的项目构建命令；显式配置优先级最高 |
 | `preflightCommands` | `[]` | 预检阶段执行的命令，用于提前暴露环境问题 |
 | `launcherExe` | `"node.exe"` | 启动器文件名，须为 `.exe` |
 | `launcherArgs` | `["{entry}"]` | 启动参数，`{entry}` 会被替换为入口路径 |
@@ -1770,6 +1773,8 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 | `buildRustShell` | `false` | 是否为 Tauri 项目交叉编译 Rust 壳 |
 | `tauriDir` | `null` | Tauri 的 `src-tauri` 目录路径 |
 | `rustProfile` | `"release"` | Rust 编译 profile |
+| `flutterReleaseDir` | 自动探测 | Flutter Windows 发布目录；须由 Windows 上的 `flutter build windows --release` 生成 |
+| `flutterLauncherRelative` | `null` | Flutter 主程序在发布目录内的相对路径；默认取找到的第一个 `.exe` |
 | `iconFile` | `null` | 安装包图标，须为 `.ico` |
 | `licenseFile` | `null` | 安装向导展示的许可文件 |
 | `outDir` | `"dist-mac2win"` | 输出目录（相对项目根，或绝对路径） |
@@ -2405,14 +2410,14 @@ $INSTDIR/
 
 | 子项目 | 测试数 | 耗时 | 备注 |
 |---|---|---|---|
-| mac2win | 179 项 | 约 22 秒 | 含 12 项 PE 截断判据守卫（节区表声明长度 / 可选头字段跨度 / 节区表越界 / 仅差 1 字节边界 / `gui:false` 路径 / 4 KiB 窗口扩读 / e_lfanew 真非法与真截断分开，见 15.32） |
+| mac2win | 185 项 | 约 23 秒 | 含 12 项 PE 截断判据守卫（节区表声明长度 / 可选头字段跨度 / 节区表越界 / 仅差 1 字节边界 / `gui:false` 路径 / 4 KiB 窗口扩读 / e_lfanew 真非法与真截断分开，见 15.32）、框架默认构建命令覆盖守卫与 Flutter 产物端到端闭环 |
 | exeonmac | 552 项 | 约 5 分 2 秒 | 含现场编译 NSIS / Inno 样本、3 项真实 wine 安装、2 项真实层构建与 2 项对真实层跑匹配、3 项导入期副作用守卫（静态全仓 + 动态哨兵 + 扫描范围）、2 项启动窗口内信号（SIGTERM / SIGINT，假 wine 撑开窗口）、10 项字体替换格式/根键/判据守卫（含 2 项扫真实二进制的两条字体路径）、6 项重启拦截一次性戳守卫 + 1 项真实 wine 落盘验证、7 项注册表写入点清单独守（清单=实际 / 幽灵条目 / 戳机制在场 / 禁 reg add / 扫描器有判别力 / 注释不算命中 / 占位表不导入）、21 项 DirectWrite 探针守卫（槽位自检 / 宏化 / 字形覆盖 / 像素栅格化 / 三档渲染模式 / 落盘判据纯函数 / 四组真实 wine 对照，含 1 组拉丁别名负向对照）、9 项「截断 ≠ 格式不对」文案守卫（PE 短于 DOS 头 / PE 裁在 COFF 头前 / e_lfanew 真非法 / CFB 短于 512 / CFB magic 真错 / detect 证据链不自相矛盾 / 真非 PE 仍报非 PE，见 15.30）、18 项「文件不全 ≠ 没有这个资源」守卫（`pe.truncated()` 判据 5 项 / `resources()` 空表三分类 5 项 / 图标层 ICO 目录与 payload 截断 8 项，见 15.31） |
 | win2mac | 130 项 | 约 2 秒 | |
 | apponwin | 96 项 | 约 0.5 秒 | |
 | console | 254 项 | 约 23 秒 | 含 8 项断行质量守卫 + 11 项键盘焦点守卫 |
 | ai | 132 项 | 约 9 秒 | |
 | contracts | 141 项 | 约 4 秒 | 含 15 项文档计数自检 + 32 项附录 C 守卫 + 2 项表作用域守卫 + 8 项表格结构守卫（逐块与表头比列数，见 15.29⑦）+ 20 项两版小节编号对称守卫（含中文数字顶章转换，见 15.32⑧） |
-| **合计** | **1484 项** | — | 见下文「全仓 0 跳过」|
+| **合计** | **1490 项** | — | 见下文「全仓 0 跳过」|
 
 **全仓 0 跳过。** 这不是一个漂亮的数字，是一条硬约束：`OK (skipped=N)` 与
 `# skipped N` 的退出码都是 0，跳过在报告里跟通过长得一样。实测过两次
@@ -2672,7 +2677,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | Mac2Win 不支持原生模块（`.node`） | 编译好的机器码与 OS/CPU 绑定 | 换纯 JS 替代包；mac2win 会在依赖收集阶段拦下并指出是哪个包 |
 | Mac2Win 不能在 mac 上打 macOS 包给 Windows 用 | 平台二进制格式不同（Mach-O vs PE），且需对应平台 SDK | 无。用对应平台构建 |
 | Mac2Win 不能在 mac 上打 Linux 包 | 需要 Linux 的 glibc 与 ELF 工具链 | 可用 Docker，但不在本项目范围 |
-| Wails / Flutter 桌面版跨架构 | 二者的 Windows 目标必须用 MSVC 完整工具链 | 无等价路径 |
+| Wails 桌面版跨架构 | Windows 目标必须用 MSVC 完整工具链 | 无等价路径 |
 | .NET / WPF 跨架构 | 需 Windows SDK 与 MSBuild | 无等价路径 |
 | ExeOnMac 必须自备 Wine x86_64 | Wine 官方从未发布 arm64 macOS 构建 | 无。只能经 Rosetta 2 |
 | ExeOnMac 无法覆盖全部 Windows 程序 | Wine 的兼容性由底层决定，本项目不修改 Wine | 无。只能通过配方库逐程序适配 |
@@ -2880,7 +2885,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 2 | 9.1 契约文件表 | 「七段位分配」 | 同上是 9 个 | 与 #1 同源 |
 | 3 | 8.2 快速开始 | `open "~/Applications/MyApp (Win).app"` | 引号里的 `~` 不会被 shell 展开，`open` 报 `~/Applications/... does not exist`。**这条照抄必然失败** | 命令不可执行。注意上一行 `install -o "~/..."` 是对的——`wepack` 自己 `expanduser()`，差别在 `open` 是外部进程 |
 | 4 | 6.4 间接依赖 | 「七个模块（**五个**方向、`console`、`ai`、`contracts`）」 | 方向只有 4 个（`mac2win`/`exeonmac`/`win2mac`/`apponwin`），7 = 4 + 3 | 括号内的加法不成立 |
-| 5 | 附录 C 第 2 项 | 32 个配置项 / 14 项外部工具 / 10 个子命令族 | 9.2 表 **37** 行（与 `config.mjs` 的 `DEFAULTS` 37 键一致）、6.2 表 **18** 行（`NOTICE` 第三章同为 18 行）、10.1 表 **6** 行 | 三个数字全过期 |
+| 5 | 附录 C 第 2 项 | 32 个配置项 / 14 项外部工具 / 10 个子命令族 | 9.2 表 **39** 行（与 `config.mjs` 的 `DEFAULTS` 39 键一致）、6.2 表 **18** 行（`NOTICE` 第三章同为 18 行）、10.1 表 **6** 行 | 三个数字全过期 |
 | 6 | 附录 C 第 3 项 | 二十条亮点 | 实际 **25** 个（含「亮点十五之二」「之三」） | 漏数 |
 | 7 | 5.10.4 与 18.1 | 「已踩过的实例见 18.5」/「见 15.2」 | 实例在 **15.3**（«文档与实现的三次偏离»）；15.2 是 exeonmac 真机实测、18.5 是文档同步要求 | 交叉引用指错两处 |
 | 8 | 附录 C 第 6 项 | 测试规模（**16**）、校验项数（**15.5**） | 测试计数表在 **12.1**（16 是更新日志）；校验项数在 **15.6** | 引用指错两处 |
@@ -2936,7 +2941,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 | 附录 C 的说法 | 真源 | 读法 |
 |---|---|---|
-| 37 个配置项（9.2） | `mac2win/src/core/config.mjs` 的 `DEFAULTS` | `import` 后数键，并与 9.2 首表行数**交叉验证** |
+| 39 个配置项（9.2） | `mac2win/src/core/config.mjs` 的 `DEFAULTS` | `import` 后数键，并与 9.2 首表行数**交叉验证** |
 | 13 个环境变量（9.3） | 9.3 表 | 数数据行 |
 | 18 项外部工具（6.2） | 6.2 表 | 数数据行，并与 `NOTICE` 第三章**交叉验证** |
 | 6 个子命令族（10.1） | 10.1 首表 | 数数据行 |
@@ -2945,11 +2950,11 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | `NOTICE` 十三节 | `NOTICE` 顶层编号章 | 数 `## 一、`…，并校验章号从 1 起连续 |
 | 校验项 11 项（15.6） | 15.6 表 | 数数据行 |
 
-**为什么必须交叉验证**：配置项在代码（`DEFAULTS` 37 键）与文档（9.2 表 37 行）各存一份，外部工具在 6.2 与 `NOTICE` 第三章各存一份。只对附录 C 与其中一侧，另一侧漂了照样绿。实测注掉交叉验证后，把 `DEFAULTS` 加一个键、9.2 表不动，守卫只报「附录 C 写 37、实际 38」，**不会告诉你 9.2 表也过期了**。
+**为什么必须交叉验证**：配置项在代码（`DEFAULTS` 39 键）与文档（9.2 表 39 行）各存一份，外部工具在 6.2 与 `NOTICE` 第三章各存一份。只对附录 C 与其中一侧，另一侧漂了照样绿。实测注掉交叉验证后，把 `DEFAULTS` 加一个键、9.2 表不动，守卫只报「附录 C 写 39、实际 40」，**不会告诉你 9.2 表也过期了**。
 
 **接入点只有一个**：`contracts/doc-counts.mjs --check` 现在同时跑 12.1 与附录 C。CI 的 `ci.yml` 与 18.2 检查块早就在跑这条命令，因此无需改 workflow，也就不会出现「新命令没人记得跑」。另有三个只跑一半的入口 `--check-counts` / `--check-appendix` / `--check-tables`（2026-11-22 新增），专供测试夹具用 —— 12.1 的夹具只造两份 README，附录 C 的夹具还要 `NOTICE` 与 `config.mjs`，混在一个入口会让两边都被迫造一堆无关文件。
 
-**负向验证（9 条，全部有效）**：8 个数字各改一处 → 每个都被点名，报错格式统一为「附录 C 写 X ⟨事实⟩，实际 Y（⟨真源⟩）」，例如 `附录 C 写 32 配置项数，实际 37（config.mjs 的 DEFAULTS 键数）`。另加一组「真源变化、附录 C 不动」：9.3 表加一行、`DEFAULTS` 加一键、`NOTICE` 第三章加一行、删一个亮点标题 —— 四种都被抓到。**注回旧实现**（去掉 `checkAppendix` 那一行）→ `appendix-guard.test.mjs` 立刻 **9 项变红**，还原后 32/32 绿。
+**负向验证（9 条，全部有效）**：8 个数字各改一处 → 每个都被点名，报错格式统一为「附录 C 写 X ⟨事实⟩，实际 Y（⟨真源⟩）」，例如 `附录 C 写 38 配置项数，实际 39（config.mjs 的 DEFAULTS 键数）`。另加一组「真源变化、附录 C 不动」：9.3 表加一行、`DEFAULTS` 加一键、`NOTICE` 第三章加一行、删一个亮点标题 —— 四种都被抓到。**注回旧实现**（去掉 `checkAppendix` 那一行）→ `appendix-guard.test.mjs` 立刻 **9 项变红**，还原后 32/32 绿。
 
 **这一条与 12.1 是同一个病的两个病灶**：12.1 治的是「测试计数」，附录 C 治的是「文档事实」，共同点是**数字由人数、没有复算路径**。只要一个数字存在两处而没有脚本对账，它迟早会分叉 —— 差别只是被人发现，还是被用户发现。
 
@@ -5488,7 +5493,7 @@ git push -u origin main
 | # | 检查项 | 结论 |
 |---|---|---|
 | 1 | 是否还有口语化表达或歧义句 | 已检查。全文采用书面语，无感叹号与省略号制造的随意感；术语首次出现处给出定义 |
-| 2 | 是否遗漏核心功能、配置项或依赖 | 已补全。37 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1）。数字与 `mac2win/src/core/config.mjs` 的 `DEFAULTS`（37 键）、`NOTICE` 第三章（18 行）、10.1 表（6 行）逐项对齐 |
+| 2 | 是否遗漏核心功能、配置项或依赖 | 已补全。39 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1）。数字与 `mac2win/src/core/config.mjs` 的 `DEFAULTS`（39 键）、`NOTICE` 第三章（18 行）、10.1 表（6 行）逐项对齐 |
 | 3 | 每个亮点是否都有具体依据 | 二十五条亮点均含「亮点名称 / 价值 / 实现方式 / 差异化 / 证据」五段，证据全部为实测数据或可复现命令 |
 | 4 | 设计细节是否都写明 | 第 5 章 11 节，覆盖异常输入与边界、超时重试降级容错、缓存与性能、并发与一致性、存储优化、安全防护、体验微决策、默认值理由、跨平台策略 |
 | 5 | 第三方项目、版权、许可证是否完整出现在 README 与 NOTICE | 第 6 章 + `NOTICE` 十三节，两处信息一致 |

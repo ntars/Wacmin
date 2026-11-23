@@ -55,7 +55,9 @@ mac2win ${VERSION} — 在 ARM 架构的 macOS 上打包 x86 Windows 安装包
       --keep-staging        保留中间产物，便于排查
       --compression <type>  lzma（默认）| zlib | bzip2 | none
       --icon <file.ico>     安装包图标
-      --framework <name>    强制指定框架：electron / nwjs / tauri / node / static
+      --framework <name>    强制指定框架：electron / nwjs / tauri / flutter / node / static
+      --flutter-release <dir> Flutter Windows 发布目录（默认自动探测）
+      --flutter-launcher <path> Flutter 主程序在发布目录内的相对路径
       --electron <ver>      Electron 版本（x86 目标须 ≤43）
       --nwjs <ver>          NW.js 版本
       --runtime <file>      离线运行时（node.exe 或 win-x86 zip）
@@ -97,9 +99,11 @@ function describePlan(config) {
     lines.push('1. 跳过项目构建（未配置 buildCommand，假定产物已就绪）')
   }
 
-  const runtimeNote = config.runtimeArchive === null
-    ? '从 nodejs.org 下载 Node win-x86（约 32 MB，已缓存则复用）'
-    : `使用本地运行时 ${config.runtimeArchive}`
+  const runtimeNote = config.framework === 'flutter'
+    ? '不需要 Node 运行时（Flutter 原生产物自带 exe）'
+    : config.runtimeArchive === null
+      ? '从 nodejs.org 下载 Node win-x86（约 32 MB，已缓存则复用）'
+      : `使用本地运行时 ${config.runtimeArchive}`
   lines.push(`2. 准备 Node 运行时：${runtimeNote}`)
 
   if (config.framework === 'electron') {
@@ -114,6 +118,8 @@ function describePlan(config) {
     lines.push(`3. 准备 NW.js 运行时：${nwjsNote}`)
   } else if (config.framework === 'tauri' && config.buildRustShell === true) {
     lines.push('3. 用 cargo-xwin 编译 Rust 壳（首次 10–30 分钟）')
+  } else if (config.framework === 'flutter') {
+    lines.push(`3. 使用 Windows 上已构建的 Flutter 发布目录 ${config.flutterReleaseDir ?? '(未配置)'}`)
   } else {
     lines.push('3. 无需额外运行时（走 Node + 启动器）')
   }
@@ -261,6 +267,18 @@ async function findFileNamed(root, name) {
   return visit(root)
 }
 
+/**
+ * 独立 verify 时从产物文件名推断框架。
+ *
+ * 文件名是打包阶段的产品名，不能保证含 `flutter`；这只是一个启发式，
+ * 用于不把 Flutter 原生产物误判成「缺 node.exe」。最可靠的做法仍是
+ * 构建阶段传入 config.framework（builder 已传）。
+ */
+async function inferVerifyFramework(artifact) {
+  const name = artifact.split('/').pop()?.toLowerCase() ?? ''
+  return name.includes('flutter') ? 'flutter' : null
+}
+
 /** 把命令行参数转成配置覆盖项。只映射用户显式给了的那些。 */
 function toOverrides(values) {
   const overrides = {}
@@ -278,6 +296,8 @@ function toOverrides(values) {
     runtime: 'runtimeArchive',
     'runtime-sha256': 'runtimeChecksum',
     framework: 'framework',
+    'flutter-release': 'flutterReleaseDir',
+    'flutter-launcher': 'flutterLauncherRelative',
     electron: 'electronVersion',
     nwjs: 'nwjsVersion',
   }
@@ -565,6 +585,9 @@ async function commandVerify(positional, values) {
       : await verifyArtifact({
         artifact: target,
         expectTarget,
+        // 独立 verify 命令可以根据载荷内容自动判断框架，避免 Flutter
+        // 原生产物被当作「缺 node.exe」误报。
+        framework: await inferVerifyFramework(target),
         onProgress: (message) => { logger.debug(message) },
       })
   } catch (error) {
@@ -723,6 +746,8 @@ async function main() {
         runtime: { type: 'string' },
         'runtime-sha256': { type: 'string' },
         framework: { type: 'string' },
+        'flutter-release': { type: 'string' },
+        'flutter-launcher': { type: 'string' },
         electron: { type: 'string' },
         nwjs: { type: 'string' },
         'no-verify': { type: 'boolean' },

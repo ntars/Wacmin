@@ -24,6 +24,7 @@ import { BuildError, ErrorCode } from './errors.mjs'
 import { isDirectory, isFile, walkFiles, windowsPathProblem } from '../util/fsx.mjs'
 import { FRAMEWORKS, checkFrameworkTarget } from './frameworks.mjs'
 import { checkRustEnv } from './rust-shell.mjs'
+import { readdir } from 'node:fs/promises'
 
 const run = promisify(execFile)
 
@@ -288,6 +289,35 @@ async function checkProject(report, config) {
     }
   }
 
+  // Flutter 发布产物：必须是 Windows 上构建出的原生 exe + 数据目录。
+  if (config.framework === 'flutter') {
+    const releaseDir = config.flutterReleaseDir
+    if (releaseDir === null || !(await isDirectory(releaseDir))) {
+      report.add(new Check(
+        'flutter-release',
+        'Flutter Windows 产物',
+        'fail',
+        `不存在：${String(releaseDir)}`,
+        '在 Windows 上运行 flutter build windows --release，'
+          + '然后用 flutterReleaseDir 指向输出目录',
+      ))
+    } else {
+      const names = await readdir(releaseDir)
+      const exe = names.find((name) => name.toLowerCase().endsWith('.exe'))
+      if (exe === undefined) {
+        report.add(new Check(
+          'flutter-release',
+          'Flutter Windows 产物',
+          'fail',
+          `${releaseDir} 里没有 .exe`,
+          'flutter build windows --release 的产物目录应包含主程序 exe',
+        ))
+      } else {
+        report.add(new Check('flutter-release', 'Flutter Windows 产物', 'pass', `${releaseDir}（${exe}）`))
+      }
+    }
+  }
+
   // 输出目录可写性：不建目录，只查父级权限，避免预检产生副作用。
   report.add(new Check('output-dir', '输出目录', 'pass', config.outDir))
 
@@ -304,7 +334,9 @@ async function checkProject(report, config) {
    * 这一项报 warn 而不是 fail：有些文件可能确实不会被用到，硬拦下来
    * 反而挡了合理的打包。但必须让用户看见。
    */
-  const scannedRoot = config.frontendDist ?? config.projectRoot
+  const scannedRoot = config.framework === 'flutter'
+    ? config.flutterReleaseDir ?? config.projectRoot
+    : config.frontendDist ?? config.projectRoot
   const offending = []
   for (const relative of await walkFiles(scannedRoot)) {
     const problem = windowsPathProblem(relative)
@@ -579,6 +611,7 @@ const CHECK_ERROR_CODES = {
   'project-entry': ErrorCode.PROJECT_NOT_FOUND,
   'project-frontend': ErrorCode.PROJECT_NOT_FOUND,
   'project-resource': ErrorCode.PROJECT_NOT_FOUND,
+  'flutter-release': ErrorCode.PROJECT_ARTIFACT_MISSING,
   'output-dir': ErrorCode.PROJECT_NOT_FOUND,
   // 目标与架构落在硬边界内：路径没错，是这件事做不了
   'target-arch': ErrorCode.UNSUPPORTED,

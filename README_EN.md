@@ -132,7 +132,7 @@ The four directions are structurally isomorphic: each subproject follows the sam
 
 | Capability | Description | Status |
 |---|---|---|
-| Framework detection | Automatically identifies Electron / NW.js / Tauri / plain Node / static site | Complete |
+| Framework detection | Automatically identifies Electron / NW.js / Tauri / Flutter / plain Node / static site | Complete |
 | Runtime acquisition | Downloads the Windows x86 prebuilt runtime for the corresponding framework | Complete |
 | Dependency collection | Walks the require graph from the entry point, intercepts native modules | Complete |
 | Staging and shims | Lays out directories per framework, injects desktop-shell compatibility shims | Complete |
@@ -148,6 +148,8 @@ The four directions are structurally isomorphic: each subproject follows the sam
 | B · Node runtime + custom launcher | Use the official Node `win-x86` build to host application logic; write a zero-dependency launcher that spawns the host process, serves static files and opens the browser | Browser UI | End-to-end verified: the Ondra (Tauri) project |
 | C · cargo-xwin Rust shell | `cargo xwin build --target i686-pc-windows-msvc` compiles a genuine Tauri shell on macOS | Native window | Dependency tree verified to link into PE32/i386; complete project blocks on `llvm-rc` (not installed here), see 15.10 |
 | D · Roads not taken | Running makensis under Wine, Zig cross-compilation, Docker Windows containers, a self-developed PE linker, swapping in the system WebView2 | — | Reasons recorded per entry |
+
+Flutter Windows artefacts must be produced by `flutter build windows --release` on Windows; mac2win does not fake cross-compilation. It repackages an existing release directory as an NSIS installer or zip and verifies the main executable architecture and per-file hashes.
 
 **Eight-phase orchestration**: `preflight` → `project-build` → `runtime` → `collect` → `stage` → `manifest` → `package` → `verify`. Any failing phase halts the run and all subsequent phases are marked `skipped`.
 
@@ -1470,6 +1472,7 @@ The artefact lands in `<project>/dist-mac2win/`, named like `your-app-1.0.0-x86-
 | Electron | `node bin/mac2win.mjs build ./my-electron-app` | A genuine native window, with the main executable renamed to your product name |
 | NW.js | `node bin/mac2win.mjs build ./my-nwjs-app` | Native window |
 | Tauri | `node bin/mac2win.mjs build ./my-tauri-app` | Browser UI by default; native window requires `buildRustShell: true` |
+| Flutter | Run `flutter build windows --release` on Windows first, then `node bin/mac2win.mjs build ./my-flutter-app` on macOS | Repackages existing native artefacts, auto-detects `build/windows/x64/runner/Release`; shortcut points at the main exe |
 | Plain Node service / static site | `node bin/mac2win.mjs build ./my-server` | Built-in static server plus launcher; UI in the browser |
 
 Tauri needs extra preparation (about 1.5 GB) for a native window:
@@ -1739,11 +1742,11 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 }
 ```
 
-**All 32 configurable keys**:
+**All 39 configurable keys**:
 
 | Key | Default | Description |
 |---|---|---|
-| `framework` | `"auto"` | `auto` / `electron` / `nwjs` / `tauri` / `node` / `static`. `auto` decides from `package.json` dependencies and directory structure |
+| `framework` | `"auto"` | `auto` / `electron` / `nwjs` / `tauri` / `flutter` / `node` / `static`. `auto` decides from `package.json` dependencies and directory structure |
 | `target` | `"x86"` | `x86` / `x64`. `x86` is the project's primary target; `x64` is also supported |
 | `format` | `"nsis"` | `nsis` / `zip` |
 | `productName` | Inferred from `package.json` | Installer display name and artefact filename |
@@ -1753,7 +1756,7 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 | `frontendDist` | Auto-detects `dist` / `build` / `out` / `.output/public` | Front-end output directory (relative to the project root). Adopted only if it contains `index.html` |
 | `entry` | Inferred from `package.json`'s `bin` / `main` | Host entry script (relative to the project root) |
 | `resources` | `[]` | Extra files or directories shipped with the artefact |
-| `buildCommand` | Inferred as `npm run build` when `scripts.build` exists | Project build command run before packaging |
+| `buildCommand` | Inferred as `npm run build` when `scripts.build` exists; Tauri defaults to `npm run tauri build`; Flutter / static sites run none | Project build command run before packaging; explicit configuration takes priority |
 | `preflightCommands` | `[]` | Commands run during preflight to surface environment problems early |
 | `launcherExe` | `"node.exe"` | Launcher filename, must be `.exe` |
 | `launcherArgs` | `["{entry}"]` | Launch arguments; `{entry}` is replaced with the entry path |
@@ -1770,6 +1773,8 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 | `buildRustShell` | `false` | Whether to cross-compile the Rust shell for a Tauri project |
 | `tauriDir` | `null` | Path to Tauri's `src-tauri` directory |
 | `rustProfile` | `"release"` | Rust compilation profile |
+| `flutterReleaseDir` | Auto-detected | Flutter Windows release directory; must be produced by `flutter build windows --release` on Windows |
+| `flutterLauncherRelative` | `null` | Relative path of the Flutter main executable inside the release directory; defaults to the first `.exe` found |
 | `iconFile` | `null` | Installer icon, must be `.ico` |
 | `licenseFile` | `null` | Licence file shown in the installation wizard |
 | `outDir` | `"dist-mac2win"` | Output directory (relative to the project root, or absolute) |
@@ -2406,14 +2411,14 @@ Performance in each direction is determined by its foundation; this project only
 
 | Subproject | Tests | Duration | Notes |
 |---|---|---|---|
-| mac2win | 179 | about 22 seconds | Includes 12 PE truncation guards (section-table declared length / optional-header field span / section table past the end / the one-byte-short boundary / the `gui:false` path / 4 KiB-window re-read / genuinely illegal e_lfanew kept apart from genuinely truncated, see 15.32) |
+| mac2win | 185 | about 23 seconds | Includes 12 PE truncation guards (section-table declared length / optional-header field span / section table past the end / the one-byte-short boundary / the `gui:false` path / 4 KiB-window re-read / genuinely illegal e_lfanew kept apart from genuinely truncated, see 15.32), framework default build-command coverage guards and a Flutter end-to-end artefact loop |
 | exeonmac | 552 | about 5m2s | Includes on-the-spot NSIS / Inno compilation, 3 real wine installs, 2 real layer builds, 2 matches against real layers, 3 import-time side-effect guards (static repo-wide scan, dynamic sentinel, scan-scope guard), 2 in-window signal tests (SIGTERM / SIGINT, window widened by a fake wine), 10 font-substitution format/root-key/check guards (2 of which scan the real binaries for both font paths), 6 restart-suppression one-shot-stamp guards + 1 real-wine landing check, 7 registry-write-site inventory guards (inventory equals reality / no ghost entries / stamp mechanism present / no `reg add` / the scanner itself has teeth / comments are not hits / the placeholder path must not import), and 21 DirectWrite-probe guards (slot self-test / macro-only / glyph coverage / pixel rasterization / three rendering modes / pure-function landing checks / four real-wine arms, one of them a Latin-only alias negative control), 9 guards on "truncated is not the wrong format" wording (PE shorter than the DOS header / PE cut before the COFF header / e_lfanew genuinely illegal / CFB shorter than 512 / CFB magic genuinely wrong / detect's evidence chain must not contradict itself / a genuinely non-PE file still says non-PE, see 15.30), and 18 guards on "incomplete file is not a missing resource" (`pe.truncated()` predicate 5 / the three kinds of empty from `resources()` 5 / ICONDIR and payload truncation at the icon layer 8, see 15.31) |
 | win2mac | 130 | about 2 seconds | |
 | apponwin | 96 | about 0.5 seconds | |
 | console | 254 | about 23 seconds | Includes 8 line-break quality guards + 11 keyboard-focus guards |
 | ai | 132 | about 9 seconds | |
 | contracts | 141 | about 4 seconds | Includes documentation-count, Appendix C guard, table-scope guard, 8 table-structure guards (cell count per block against the header, see 15.29⑦) and 20 section-number symmetry guards (including Chinese-numeral top-level chapters, see 15.32⑧) |
-| **Total** | **1484** | — | See "0 skipped repository-wide" below |
+| **Total** | **1490** | — | See "0 skipped repository-wide" below |
 
 **Zero skips repository-wide.** This is not a nice-looking number but a hard constraint: both `OK (skipped=N)` and `# skipped N` exit with status 0, so a skipped test looks exactly like a passing one in the report. Two cases of "CI green while the guard was off duty" were measured:
 
@@ -2652,7 +2657,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | Mac2Win does not support native modules (`.node`) | Compiled machine code is bound to OS/CPU | Switch to a pure-JS alternative; mac2win intercepts during collection and names the package |
 | Mac2Win cannot build macOS packages on a Mac for Windows | Platform binary formats differ (Mach-O vs PE) and the matching SDK is required | None. Build on the corresponding platform |
 | Mac2Win cannot build Linux packages on a Mac | Requires Linux glibc and an ELF toolchain | Docker is possible but out of scope |
-| Wails / Flutter desktop across architectures | Their Windows targets require the full MSVC toolchain | No equivalent path |
+| Wails desktop across architectures | The Windows target requires the full MSVC toolchain | No equivalent path |
 | .NET / WPF across architectures | Requires the Windows SDK and MSBuild | No equivalent path |
 | ExeOnMac requires a self-supplied Wine x86_64 | Wine has never published an arm64 macOS build | None. Only via Rosetta 2 |
 | ExeOnMac cannot cover every Windows program | Wine compatibility is determined by the layer beneath; this project does not modify Wine | None. Per-program adaptation through the recipe library |
@@ -2862,7 +2867,7 @@ The three cases above were found by accident. On 2026-11-19 a **mechanical** aud
 | 2 | 9.1 contract-file table | "seven-segment allocation" | 9, as above | Same root as #1 |
 | 3 | 8.2 quick start | `open "~/Applications/MyApp (Win).app"` | A `~` inside quotes is not expanded by the shell; `open` reports `~/Applications/... does not exist`. **Copying this line always fails** | Non-executable command. Note the preceding `install -o "~/..."` is correct—`wepack` calls `expanduser()` itself; the difference is that `open` is an external process |
 | 4 | 6.4 transitive dependencies | "seven modules (**five** directions, `console`, `ai`, `contracts`)" | There are only 4 directions (`mac2win`/`exeonmac`/`win2mac`/`apponwin`), and 7 = 4 + 3 | The arithmetic inside the parentheses does not hold |
-| 5 | Appendix C item 2 | 32 configuration keys / 14 external tools / 10 subcommand families | 9.2 has **37** rows (matching `DEFAULTS` in `config.mjs`, 37 keys), 6.2 has **18** rows (`NOTICE` chapter 3 also has 18), 10.1 has **6** rows | All three numbers stale |
+| 5 | Appendix C item 2 | 32 configuration keys / 14 external tools / 10 subcommand families | 9.2 has **39** rows (matching `DEFAULTS` in `config.mjs`, 39 keys), 6.2 has **18** rows (`NOTICE` chapter 3 also has 18), 10.1 has **6** rows | All three numbers stale |
 | 6 | Appendix C item 3 | twenty highlights | Actually **25** (including "Highlight 15b" and "15c") | Undercounted |
 | 7 | 5.10.4 and 18.1 | "instances are in 18.5" / "in 15.2" | The instances are in **15.3** (*Three Divergences Between Documentation and Implementation*); 15.2 is the ExeOnMac real-run measurement and 18.5 is the documentation-sync requirement | Two cross-references pointing at the wrong section |
 | 8 | Appendix C item 6 | test sizes (**16**), check counts (**15.5**) | The test-count table is **12.1** (16 is the changelog); the check counts are in **15.6** | Two more wrong references |
@@ -2918,7 +2923,7 @@ The to-do left by the previous section is now closed. Appendix C contains eight 
 
 | What Appendix C claims | Real source | How it is read |
 |---|---|---|
-| 37 configuration keys (9.2) | `DEFAULTS` in `mac2win/src/core/config.mjs` | `import` and count keys, **cross-checked** against the row count of the first 9.2 table |
+| 39 configuration keys (9.2) | `DEFAULTS` in `mac2win/src/core/config.mjs` | `import` and count keys, **cross-checked** against the row count of the first 9.2 table |
 | 13 environment variables (9.3) | the 9.3 table | count data rows |
 | 18 external tools (6.2) | the 6.2 table | count data rows, **cross-checked** against `NOTICE` chapter 3 |
 | 6 subcommand families (10.1) | the first 10.1 table | count data rows |
@@ -2927,7 +2932,7 @@ The to-do left by the previous section is now closed. Appendix C contains eight 
 | 13 `NOTICE` chapters | top-level numbered chapters | count `## 一、`… and verify numbering is contiguous from 1 |
 | 11 artifact checks (15.6) | the 15.6 table | count data rows |
 
-**Why cross-checking is mandatory**: configuration keys live in two places (37 keys in `DEFAULTS`, 37 rows in the 9.2 table) and external tools in two (`6.2` and `NOTICE` chapter 3). Comparing Appendix C against only one side leaves the other free to drift. Measured: with the cross-check disabled, adding a key to `DEFAULTS` while leaving the 9.2 table untouched reports only "Appendix C says 37, actual 38" — it **never tells you the 9.2 table is stale too**.
+**Why cross-checking is mandatory**: configuration keys live in two places (39 keys in `DEFAULTS`, 39 rows in the 9.2 table) and external tools in two (`6.2` and `NOTICE` chapter 3). Comparing Appendix C against only one side leaves the other free to drift. Measured: with the cross-check disabled, adding a key to `DEFAULTS` while leaving the 9.2 table untouched reports only "Appendix C says 39, actual 40" — it **never tells you the 9.2 table is stale too**.
 
 **One entry point only**: `contracts/doc-counts.mjs --check` now runs both 12.1 and Appendix C. `ci.yml` and the 18.2 check block already invoke that command, so no workflow change is needed and no new command can be forgotten. Three half-entry points, `--check-counts`, `--check-appendix` and `--check-tables` (added 2026-11-22), exist purely for test fixtures — the 12.1 fixtures build two READMEs, while the Appendix C fixtures also need `NOTICE` and `config.mjs`; merging them would force both sets to construct unrelated files.
 
@@ -5466,7 +5471,7 @@ Responding item by item to the ten requirements in chapter 5 of `README提示词
 | # | Check | Conclusion |
 |---|---|---|
 | 1 | Any colloquialisms or ambiguous sentences | Checked. The whole document is written in formal prose, free of exclamation marks and ellipsis-driven casualness; terms are defined at first use |
-| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 37 configuration keys (9.2), 13 environment variables (9.3), 18 external tools with all seven attributes (6.2), 6 subcommand families (10.1). Counts verified against `DEFAULTS` in `mac2win/src/core/config.mjs` (37 keys), `NOTICE` chapter 3 (18 rows) and the 10.1 table (6 rows) |
+| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 39 configuration keys (9.2), 13 environment variables (9.3), 18 external tools with all seven attributes (6.2), 6 subcommand families (10.1). Counts verified against `DEFAULTS` in `mac2win/src/core/config.mjs` (39 keys), `NOTICE` chapter 3 (18 rows) and the 10.1 table (6 rows) |
 | 3 | Every highlight has concrete evidence | All twenty-five highlights follow the five-part structure (name / value / implementation / differentiation / evidence), with evidence drawn from measurement or reproducible commands |
 | 4 | All design details recorded | Chapter 5, eleven sections, covering abnormal input and boundaries, timeout/retry/degradation/fault tolerance, caching and performance, concurrency and consistency, storage optimisation, security measures, micro UX decisions, default-value rationale, cross-platform strategy |
 | 5 | Third-party projects, copyright and licences fully present in README and NOTICE | Chapter 6 plus the thirteen sections of `NOTICE`, consistent between the two |

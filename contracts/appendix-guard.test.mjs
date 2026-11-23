@@ -207,7 +207,7 @@ describe('noticeChapterCount', () => {
 describe('parseClaims', () => {
   test('中文版取全 8 个数字', () => {
     const body = [
-      '| 2 | x | 已补全。37 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1） |',
+      '| 2 | x | 已补全。39 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1） |',
       '| 3 | x | 二十五条亮点均含五段 |',
       '| 4 | x | 第 5 章 11 节 |',
       '| 5 | x | 第 6 章 + `NOTICE` 十三节 |',
@@ -216,7 +216,7 @@ describe('parseClaims', () => {
     const { claims, missing } = parseClaims(body, 'zh')
     assert.deepEqual(missing, [])
     assert.deepEqual(claims, {
-      configKeys: 37,
+      configKeys: 39,
       envVars: 13,
       extTools: 18,
       subcommandFamilies: 6,
@@ -258,7 +258,7 @@ describe('parseClaims', () => {
 describe('附录 C 的 8 个数字，逐个篡改都必须被抓到', () => {
   /** 每条用例：中文版里改一处，断言退出码 1 且报错点名该数字。 */
   const CASES = [
-    { key: '配置项', from: '37 个配置项全表（9.2）', to: '32 个配置项全表（9.2）', expect: /写 32 配置项数，实际 37/u },
+    { key: '配置项', from: '39 个配置项全表（9.2）', to: '32 个配置项全表（9.2）', expect: /写 32 配置项数，实际 39/u },
     { key: '环境变量', from: '13 个环境变量全表（9.3）', to: '14 个环境变量全表（9.3）', expect: /写 14 环境变量数，实际 13/u },
     { key: '外部工具', from: '18 项外部工具七要素表（6.2）', to: '14 项外部工具七要素表（6.2）', expect: /写 14 外部工具数，实际 18/u },
     { key: '子命令族', from: '6 个子命令族（10.1）', to: '10 个子命令族（10.1）', expect: /写 10 子命令族数，实际 6/u },
@@ -334,8 +334,8 @@ describe('真源变化时必须发现（附录 C 一个字不动）', () => {
       const { status, problems } = withEdit(root, 'mac2win/src/core/config.mjs', (text) =>
         text.replace('export const DEFAULTS = {', 'export const DEFAULTS = {\n  probeExtraKey: null,'))
       assert.equal(status, 1)
-      assert.ok(problems.some((problem) => /实际 38/u.test(problem) && /配置项数/u.test(problem)),
-        `应有「实际 38」的配置项数不符，实际：${JSON.stringify(problems)}`)
+      assert.ok(problems.some((problem) => /实际 40/u.test(problem) && /配置项数/u.test(problem)),
+        `应有「实际 40」的配置项数不符，实际：${JSON.stringify(problems)}`)
       // 代码与文档两张清单各存一份，必须交叉验证
       assert.ok(problems.some((problem) => /两(?:张|份)清单需要同步/u.test(problem)),
         `应有「两张清单需要同步」的交叉验证报错，实际：${JSON.stringify(problems)}`)

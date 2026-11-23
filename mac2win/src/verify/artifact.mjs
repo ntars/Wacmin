@@ -341,7 +341,7 @@ async function hashFile(path) {
  * @returns {Promise<VerifyReport>}
  */
 export async function verifyArtifact(input) {
-  const { artifact, expectedManifest, onProgress, expectTarget = 'x86' } = input
+  const { artifact, expectedManifest, onProgress, expectTarget = 'x86', framework = null } = input
   const report = new VerifyReport(artifact)
 
   // --- 1. 文件存在 ---
@@ -452,12 +452,18 @@ export async function verifyArtifact(input) {
      * 「未验证」时，读起来会变成「7-Zip 没被验证」——语义正好相反。
      * 所以它带一个 `cause` 标记，让上层能把它单独摘出来说。
      */
-    const unverified = [
-      ['payload', '载荷完整性', '安装包里装了什么，一个文件都没解开看过'],
-      ['payload-node-arch', '载荷内 node.exe 架构', '无法确认装到 Windows 上的是 32 位还是 64 位运行时'],
-      ['required-node.exe', '必需文件 node.exe', '无法确认安装包里有没有运行时'],
-      ['payload-hash', '文件哈希比对', '无法确认 4000 多个文件的字节内容与构建时一致'],
-    ]
+    const unverified = framework === 'flutter'
+      ? [
+        ['payload', '载荷完整性', '安装包里装了什么，一个文件都没解开看过'],
+        ['payload-flutter-arch', '载荷内 Flutter 主程序架构', '无法确认装到 Windows 上的原生 exe 架构'],
+        ['payload-hash', '文件哈希比对', '无法确认载荷文件的字节内容与构建时一致'],
+      ]
+      : [
+        ['payload', '载荷完整性', '安装包里装了什么，一个文件都没解开看过'],
+        ['payload-node-arch', '载荷内 node.exe 架构', '无法确认装到 Windows 上的是 32 位还是 64 位运行时'],
+        ['required-node.exe', '必需文件 node.exe', '无法确认安装包里有没有运行时'],
+        ['payload-hash', '文件哈希比对', '无法确认 4000 多个文件的字节内容与构建时一致'],
+      ]
     for (const [id, title, detail] of unverified) {
       report.add(new VerifyItem(id, title, 'warn', detail, true))
     }
@@ -531,16 +537,30 @@ export async function verifyArtifact(input) {
     // 必需文件：不管什么项目都必须有。
     // 路径基准是「载荷内的相对路径」——NSIS 的 `File /r "app\*.*"`
     // 展开的是 app 的内容，所以载荷里没有 `app/` 这一层前缀。
-    const required = ['node.exe', 'bootstrap/bootstrap.mjs', 'bootstrap/launch.json']
-    const names = entries.map((entry) => stripAppPrefix(entry.path.split('\\').join('/')))
-    for (const requiredPath of required) {
-      const found = names.some((name) => name === requiredPath || name.endsWith(`/${requiredPath}`))
+    const names = entries
+      .filter((entry) => !entry.isDir)
+      .map((entry) => stripAppPrefix(entry.path.split('\\').join('/')))
+    // Flutter 的主程序名由用户项目决定，不能写死。载荷里 `flutter/` 下
+    // 任意一个 .exe 都算主程序候选；真正的架构校验在下面逐个做。
+    let flutterLauncher = null
+    if (framework === 'flutter') {
+      flutterLauncher = names.find((name) => name.startsWith('flutter/') && name.toLowerCase().endsWith('.exe')) ?? null
       report.add(new VerifyItem(
-        `required-${requiredPath}`,
-        `必需文件 ${requiredPath.split('/').pop()}`,
-        found ? 'pass' : 'fail',
-        found ? '在载荷中' : '载荷里找不到',
+        'required-flutter-launcher',
+        '必需文件 Flutter 主程序',
+        flutterLauncher === null ? 'fail' : 'pass',
+        flutterLauncher === null ? '载荷里 flutter/ 下找不到 .exe' : `在载荷中：${flutterLauncher}`,
       ))
+    } else {
+      for (const requiredPath of ['node.exe', 'bootstrap/bootstrap.mjs', 'bootstrap/launch.json']) {
+        const found = names.some((name) => name === requiredPath || name.endsWith(`/${requiredPath}`))
+        report.add(new VerifyItem(
+          `required-${requiredPath}`,
+          `必需文件 ${requiredPath.split('/').pop()}`,
+          found ? 'pass' : 'fail',
+          found ? '在载荷中' : '载荷里找不到',
+        ))
+      }
     }
 
     // --- 逐个比对哈希 ---
@@ -565,7 +585,7 @@ export async function verifyArtifact(input) {
     try {
       await run(sevenZip, ['x', '-y', `-o${tempDir}`, artifact], { maxBuffer: 64 * 1024 * 1024 })
 
-      // 解出来的 node.exe 架构必须与目标一致。
+      // 解出来的运行时/原生壳架构必须与目标一致。
       const extractedNode = join(tempDir, 'app', 'node.exe')
       if (await isFile(extractedNode)) {
         const nodePe = await checkWindowsExe(extractedNode, { gui: false })
@@ -579,6 +599,29 @@ export async function verifyArtifact(input) {
             ? nodePe.problems.join('；')
             : `${nodeHeader.format} / ${nodeHeader.machineName}（需要 ${wantNode}）`,
         ))
+      }
+
+      if (framework === 'flutter') {
+        const wantMain = expectTarget === 'x64' ? 'x86-64' : 'i386'
+        if (flutterLauncher === null) {
+          report.add(new VerifyItem(
+            'payload-flutter-arch',
+            '载荷内 Flutter 主程序架构',
+            'fail',
+            'Flutter 发布目录里找不到 .exe',
+          ))
+        } else {
+          const mainPe = await checkWindowsExe(join(tempDir, 'app', flutterLauncher), { gui: true })
+          const mainHeader = mainPe.header
+          report.add(new VerifyItem(
+            'payload-flutter-arch',
+            '载荷内 Flutter 主程序架构',
+            mainHeader !== null && mainHeader.machineName === wantMain ? 'pass' : 'fail',
+            mainHeader === null
+              ? mainPe.problems.join('；')
+              : `${flutterLauncher}：${mainHeader.format} / ${mainHeader.machineName}（需要 ${wantMain}）`,
+          ))
+        }
       }
 
       if (Array.isArray(expectedManifest) && expectedManifest.length > 0) {
@@ -685,6 +728,25 @@ function parseSltListing(listing) {
 
 
 /**
+ * 在解开的产物根目录里找 Flutter 主程序。
+ *
+ * 名字不能写死：Flutter 项目改名后主 exe 也跟着改名，
+ * 所以按 `flutter/` 下的第一个 .exe 识别。
+ */
+async function findFlutterLauncher(rootDir) {
+  try {
+    const names = await readdir(join(rootDir, 'flutter'))
+    const launcher = names.find((name) => name.toLowerCase().endsWith('.exe')) ?? null
+    if (launcher === null) return null
+    // zip 里的路径是 `<产品名>/flutter/<exe>`，而 NSIS 载荷里
+    // 是 `flutter/<exe>`。统一返回相对于载荷根的写法。
+    return join('flutter', launcher)
+  } catch {
+    return null
+  }
+}
+
+/**
  * 校验一个目录（免安装形态）。
  *
  * zip 产物没有 NSIS 那层包装，直接查目录结构即可。
@@ -755,7 +817,7 @@ export async function verifyDirectory(appDir, expectedManifest, expectTarget = '
  * @returns {Promise<VerifyReport>}
  */
 export async function verifyZip(input) {
-  const { artifact, expectedManifest, onProgress, expectTarget = 'x86' } = input
+  const { artifact, expectedManifest, onProgress, expectTarget = 'x86', framework = null } = input
   const report = new VerifyReport(artifact)
 
   if (!(await isFile(artifact))) {
@@ -801,31 +863,58 @@ export async function verifyZip(input) {
       /* 保持 tempDir */
     }
 
-    const required = ['node.exe', 'bootstrap/bootstrap.mjs', 'bootstrap/launch.json']
-    for (const requiredPath of required) {
-      const found = await isFile(join(rootDir, requiredPath))
+    const isFlutter = framework === 'flutter'
+      || (framework === null && await findFlutterLauncher(rootDir) !== null)
+    if (isFlutter) {
+      const launcher = await findFlutterLauncher(rootDir)
       report.add(new VerifyItem(
-        `required-${requiredPath}`,
-        `必需文件 ${requiredPath.split('/').pop()}`,
-        found ? 'pass' : 'fail',
-        found ? '在压缩包中' : '压缩包里找不到',
+        'required-flutter-launcher',
+        '必需文件 Flutter 主程序',
+        launcher === null ? 'fail' : 'pass',
+        launcher === null ? '压缩包里 flutter/ 下找不到 .exe' : `在压缩包中：${launcher}`,
       ))
+    } else {
+      for (const requiredPath of ['node.exe', 'bootstrap/bootstrap.mjs', 'bootstrap/launch.json']) {
+        const found = await isFile(join(rootDir, requiredPath))
+        report.add(new VerifyItem(
+          `required-${requiredPath}`,
+          `必需文件 ${requiredPath.split('/').pop()}`,
+          found ? 'pass' : 'fail',
+          found ? '在压缩包中' : '压缩包里找不到',
+        ))
+      }
     }
 
     // --- 运行时架构 ---
-    const nodePath = join(rootDir, 'node.exe')
-    if (await isFile(nodePath)) {
-      const nodePe = await checkWindowsExe(nodePath, { gui: false })
-      const header = nodePe.header
-      const wantNode = expectTarget === 'x64' ? 'x86-64' : 'i386'
-      report.add(new VerifyItem(
-        'node-arch',
-        '运行时架构',
-        header !== null && header.machineName === wantNode ? 'pass' : 'fail',
-        header === null
-          ? nodePe.problems.join('；')
-          : `${header.format} / ${header.machineName}（需要 ${wantNode}）`,
-      ))
+    const wantArch = expectTarget === 'x64' ? 'x86-64' : 'i386'
+    if (isFlutter) {
+      const launcher = await findFlutterLauncher(rootDir)
+      if (launcher === null) {
+        report.add(new VerifyItem('payload-flutter-arch', '载荷内 Flutter 主程序架构', 'fail', 'Flutter 发布目录里找不到 .exe'))
+      } else {
+        const mainPe = await checkWindowsExe(join(rootDir, launcher), { gui: true })
+        const header = mainPe.header
+        report.add(new VerifyItem(
+          'payload-flutter-arch',
+          '载荷内 Flutter 主程序架构',
+          header !== null && header.machineName === wantArch ? 'pass' : 'fail',
+          header === null ? mainPe.problems.join('；') : `${launcher}：${header.format} / ${header.machineName}（需要 ${wantArch}）`,
+        ))
+      }
+    } else {
+      const nodePath = join(rootDir, 'node.exe')
+      if (await isFile(nodePath)) {
+        const nodePe = await checkWindowsExe(nodePath, { gui: false })
+        const header = nodePe.header
+        report.add(new VerifyItem(
+          'node-arch',
+          '运行时架构',
+          header !== null && header.machineName === wantArch ? 'pass' : 'fail',
+          header === null
+            ? nodePe.problems.join('；')
+            : `${header.format} / ${header.machineName}（需要 ${wantArch}）`,
+        ))
+      }
     }
 
     // --- 逐文件哈希 ---

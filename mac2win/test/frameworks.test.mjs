@@ -10,7 +10,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { detectFramework, inferForFramework, checkFrameworkTarget, FRAMEWORKS } from '../src/core/frameworks.mjs'
+import { detectFramework, inferForFramework, checkFrameworkTarget, describeCapabilities, FRAMEWORKS } from '../src/core/frameworks.mjs'
+import { resolveConfig, FRAMEWORK_BUILD_COMMANDS } from '../src/core/config.mjs'
 
 /** 建一个临时项目目录。 */
 async function makeProject(files) {
@@ -38,6 +39,43 @@ test('识别 Tauri：靠 src-tauri 目录', async () => {
   }
 })
 
+test('识别 Flutter：靠 pubspec.yaml', async () => {
+  const root = await makeProject({
+    'pubspec.yaml': 'name: demo\nenvironment:\n  sdk: ">=3.0.0 <4.0.0"\n',
+    'windows/CMakeLists.txt': 'cmake_minimum_required(VERSION 3.14)\n',
+  })
+  try {
+    const result = await detectFramework(root)
+    assert.equal(result.id, 'flutter')
+    assert.equal(result.confidence, 'high')
+    assert.match(result.evidence.join(''), /pubspec/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Flutter 发布目录从真实 .exe 推断', async () => {
+  const root = await makeProject({
+    'pubspec.yaml': 'name: demo\n',
+    'build/windows/x64/runner/Release/demo.exe': 'MZ',
+    'build/windows/x64/runner/Release/data/flutter_assets/AssetManifest.json': '{}',
+  })
+  try {
+    const inferred = await inferForFramework('flutter', root, null)
+    assert.equal(inferred.flutterReleaseDir, 'build/windows/x64/runner/Release')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Flutter x86 与 x64 都允许，但描述必须写清 Windows 构建边界', () => {
+  assert.equal(checkFrameworkTarget('flutter', 'x86').ok, true)
+  assert.equal(checkFrameworkTarget('flutter', 'x64').ok, true)
+  const lines = describeCapabilities('flutter').join('\n')
+  assert.match(lines, /Windows/)
+  assert.match(lines, /原生窗口：包含/)
+})
+
 test('识别 Electron：靠依赖', async () => {
   const root = await makeProject({
     'package.json': { name: 'app', devDependencies: { electron: '^43.0.0' } },
@@ -49,6 +87,49 @@ test('识别 Electron：靠依赖', async () => {
     assert.equal(result.confidence, 'high')
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('常见框架的默认构建命令与显式配置优先级', async () => {
+  assert.equal(FRAMEWORK_BUILD_COMMANDS.electron, 'npm run build')
+  assert.equal(FRAMEWORK_BUILD_COMMANDS.tauri, 'npm run tauri build')
+  assert.equal(FRAMEWORK_BUILD_COMMANDS.flutter, null)
+
+  const tauriRoot = await makeProject({
+    'src-tauri/Cargo.toml': '[package]\nname = "app"',
+    'package.json': { name: 'app', dependencies: { '@tauri-apps/api': '^2.0.0' } },
+    'dist/index.html': '<!doctype html><title>app</title>',
+  })
+  try {
+    const tauriConfig = await resolveConfig({ projectRoot: tauriRoot })
+    assert.equal(tauriConfig.framework, 'tauri')
+    assert.equal(tauriConfig.buildCommand, 'npm run tauri build')
+  } finally {
+    await rm(tauriRoot, { recursive: true, force: true })
+  }
+
+  const root = await makeProject({
+    'pubspec.yaml': 'name: demo\n',
+    'build/windows/x64/runner/Release/demo.exe': 'MZ',
+    'dist/index.html': '<!doctype html><title>demo</title>',
+    'mac2win.config.json': { buildCommand: 'echo custom' },
+  })
+  try {
+    const config = await resolveConfig({ projectRoot: root, overrides: { buildCommand: 'echo cli' } })
+    assert.equal(config.framework, 'flutter')
+    assert.equal(config.buildCommand, 'echo cli', '命令行应覆盖配置文件')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('覆盖所有已知框架的默认构建命令门禁', async () => {
+  for (const [id, expected] of Object.entries(FRAMEWORK_BUILD_COMMANDS)) {
+    assert.ok(FRAMEWORKS[id] !== undefined, `${id} 必须在 FRAMEWORKS 里登记`)
+    assert.ok(expected === null || typeof expected === 'string', `${id} 的默认命令形态不对`)
+  }
+  for (const id of Object.keys(FRAMEWORKS)) {
+    assert.ok(id in FRAMEWORK_BUILD_COMMANDS, `${id} 缺默认构建命令`)
   }
 })
 

@@ -12,6 +12,7 @@
  * | Electron | 官方预编译二进制 | 全都能（含 ia32） | ia32 只到 Electron 43 |
  * | NW.js | 官方预编译二进制 | 全都能（含 win-ia32） | 无 |
  * | Tauri | Rust 编译产物 | Node/前端层能，Rust 壳不能 | 需 Windows 工具链 |
+ * | Flutter | 用户预构建的原生 exe | 只重打包已构建产物 | Flutter 强制要求 Windows 宿主 |
  * | 纯 Node | 无 | 全都能 | 无 |
  * | 静态站 | 无 | 全都能 | 无 |
  *
@@ -79,6 +80,21 @@ export const FRAMEWORKS = {
     description: 'Tauri 默认只打包其 Node/前端层；要原生窗口需显式开启 Rust 壳编译',
     defaultEntry: 'dist',
   },
+  flutter: {
+    id: 'flutter',
+    label: 'Flutter',
+    /*
+     * Flutter 的 Windows 产物是原生 exe + 一组数据目录，不是 Node 项目。
+     * macOS 上不能跑 `flutter build windows`（2026-11-23 实测 3.50.0
+     * 的 `build_windows.dart` 明确拒绝非 Windows host），所以 mac2win
+     * 只负责把用户在 Windows 上编好的发布目录重打成 NSIS 安装包。
+     */
+    architectures: ['x86', 'x64'],
+    nativeShell: true,
+    runtime: null,
+    description: 'Flutter Windows 发布产物：由用户在 Windows 上构建，mac2win 负责重打包为安装包',
+    defaultEntry: null,
+  },
   node: {
     id: 'node',
     label: 'Node 服务',
@@ -134,6 +150,12 @@ export async function detectFramework(projectRoot, hints = {}) {
   const deps = {
     ...(pkg?.dependencies ?? {}),
     ...(pkg?.devDependencies ?? {}),
+  }
+
+  // --- Flutter：pubspec.yaml 是最硬的目录特征，优先于 package.json ---
+  if (await isFile(join(projectRoot, 'pubspec.yaml'))) {
+    evidence.push('存在 pubspec.yaml')
+    return { id: 'flutter', confidence: 'high', evidence }
   }
 
   // --- Tauri：目录特征最硬 ---
@@ -193,6 +215,24 @@ export async function detectFramework(projectRoot, hints = {}) {
  */
 export async function inferForFramework(frameworkId, projectRoot, pkg) {
   const inferred = {}
+
+  if (frameworkId === 'flutter') {
+    // 默认发布目录，可被 mac2win.config.json 覆盖。
+    const { readdir } = await import('node:fs/promises')
+    for (const candidate of [
+      'build/windows/x64/runner/Release',
+      'build/windows/runner/Release',
+    ]) {
+      const dir = join(projectRoot, candidate)
+      if (await isDirectory(dir)) {
+        const names = await readdir(dir)
+        if (names.some((name) => name.toLowerCase().endsWith('.exe'))) {
+          inferred.flutterReleaseDir = candidate
+          break
+        }
+      }
+    }
+  }
 
   if (frameworkId === 'electron') {
     // Electron 的入口由 package.json 的 main 决定，默认 main.js。
@@ -299,6 +339,9 @@ export function describeCapabilities(frameworkId) {
 
   if (framework.nativeShell) {
     lines.push('原生窗口：包含（由框架自带的预编译壳提供）')
+    if (frameworkId === 'flutter') {
+      lines.push('构建边界：Flutter Windows 产物须由用户在 Windows 上执行 flutter build windows 生成')
+    }
   } else if (frameworkId === 'tauri') {
     /*
      * 这句此前写的是「Rust 壳需要 Windows 工具链，无法在 arm64 mac 上编译」。

@@ -48,7 +48,7 @@ import {
   stageResources,
   writeLaunchManifest,
 } from './stager.mjs'
-import { writeNsisScript } from './nsis.mjs'
+import { win, writeNsisScript } from './nsis.mjs'
 import { verifyArtifact, verifyZip } from '../verify/artifact.mjs'
 import { zipDirectory } from './zipwriter.mjs'
 import { copyFile, copyTree, humanBytes, isDirectory, isFile, measureTree, remove, walkFiles } from '../util/fsx.mjs'
@@ -224,18 +224,27 @@ export class Builder {
      * - 其余形态它就是应用本体。
      */
     const framework = this.config.framework
-    const nodeRuntime = await ensureRuntime({
-      version: config.runtimeVersion,
-      archive: config.runtimeArchive,
-      checksum: config.runtimeChecksum,
-      // 架构必须传下去：不传就会一律下 win-x86，
-      // 于是 --target x64 得到的是 32 位包。
-      target: config.target,
-      onProgress: (message) => { this.logger.info(message) },
-    })
-    this.logger.success(
-      `Node 运行时就绪 v${nodeRuntime.version}，SHA-256 ${nodeRuntime.sha256.slice(0, 16)}…${nodeRuntime.fromCache ? '（缓存）' : ''}`,
-    )
+    /*
+     * Flutter Windows 产物自带原生 exe，不需要 Node 运行时；下载一份
+     * 只会徒增体积，还会让校验器误把 node.exe 当成应用入口。
+     */
+    let nodeRuntime = null
+    if (framework !== 'flutter') {
+      nodeRuntime = await ensureRuntime({
+        version: config.runtimeVersion,
+        archive: config.runtimeArchive,
+        checksum: config.runtimeChecksum,
+        // 架构必须传下去：不传就会一律下 win-x86，
+        // 于是 --target x64 得到的是 32 位包。
+        target: config.target,
+        onProgress: (message) => { this.logger.info(message) },
+      })
+      this.logger.success(
+        `Node 运行时就绪 v${nodeRuntime.version}，SHA-256 ${nodeRuntime.sha256.slice(0, 16)}…${nodeRuntime.fromCache ? '（缓存）' : ''}`,
+      )
+    } else {
+      this.logger.info('Flutter 原生产物不需要 Node 运行时')
+    }
 
     let shellRuntime = null
     if (framework === 'electron') {
@@ -349,6 +358,7 @@ export class Builder {
         scriptPath,
         iconFile: config.iconFile,
         licenseFile: config.licenseFile,
+        launcherTarget: this.launcherTarget ?? undefined,
       })
       result.scriptPath = scriptPath
       await this.compileNsis(scriptPath)
@@ -414,12 +424,14 @@ export class Builder {
             artifact: target.path,
             expectedManifest: manifest,
             expectTarget: config.target,
+            framework: config.framework,
             onProgress: (message) => { this.logger.debug(message) },
           })
           : await verifyZip({
             artifact: target.path,
             expectedManifest: manifest,
             expectTarget: config.target,
+            framework: config.framework,
             onProgress: (message) => { this.logger.debug(message) },
           })
 
@@ -590,7 +602,7 @@ export class Builder {
     const launcherSource = join(here, '..', 'launcher', 'bootstrap.mjs')
     const shimSource = join(here, '..', 'launcher', 'shim.js')
 
-    // 运行时：所有形态都需要（Electron / NW.js 也用它跑启动器）
+    // 运行时：除 Flutter 外所有形态都需要（Electron / NW.js 也用它跑启动器）
     /*
      * 文件名跟 `launcherExe` 走，不写死 `node.exe`。
      *
@@ -599,13 +611,18 @@ export class Builder {
      * 这两处必须用同一个真源。
      */
     const runtimeName = config.launcherExe ?? 'node.exe'
-    await copyFile(nodeRuntime.nodePath, join(appDir, runtimeName))
-    this.logger.debug(`${runtimeName} ${humanBytes((await stat(join(appDir, runtimeName))).size)}`)
+    let launcherTarget = null
+    if (nodeRuntime !== null) {
+      await copyFile(nodeRuntime.nodePath, join(appDir, runtimeName))
+      this.logger.debug(`${runtimeName} ${humanBytes((await stat(join(appDir, runtimeName))).size)}`)
 
-    // 启动器与垫片
-    await copyFile(launcherSource, join(bootstrapDir, 'bootstrap.mjs'))
-    await copyFile(shimSource, join(bootstrapDir, 'shim.js'))
-    this.logger.debug('启动器已就位')
+      // 启动器与垫片
+      await copyFile(launcherSource, join(bootstrapDir, 'bootstrap.mjs'))
+      await copyFile(shimSource, join(bootstrapDir, 'shim.js'))
+      this.logger.debug('启动器已就位')
+      launcherTarget = win('$INSTDIR', 'app', runtimeName)
+    }
+    this.launcherTarget = launcherTarget
 
     /** 前端产物目录：三种形态都要，垫片注入靠它。 */
     let uiDir = join(appDir, 'ui')
@@ -661,6 +678,15 @@ export class Builder {
         this.logger.info(injected.injected ? '已向 NW.js 前端注入桌面壳垫片' : `垫片未注入：${injected.reason}`)
       }
       uiDir = nwDir
+    } else if (framework === 'flutter') {
+      // --- Flutter：原生产物整目录复制，快捷方式直接指向它的 exe ---
+      const releaseDir = config.flutterReleaseDir
+      const names = await readdir(releaseDir)
+      const exeName = names.find((name) => name.toLowerCase().endsWith('.exe'))
+      await copyTree(releaseDir, join(appDir, 'flutter'))
+      this.shellExeName = exeName
+      launcherTarget = win('$INSTDIR', 'app', 'flutter', config.flutterLauncherRelative ?? exeName)
+      this.logger.info(`Flutter 产物已就位，主程序 ${exeName}，${String(names.length)} 个顶层条目`)
     } else {
       // --- Tauri / Node / 静态站：启动器 + 静态服务 ---
       if (config.frontendDist !== null) {
@@ -749,15 +775,18 @@ export class Builder {
      */
     const shellExe = this.rustExe !== undefined && this.rustExe !== null
       ? `tauri/${this.shellExeName ?? this.rustExe.split('/').pop()}`
+      : framework === 'flutter'
+        ? `flutter/${this.shellExeName ?? ''}`
       : shellRuntime === null
         ? null
         : framework === 'electron'
           ? `electron/${this.shellExeName ?? shellRuntime.exeName}`
           : `nwjs/${this.shellExeName ?? shellRuntime.exeName}`
 
-    await writeLaunchManifest({
-      bootstrapDir,
-      manifest: {
+    if (nodeRuntime !== null) {
+      await writeLaunchManifest({
+        bootstrapDir,
+        manifest: {
         framework,
         entry: config.entry !== null && hostRoot !== null
           ? config.entry.slice(hostRoot.length).replace(/^[\\/]/, '')
@@ -772,8 +801,9 @@ export class Builder {
         version: config.version,
         builtAt: new Date().toISOString(),
         target: config.target,
-      },
-    })
+        },
+      })
+    }
 
     // 写一份人可读的说明进安装目录，用户装完能知道这是什么。
     const capabilityLines = describeCapabilities(framework)
@@ -789,14 +819,18 @@ export class Builder {
         ...capabilityLines.map((line) => `  ${line}`),
         '',
         '目录说明：',
-        '  app/node.exe                 Windows x86 Node 运行时',
-        '  app/bootstrap/               启动器',
+        ...(framework === 'flutter'
+          ? ['  app/flutter/                 Flutter Windows 发布目录（主程序与资源）']
+          : [
+            '  app/node.exe                 Windows x86 Node 运行时',
+            '  app/bootstrap/               启动器',
+          ]),
         ...(framework === 'electron' ? ['  app/electron/                Electron 运行时与项目文件'] : []),
         ...(framework === 'nwjs' ? ['  app/nwjs/                    NW.js 运行时与项目文件'] : []),
         ...(framework === 'tauri' || framework === 'node' || framework === 'static'
           ? ['  app/ui/                      前端页面', '  app/host/                    宿主服务与依赖']
           : []),
-        '  app/data/                    运行期数据（首次启动时创建）',
+        ...(framework === 'flutter' ? [] : ['  app/data/                    运行期数据（首次启动时创建）']),
         '',
       ].join('\n'),
       'utf8',

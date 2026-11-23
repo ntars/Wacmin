@@ -40,7 +40,7 @@ function hostPath(path) {
 }
 
 /** 用 Windows 分隔符拼路径。`win('$INSTDIR', 'app', 'node.exe')`。 */
-function win(...parts) {
+export function win(...parts) {
   return parts.filter((part) => part !== '' && part !== undefined).join(WIN)
 }
 
@@ -121,8 +121,16 @@ export function renderNsisScript(input) {
    * 而不是绕一层 node。
    */
   const launcherName = config.launcherExe ?? 'node.exe'
-  const exeTarget = win('$INSTDIR', 'app', launcherName)
-  const launcherArg = win('$INSTDIR', 'app', 'bootstrap', 'bootstrap.mjs')
+  /*
+   * 快捷方式目标。`launcherTarget` 由暂存阶段决定：
+   * - 常规形态指向 app/node.exe，并带 bootstrap.mjs 参数；
+   * - Flutter 原生产物指向 app/flutter/<主程序>.exe，不带参数。
+   * 让 NSIS 与暂存区共享同一个真源，避免改名后快捷方式指向空气。
+   */
+  const exeTarget = input.launcherTarget ?? win('$INSTDIR', 'app', launcherName)
+  const launcherArg = input.launcherTarget === undefined
+    ? ` '"${win('$INSTDIR', 'app', 'bootstrap', 'bootstrap.mjs')}"'`
+    : ''
 
   /*
    * 卸载信息在注册表里的位置。
@@ -227,14 +235,14 @@ export function renderNsisScript(input) {
   lines.push('  ; node.exe 是 GUI 子系统的 nsExec 桩，双击不弹控制台窗口。')
   lines.push(`  CreateDirectory "${startMenuDir}"`)
   lines.push(
-    `  CreateShortCut "${win(startMenuDir, `${name}.lnk`)}" "${exeTarget}" '"${launcherArg}"' "${exeTarget}" 0`,
+    `  CreateShortCut "${win(startMenuDir, `${name}.lnk`)}" "${exeTarget}"${launcherArg} "${exeTarget}" 0`,
   )
   lines.push(
     `  CreateShortCut "${win(startMenuDir, `卸载 ${name}.lnk`)}" "$INSTDIR${WIN}uninstall.exe"`,
   )
   if (config.desktopShortcut) {
     lines.push(
-      `  CreateShortCut "${win('$DESKTOP', `${name}.lnk`)}" "${exeTarget}" '"${launcherArg}"' "${exeTarget}" 0`,
+      `  CreateShortCut "${win('$DESKTOP', `${name}.lnk`)}" "${exeTarget}"${launcherArg} "${exeTarget}" 0`,
     )
   }
   lines.push('')

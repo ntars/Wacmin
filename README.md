@@ -1742,7 +1742,7 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 }
 ```
 
-**全部 52 个可配置项（含新框架支持）**：
+**全部 48 个可配置项**：
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
@@ -1775,9 +1775,6 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 | `rustProfile` | `"release"` | Rust 编译 profile |
 | `flutterReleaseDir` | 自动探测 | Flutter Windows 发布目录；须由 Windows 上的 `flutter build windows --release` 生成 |
 | `flutterLauncherRelative` | `null` | Flutter 主程序在发布目录内的相对路径；默认取找到的第一个 `.exe` |
-| `flutterBuildMode` | `"release"` | Flutter 构建模式：`release` 或 `debug` |
-| `flutterAutoBuild` | `false` | 是否在 macOS 上自动触发 Flutter Windows 构建（需要 sshpass 或 SSH key） |
-| `flutterProjectRoot` | `null` | Flutter 项目根目录（当与主项目不同时） |
 | `iconFile` | `null` | 安装包图标，须为 `.ico` |
 | `licenseFile` | `null` | 安装向导展示的许可文件 |
 | `outDir` | `"dist-mac2win"` | 输出目录（相对项目根，或绝对路径） |
@@ -1789,15 +1786,14 @@ node contracts/validate.mjs --report /tmp/report.json --exit-code 0
 | `requireAdmin` | `false` | 安装是否需要管理员权限 |
 | `keepStaging` | `false` | 保留中间 staging 目录，排查问题时打开 |
 | `mode` | `"release"` | 构建模式：`release` 或 `debug` |
+| `neutralino` | `{ enabled: false, appName: null }` | Neutralino.js 相关配置（对象） |
+| `reactNativeDesktop` | `{ enabled: false }` | React Native Desktop 相关配置（对象） |
 | `electronDevTools` | `false` | 是否启用 Electron 开发者工具（仅 NW.js SDK 模式有效） |
 | `electronAutoBuild` | `true` | 是否在构建前自动执行项目构建命令 |
 | `nwjsDevTools` | `false` | NW.js 是否启用开发者工具（sdk 模式自动开启） |
 | `nwjsAutoBuild` | `true` | 是否在构建前自动执行项目构建命令 |
 | `tauriVersion` | `"auto"` | Tauri 版本：具体版本号或 `auto`（自动从 Cargo.toml 推断） |
 | `tauriAutoBuild` | `true` | 是否在构建前自动执行项目构建命令 |
-| `neutralino.enabled` | `false` | 是否启用 Neutralino.js 特定优化 |
-| `neutralino.appName` | `null` | 应用名（默认从 package.json 推断） |
-| `reactNativeDesktop.enabled` | `false` | 是否启用 React Native Desktop 特定优化 |
 
 **配置合并顺序**（后者覆盖前者）：
 
@@ -2898,7 +2894,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 2 | 9.1 契约文件表 | 「七段位分配」 | 同上是 9 个 | 与 #1 同源 |
 | 3 | 8.2 快速开始 | `open "~/Applications/MyApp (Win).app"` | 引号里的 `~` 不会被 shell 展开，`open` 报 `~/Applications/... does not exist`。**这条照抄必然失败** | 命令不可执行。注意上一行 `install -o "~/..."` 是对的——`wepack` 自己 `expanduser()`，差别在 `open` 是外部进程 |
 | 4 | 6.4 间接依赖 | 「七个模块（**五个**方向、`console`、`ai`、`contracts`）」 | 方向只有 4 个（`mac2win`/`exeonmac`/`win2mac`/`apponwin`），7 = 4 + 3 | 括号内的加法不成立 |
-| 5 | 附录 C 第 2 项 | 32 个配置项 / 14 项外部工具 / 10 个子命令族 | 9.2 表 **39** 行（与 `config.mjs` 的 `DEFAULTS` 39 键一致）、6.2 表 **18** 行（`NOTICE` 第三章同为 18 行）、10.1 表 **6** 行 | 三个数字全过期 |
+| 5 | 附录 C 第 2 项 | 32 个配置项 / 14 项外部工具 / 10 个子命令族 | 9.2 表 **48** 行（与 `config.mjs` 的 `DEFAULTS` 48 键一致）、6.2 表 **18** 行（`NOTICE` 第三章同为 18 行）、10.1 表 **6** 行 | 三个数字全过期 |
 | 6 | 附录 C 第 3 项 | 二十条亮点 | 实际 **25** 个（含「亮点十五之二」「之三」） | 漏数 |
 | 7 | 5.10.4 与 18.1 | 「已踩过的实例见 18.5」/「见 15.2」 | 实例在 **15.3**（«文档与实现的三次偏离»）；15.2 是 exeonmac 真机实测、18.5 是文档同步要求 | 交叉引用指错两处 |
 | 8 | 附录 C 第 6 项 | 测试规模（**16**）、校验项数（**15.5**） | 测试计数表在 **12.1**（16 是更新日志）；校验项数在 **15.6** | 引用指错两处 |
@@ -2954,7 +2950,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 
 | 附录 C 的说法 | 真源 | 读法 |
 |---|---|---|
-| 39 个配置项（9.2） | `mac2win/src/core/config.mjs` 的 `DEFAULTS` | `import` 后数键，并与 9.2 首表行数**交叉验证** |
+| 48 个配置项（9.2） | `mac2win/src/core/config.mjs` 的 `DEFAULTS` | `import` 后数键，并与 9.2 首表行数**交叉验证** |
 | 13 个环境变量（9.3） | 9.3 表 | 数数据行 |
 | 18 项外部工具（6.2） | 6.2 表 | 数数据行，并与 `NOTICE` 第三章**交叉验证** |
 | 6 个子命令族（10.1） | 10.1 首表 | 数数据行 |
@@ -2963,11 +2959,11 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | `NOTICE` 十三节 | `NOTICE` 顶层编号章 | 数 `## 一、`…，并校验章号从 1 起连续 |
 | 校验项 11 项（15.6） | 15.6 表 | 数数据行 |
 
-**为什么必须交叉验证**：配置项在代码（`DEFAULTS` 39 键）与文档（9.2 表 39 行）各存一份，外部工具在 6.2 与 `NOTICE` 第三章各存一份。只对附录 C 与其中一侧，另一侧漂了照样绿。实测注掉交叉验证后，把 `DEFAULTS` 加一个键、9.2 表不动，守卫只报「附录 C 写 39、实际 40」，**不会告诉你 9.2 表也过期了**。
+**为什么必须交叉验证**：配置项在代码（`DEFAULTS` 48 键）与文档（9.2 表 48 行）各存一份，外部工具在 6.2 与 `NOTICE` 第三章各存一份。只对附录 C 与其中一侧，另一侧漂了照样绿。实测注掉交叉验证后，把 `DEFAULTS` 加一个键、9.2 表不动，守卫只报「附录 C 写 39、实际 40」，**不会告诉你 9.2 表也过期了**。
 
 **接入点只有一个**：`contracts/doc-counts.mjs --check` 现在同时跑 12.1 与附录 C。CI 的 `ci.yml` 与 18.2 检查块早就在跑这条命令，因此无需改 workflow，也就不会出现「新命令没人记得跑」。另有三个只跑一半的入口 `--check-counts` / `--check-appendix` / `--check-tables`（2026-11-22 新增），专供测试夹具用 —— 12.1 的夹具只造两份 README，附录 C 的夹具还要 `NOTICE` 与 `config.mjs`，混在一个入口会让两边都被迫造一堆无关文件。
 
-**负向验证（9 条，全部有效）**：8 个数字各改一处 → 每个都被点名，报错格式统一为「附录 C 写 X ⟨事实⟩，实际 Y（⟨真源⟩）」，例如 `附录 C 写 38 配置项数，实际 52（config.mjs 的 DEFAULTS 键数）`。另加一组「真源变化、附录 C 不动」：9.3 表加一行、`DEFAULTS` 加一键、`NOTICE` 第三章加一行、删一个亮点标题 —— 四种都被抓到。**注回旧实现**（去掉 `checkAppendix` 那一行）→ `appendix-guard.test.mjs` 立刻 **9 项变红**，还原后 32/32 绿。
+**负向验证（9 条，全部有效）**：8 个数字各改一处 → 每个都被点名，报错格式统一为「附录 C 写 X ⟨事实⟩，实际 Y（⟨真源⟩）」，例如 `附录 C 写 38 配置项数，实际 48（config.mjs 的 DEFAULTS 键数）`。另加一组「真源变化、附录 C 不动」：9.3 表加一行、`DEFAULTS` 加一键、`NOTICE` 第三章加一行、删一个亮点标题 —— 四种都被抓到。**注回旧实现**（去掉 `checkAppendix` 那一行）→ `appendix-guard.test.mjs` 立刻 **9 项变红**，还原后 32/32 绿。
 
 **这一条与 12.1 是同一个病的两个病灶**：12.1 治的是「测试计数」，附录 C 治的是「文档事实」，共同点是**数字由人数、没有复算路径**。只要一个数字存在两处而没有脚本对账，它迟早会分叉 —— 差别只是被人发现，还是被用户发现。
 
@@ -3157,7 +3153,7 @@ grep -rn "telemetry\|analytics\|sentry\|google-analytics" \
 | 层次 | 结论 | 依据 |
 |---|---|---|
 | Rust 交叉编译链本身 | **成立**。能编出 `PE32 / i386 / windows-GUI` | 自写探针 `rsprobe`：92160 字节，`file` 判为 `PE32 executable (GUI) Intel 80386, for MS Windows` |
-| Tauri **整棵依赖树**编译+链接 | **成立**。`tauri 2.12.7` + `wry 0.57.3` + `tao 0.37.3` + `webview2-com 0.39.1` 全部链接成 PE | 探针 `linkprobe`：1096192 字节，`PE32 executable (GUI) Intel 80386` |
+| Tauri **整棵依赖树**编译+链接 | **成立**。`tauri 2.12.7` + `wry 0.57.3` + `tao 0.37.3` + `webview2-com 0.48.1` 全部链接成 PE | 探针 `linkprobe`：1096192 字节，`PE32 executable (GUI) Intel 80386` |
 | Tauri **完整项目**（含 `build.rs` 资源节） | **不成立**。卡在 `llvm-rc`，且 `brew install llvm` 解决不了 | `tauri-winres 0.3.7` panic：`NotAttempted("llvm-rc")` |
 
 **所以「arm64 mac 编不出 Windows x86 程序」这句话是错的**（前两层的实测已证伪），但「完整 Tauri 项目能一次编成带图标和版本信息的原生窗口 exe」这句话**目前也不成立**（第三层卡住）。两句都不许写成定论 —— 它们的真值取决于你说的「编出」是哪一层。
@@ -5506,7 +5502,7 @@ git push -u origin main
 | # | 检查项 | 结论 |
 |---|---|---|
 | 1 | 是否还有口语化表达或歧义句 | 已检查。全文采用书面语，无感叹号与省略号制造的随意感；术语首次出现处给出定义 |
-| 2 | 是否遗漏核心功能、配置项或依赖 | 已补全。39 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1）。数字与 `mac2win/src/core/config.mjs` 的 `DEFAULTS`（39 键）、`NOTICE` 第三章（18 行）、10.1 表（6 行）逐项对齐 |
+| 2 | 是否遗漏核心功能、配置项或依赖 | 已补全。48 个配置项全表（9.2）、13 个环境变量全表（9.3）、18 项外部工具七要素表（6.2）、6 个子命令族（10.1）。数字与 `mac2win/src/core/config.mjs` 的 `DEFAULTS`（48 键）、`NOTICE` 第三章（18 行）、10.1 表（6 行）逐项对齐 |
 | 3 | 每个亮点是否都有具体依据 | 二十五条亮点均含「亮点名称 / 价值 / 实现方式 / 差异化 / 证据」五段，证据全部为实测数据或可复现命令 |
 | 4 | 设计细节是否都写明 | 第 5 章 11 节，覆盖异常输入与边界、超时重试降级容错、缓存与性能、并发与一致性、存储优化、安全防护、体验微决策、默认值理由、跨平台策略 |
 | 5 | 第三方项目、版权、许可证是否完整出现在 README 与 NOTICE | 第 6 章 + `NOTICE` 十三节，两处信息一致 |

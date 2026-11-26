@@ -1742,7 +1742,7 @@ Place `mac2win.config.json` at the project root (or `mac2win.json`; the first on
 }
 ```
 
-**All 52 configurable keys (including new framework support)**:
+**All 48 configurable keys (including nested object fields)**:
 
 | Key | Default | Description |
 |---|---|---|
@@ -2880,7 +2880,7 @@ The three cases above were found by accident. On 2026-11-19 a **mechanical** aud
 | 2 | 9.1 contract-file table | "seven-segment allocation" | 9, as above | Same root as #1 |
 | 3 | 8.2 quick start | `open "~/Applications/MyApp (Win).app"` | A `~` inside quotes is not expanded by the shell; `open` reports `~/Applications/... does not exist`. **Copying this line always fails** | Non-executable command. Note the preceding `install -o "~/..."` is correct—`wepack` calls `expanduser()` itself; the difference is that `open` is an external process |
 | 4 | 6.4 transitive dependencies | "seven modules (**five** directions, `console`, `ai`, `contracts`)" | There are only 4 directions (`mac2win`/`exeonmac`/`win2mac`/`apponwin`), and 7 = 4 + 3 | The arithmetic inside the parentheses does not hold |
-| 5 | Appendix C item 2 | 32 configuration keys / 14 external tools / 10 subcommand families | 9.2 has **39** rows (matching `DEFAULTS` in `config.mjs`, 39 keys), 6.2 has **18** rows (`NOTICE` chapter 3 also has 18), 10.1 has **6** rows | All three numbers stale |
+| 5 | Appendix C item 2 | 32 configuration keys / 14 external tools / 10 subcommand families | 9.2 has **48** rows (matching `DEFAULTS` in `config.mjs`, 48 keys), 6.2 has **18** rows (`NOTICE` chapter 3 also has 18), 10.1 has **6** rows | All three numbers stale |
 | 6 | Appendix C item 3 | twenty highlights | Actually **25** (including "Highlight 15b" and "15c") | Undercounted |
 | 7 | 5.10.4 and 18.1 | "instances are in 18.5" / "in 15.2" | The instances are in **15.3** (*Three Divergences Between Documentation and Implementation*); 15.2 is the ExeOnMac real-run measurement and 18.5 is the documentation-sync requirement | Two cross-references pointing at the wrong section |
 | 8 | Appendix C item 6 | test sizes (**16**), check counts (**15.5**) | The test-count table is **12.1** (16 is the changelog); the check counts are in **15.6** | Two more wrong references |
@@ -2936,7 +2936,7 @@ The to-do left by the previous section is now closed. Appendix C contains eight 
 
 | What Appendix C claims | Real source | How it is read |
 |---|---|---|
-| 39 configuration keys (9.2) | `DEFAULTS` in `mac2win/src/core/config.mjs` | `import` and count keys, **cross-checked** against the row count of the first 9.2 table |
+| 48 configuration keys (9.2) | `DEFAULTS` in `mac2win/src/core/config.mjs` | `import` and count keys, **cross-checked** against the row count of the first 9.2 table |
 | 13 environment variables (9.3) | the 9.3 table | count data rows |
 | 18 external tools (6.2) | the 6.2 table | count data rows, **cross-checked** against `NOTICE` chapter 3 |
 | 6 subcommand families (10.1) | the first 10.1 table | count data rows |
@@ -2945,7 +2945,7 @@ The to-do left by the previous section is now closed. Appendix C contains eight 
 | 13 `NOTICE` chapters | top-level numbered chapters | count `## 一、`… and verify numbering is contiguous from 1 |
 | 11 artifact checks (15.6) | the 15.6 table | count data rows |
 
-**Why cross-checking is mandatory**: configuration keys live in two places (39 keys in `DEFAULTS`, 39 rows in the 9.2 table) and external tools in two (`6.2` and `NOTICE` chapter 3). Comparing Appendix C against only one side leaves the other free to drift. Measured: with the cross-check disabled, adding a key to `DEFAULTS` while leaving the 9.2 table untouched reports only "Appendix C says 39, actual 40" — it **never tells you the 9.2 table is stale too**.
+**Why cross-checking is mandatory**: configuration keys live in two places (48 keys in `DEFAULTS`, 48 rows in the 9.2 table) and external tools in two (`6.2` and `NOTICE` chapter 3). Comparing Appendix C against only one side leaves the other free to drift. Measured: with the cross-check disabled, adding a key to `DEFAULTS` while leaving the 9.2 table untouched reports only "Appendix C says 48, actual 48" — it **never tells you the 9.2 table is stale too**.
 
 **One entry point only**: `contracts/doc-counts.mjs --check` now runs both 12.1 and Appendix C. `ci.yml` and the 18.2 check block already invoke that command, so no workflow change is needed and no new command can be forgotten. Three half-entry points, `--check-counts`, `--check-appendix` and `--check-tables` (added 2026-11-22), exist purely for test fixtures — the 12.1 fixtures build two READMEs, while the Appendix C fixtures also need `NOTICE` and `config.mjs`; merging them would force both sets to construct unrelated files.
 
@@ -5484,7 +5484,7 @@ Responding item by item to the ten requirements in chapter 5 of `README提示词
 | # | Check | Conclusion |
 |---|---|---|
 | 1 | Any colloquialisms or ambiguous sentences | Checked. The whole document is written in formal prose, free of exclamation marks and ellipsis-driven casualness; terms are defined at first use |
-| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 39 configuration keys (9.2), 13 environment variables (9.3), 18 external tools with all seven attributes (6.2), 6 subcommand families (10.1). Counts verified against `DEFAULTS` in `mac2win/src/core/config.mjs` (39 keys), `NOTICE` chapter 3 (18 rows) and the 10.1 table (6 rows) |
+| 2 | Core features, configuration keys or dependencies omitted | Completed. Full table of 48 configuration keys (9.2), 13 environment variables (9.3), 18 external tools with all seven attributes (6.2), 6 subcommand families (10.1). Counts verified against `DEFAULTS` in `mac2win/src/core/config.mjs` (48 keys), `NOTICE` chapter 3 (18 rows) and the 10.1 table (6 rows) |
 | 3 | Every highlight has concrete evidence | All twenty-five highlights follow the five-part structure (name / value / implementation / differentiation / evidence), with evidence drawn from measurement or reproducible commands |
 | 4 | All design details recorded | Chapter 5, eleven sections, covering abnormal input and boundaries, timeout/retry/degradation/fault tolerance, caching and performance, concurrency and consistency, storage optimisation, security measures, micro UX decisions, default-value rationale, cross-platform strategy |
 | 5 | Third-party projects, copyright and licences fully present in README and NOTICE | Chapter 6 plus the thirteen sections of `NOTICE`, consistent between the two |

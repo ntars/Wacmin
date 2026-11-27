@@ -22,7 +22,7 @@ Wacmin is a bidirectional interoperability suite between macOS and Windows: four
 
 ## 一、项目名称与定位
 
-> **仓库描述 / Description**：`Wacmin —— 打破 macOS 与 Windows 的架构限制，四个方向实现双向互通（mac2win / exeonmac / win2mac / apponwin） | Breaking the macOS-Windows architecture barrier: four directions for two-way interop, each usable on its own.`
+> **仓库描述 / Description**：`打破 macOS 与 Windows 的架构限制：mac2win / exeonmac / win2mac / apponwin 四向互通 | Four-way macOS-Windows app interoperability: mac2win, exeonmac, win2mac and apponwin.`
 >
 > **话题标签 / Topics**（20 个，仅英文）：`apple-silicon`, `arm64`, `cross-compilation`, `cross-compile`, `developer-tools`, `electron`, `exe`, `ia32`, `interop`, `macos`, `nsis`, `nwjs`, `packaging`, `tauri`, `windows`, `windows-installer`, `wine`, `x86`, `cross-platform`, `app-migration`
 
